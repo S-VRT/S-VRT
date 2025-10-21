@@ -1,0 +1,133 @@
+# ============================================
+# 快速测试配置 - 用于验证代码重构
+# Quick Test Configuration - For Code Refactoring Validation
+# ============================================
+
+SEED: 123
+
+# ============================================
+# 数据配置 (Data Configuration)
+# ============================================
+DATA:
+  ROOT: data/processed/gopro_spike_unified
+  TRAIN_SPLIT: train
+  VAL_SPLIT: val
+  CROP_SIZE: 128  # 减小尺寸以加快测试
+  CLIP_LEN: 5
+  K: 32
+  NUM_VOXEL_BINS: 32
+  VOXEL_CACHE_DIRNAME: spike_vox
+  SPIKE_DIR: spike
+  USE_PRECOMPUTED_VOXELS: true
+  USE_RAM_CACHE: true
+  CACHE_SIZE_GB: 0.5  # 减小缓存
+  IMAGE_EXTS: [".png", ".jpg", ".jpeg", ".bmp"]
+  ALIGN_LOG_PATHS: ["outputs/logs/align_x4k1000fps.txt"]
+  NORM:
+    MEAN: 0.0
+    STD: 1.0
+
+# ============================================
+# 模型配置 (Model Configuration)
+# ============================================
+MODEL:
+  USE_SPIKE: true
+  VRT_CFG: third_party/VRT/options/deblur/vrt_base.yaml
+  CHANNELS_PER_SCALE:
+  - 64  # 减小通道数
+  - 64
+  - 64
+  - 64
+  LAYERS: 4
+  
+  VRT:
+    USE_CHECKPOINT_ATTN: true
+    USE_CHECKPOINT_FFN: true
+  
+  SPIKE_TSA:
+    HEADS: 4
+    ADAPTIVE_CHUNK: true
+    MAX_BATCH_TOKENS: 49152
+    CHUNK_SIZE: 64
+    CHUNK_SHAPE: "square"
+  
+  FUSE:
+    TYPE: TemporalCrossAttn
+    HEADS: 4
+    ADAPTIVE_CHUNK: true
+    MAX_BATCH_TOKENS: 49152
+    CHUNK_SIZE: 64
+    CHUNK_SHAPE: "square"
+
+# ============================================
+# 数据加载硬件资源配置
+# ============================================
+DATALOADER:
+  TOTAL_WORKERS: 6  # 减少worker数量
+  TRAIN_PREFETCH_FACTOR: 2
+  VAL_PREFETCH_FACTOR: 2
+  PIN_MEMORY: true
+  PERSISTENT_WORKERS: false
+
+# ============================================
+# 训练配置 (Training Configuration)
+# ============================================
+TRAIN:
+  RESUME_FROM_CHECKPOINT: false
+  CHECKPOINT_PATH: null
+  
+  EPOCHS: 1  # 只训练1个epoch用于测试
+  
+  BATCH_SIZE: 1
+  VAL_BATCH_SIZE: 1
+  
+  COMPILE_MODEL: false
+  GRADIENT_ACCUMULATION_STEPS: 2  # 减小梯度累积
+  MAX_GRAD_NORM: 1.0
+  
+  OPTIM:
+    TYPE: adamw
+    LR: 1e-4
+    BETAS:
+    - 0.9
+    - 0.99
+    WEIGHT_DECAY: 1e-4
+  
+  SCHED:
+    TYPE: cosine
+    WARMUP_STEPS: 10  # 减少预热步数
+
+# ============================================
+# 损失函数配置 (Loss Configuration)
+# ============================================
+LOSS:
+  CHARBONNIER:
+    DELTA: 1e-3
+    WEIGHT: 1.0
+  
+  VGG_PERCEPTUAL:
+    LAYERS:
+    - relu3_3
+    WEIGHT: 0.1
+
+# ============================================
+# 日志和检查点配置
+# ============================================
+LOG:
+  TENSORBOARD: true
+  SAVE_DIR: outputs/test_refactor  # 使用独立的输出目录
+  VAL_EVERY_STEPS: 20  # 更频繁的验证
+  
+  ENABLE_TIMING_LOG: true
+  TIMING_CONSOLE: true
+  TIMING_FILE: true
+  TIMING_CONSOLE_INTERVAL: 5
+  TIMING_FILE_INTERVAL: 10
+
+# ============================================
+# 测试配置 (Test Configuration)
+# ============================================
+TEST:
+  BATCH_SIZE: 1
+  NUM_WORKERS: 2
+

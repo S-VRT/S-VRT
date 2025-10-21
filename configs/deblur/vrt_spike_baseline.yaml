@@ -1,0 +1,244 @@
+# ============================================
+# VRT-Spike 基线配置文件
+# 用于视频去模糊任务，结合了VRT (Video Restoration Transformer) 和 Spike Camera
+# ============================================
+
+SEED: 123  # 随机种子，用于确保实验可复现性
+
+# ============================================
+# 数据配置 (Data Configuration)
+# ============================================
+DATA:
+  ROOT: data/processed/gopro_spike_unified  # 数据集根目录，包含处理后的GoPro和Spike数据
+  TRAIN_SPLIT: train  # 训练集分割名称
+  VAL_SPLIT: val  # 验证集分割名称
+  CROP_SIZE: 256  # 训练时随机裁剪的图像尺寸 (256x256)
+  CLIP_LEN: 5  # 视频片段长度（帧数），用于时序建模
+  K: 32  # Spike数据的采样数量或分辨率参数
+  NUM_VOXEL_BINS: 32  # Number of temporal bins for spike voxelization
+                       # Spike体素化的时间bins数量，用于将稀疏事件转换为密集表示
+  VOXEL_CACHE_DIRNAME: spike_vox  # 预计算体素数据的缓存目录名
+  SPIKE_DIR: spike  # Directory containing .dat files
+                    # Spike原始数据目录，包含.dat格式的脉冲数据文件
+  USE_PRECOMPUTED_VOXELS: true  # Use pre-generated voxels for faster loading
+                                # 是否使用预计算的体素数据，可显著加快数据加载速度
+  USE_RAM_CACHE: true  # Enable LRU cache with memory limit (recommended for training speed)
+                       # 启用LRU内存缓存，推荐用于提升训练速度（缓存预处理的数据）
+  # IMPORTANT: With multiple DataLoader workers, EACH worker creates its own dataset and cache!
+  # Total RAM = CACHE_SIZE_GB × num_GPUs × workers_per_GPU
+  # Example: 1.5GB × 3 GPUs × 8 workers/GPU = 36GB total
+  # For 256GB RAM system with 24 total workers (cpu*0.6), use ~1.5GB per cache to stay under 50GB
+  # 重要：多个DataLoader worker时，每个worker都会创建自己的数据集和缓存！
+  # 总内存使用 = CACHE_SIZE_GB × GPU数量 × 每GPU的worker数
+  # 示例：1.5GB × 3 GPUs × 8 workers/GPU = 36GB 总计
+  # 对于256GB RAM系统，24个workers (cpu*0.6)，每个缓存使用~1.5GB可保持在50GB以下
+  CACHE_SIZE_GB: 1.5  # Maximum cache memory in GB per dataset instance (was 2.0, reduced further for stability)
+                      # 每个数据集实例的最大缓存内存(GB)，为了稳定性从2.0降低至1.5
+  IMAGE_EXTS: [".png", ".jpg", ".jpeg", ".bmp"]  # Supported image extensions
+                                                  # 支持的图像文件扩展名列表
+  ALIGN_LOG_PATHS: ["outputs/logs/align_x4k1000fps.txt"]  # Alignment log paths
+                                                           # 时间对齐日志文件路径，用于Spike和RGB数据同步
+  NORM:  # 数据归一化配置
+    MEAN: 0.0  # 归一化均值（0.0表示不做mean normalization）
+    STD: 1.0  # 归一化标准差（1.0表示不做std normalization）
+
+# ============================================
+# 模型配置 (Model Configuration)
+# ============================================
+MODEL:
+  USE_SPIKE: true  # Use spike integration (set to false for VRT-only baseline)
+                   # 是否使用Spike数据集成（设为false则为纯VRT基线）
+  VRT_CFG: third_party/VRT/options/deblur/vrt_base.yaml  # VRT模型的配置文件路径
+  CHANNELS_PER_SCALE:  # 每个尺度的通道数配置（多尺度特征金字塔）
+  - 96  # 第1层的通道数
+  - 96  # 第2层的通道数
+  - 96  # 第3层的通道数
+  - 96  # 第4层的通道数
+  LAYERS: 4  # 模型层数
+  
+  # VRT Gradient Checkpointing Settings
+  # Enables gradient checkpointing to save GPU memory at the cost of computation speed
+  # - true: Lower memory usage (~90% reduction), slower backward pass (~2-3x)
+  # - false: Higher memory usage, faster backward pass
+  # VRT 梯度检查点设置
+  # 启用梯度检查点可以节省GPU内存，但会增加计算时间
+  # - true: 内存使用降低（约90%减少），反向传播变慢（约2-3倍）
+  # - false: 内存使用较高，反向传播较快
+  VRT:
+    USE_CHECKPOINT_ATTN: true   # Checkpoint attention layers (default: true)
+                                # 对注意力层使用检查点（默认：true）
+    USE_CHECKPOINT_FFN: true    # Checkpoint feed-forward layers (default: true)
+                                # 对前馈网络层使用检查点（默认：true）
+  
+  # Spike时序自注意力配置
+  SPIKE_TSA:
+    HEADS: 4  # 多头注意力的头数
+    ADAPTIVE_CHUNK: true  # 是否启用自适应分块（根据GPU内存动态调整）
+    MAX_BATCH_TOKENS: 49152  # 每批次最大token数量，用于控制内存使用
+    CHUNK_SIZE: 64  # 分块大小（像素单位）
+    CHUNK_SHAPE: "square"  # 分块形状：square（正方形）或其他
+  
+  # 特征融合配置（Spike和VRT特征的融合方式）
+  FUSE:
+    TYPE: TemporalCrossAttn  # 融合类型：时序交叉注意力
+    HEADS: 4  # 多头注意力的头数
+    ADAPTIVE_CHUNK: true  # 是否启用自适应分块
+    MAX_BATCH_TOKENS: 49152  # 每批次最大token数量
+    CHUNK_SIZE: 64  # 分块大小
+    CHUNK_SHAPE: "square"  # 分块形状
+  
+  # VRT window size: [T, H, W] or single int for H=W (default: [CLIP_LEN, 8, 8])
+  # VRT窗口大小：[时间, 高度, 宽度] 或单个整数表示高宽相等（默认：[CLIP_LEN, 8, 8]）
+  # WINDOW_SIZE: 8
+  # VRT image size for test (default: 256x256)
+  # VRT测试时的图像尺寸（默认：256x256）
+  # IMG_SIZE_H: 256
+  # IMG_SIZE_W: 256
+
+# ============================================
+# 数据加载硬件资源配置 (独立于训练配置)
+# DataLoader Hardware Configuration (Independent from Training Config)
+# ============================================
+DATALOADER:
+  # CPU Worker配置 - 控制数据加载的并行度
+  # CPU Worker Configuration - Controls data loading parallelism
+  # 选项:
+  # Options:
+    # - "auto": 自动使用80%的CPU核心 (推荐，40核*0.8=32 workers)
+    #           Automatically use 80% of CPU cores (recommended, 40 cores * 0.8 = 32 workers)
+    # - "cpu*0.6": 使用60%的CPU核心 (40核*0.6=24 workers, 显著降低内存压力)
+    #              Use 60% of CPU cores (40 cores * 0.6 = 24 workers, significantly reduces memory pressure)
+    # - "cpu*0.7": 使用70%的CPU核心 (40核*0.7=28 workers, 降低内存压力)
+    #              Use 70% of CPU cores (40 cores * 0.7 = 28 workers, reduces memory pressure)
+  #   - 整数: 直接指定总worker数，会在所有GPU间平均分配
+  #           Integer: Directly specify total number of workers, will be evenly distributed across all GPUs
+  TOTAL_WORKERS: "cpu*0.9"  # 减少到60%以进一步降低内存 (was cpu*0.7)
+                            # Reduced to 60% to further decrease memory usage (was cpu*0.7)
+  
+  # 训练和验证的worker数 (可选，不设置则自动计算)
+  # Number of workers for training and validation (optional, auto-calculated if not set)
+  # TRAIN_WORKERS: "auto"  # 如果不设置，自动为 TOTAL_WORKERS / GPU数量
+  #                          If not set, automatically equals TOTAL_WORKERS / number of GPUs
+  # VAL_WORKERS: "auto"    # 如果不设置，自动为 TRAIN_WORKERS / 2
+  #                          If not set, automatically equals TRAIN_WORKERS / 2
+  
+  # Prefetch配置 - 控制预取批次数
+  # Prefetch Configuration - Controls the number of batches to prefetch
+  # 降低prefetch factor以减少内存中的缓冲batch数量
+  # Lower prefetch factor to reduce the number of buffered batches in memory
+  # 内存占用 ≈ num_workers × prefetch_factor × batch_size × data_size
+  # Memory usage ≈ num_workers × prefetch_factor × batch_size × data_size
+  TRAIN_PREFETCH_FACTOR: 2   # 降低到2以减少内存 (was 4)
+                             # Reduced to 2 to decrease memory usage (was 4)
+  VAL_PREFETCH_FACTOR: 2     # 验证时预取2个批次
+                             # Prefetch 2 batches during validation
+  
+  # 内存配置
+  # Memory Configuration
+  PIN_MEMORY: true           # 启用pin memory加速GPU传输
+                             # Enable pinned memory to accelerate GPU transfer
+  PERSISTENT_WORKERS: false  # 禁用persistent workers以释放内存 (was true, trade speed for stability)
+                             # Disable persistent workers to free memory (was true, trades speed for stability)
+
+# ============================================
+# 训练配置 (Training Configuration)
+# ============================================
+TRAIN:
+  # ============================================
+  # 训练续跑配置 (Resume Training)
+  # Resume Training Configuration
+  # ============================================
+  RESUME_FROM_CHECKPOINT: false  # true: 从最新checkpoint继续训练, false: 从头开始
+                                 # true: resume from latest checkpoint, false: start from scratch
+  CHECKPOINT_PATH: null          # 可选：指定具体checkpoint路径，null则自动找最新的
+                                 # Optional: specify checkpoint path, null to auto-find latest
+  
+  EPOCHS: 20  # 训练总轮数
+  
+  # DDP communication gradient compression (requires torch<2.2)
+  # DDP通信梯度压缩（需要torch<2.2）
+  # DDP_COMPRESSION: "fp16"  # "bf16" or "fp16"
+  #                            可选："bf16"或"fp16"，用于减少分布式训练时的通信开销
+
+  # Batch size settings
+  # 批次大小设置
+  BATCH_SIZE: 1  # Per-GPU batch size
+                 # 每个GPU的批次大小
+  VAL_BATCH_SIZE: 1  # Validation batch size
+                     # 验证时的批次大小
+  
+  # Note: DataLoader worker and prefetch settings are configured in the DATALOADER section above
+  # This enables automatic hardware optimization based on your CPU/GPU configuration
+  # 注意：DataLoader的worker和prefetch设置在上面的DATALOADER部分配置
+  # 这样可以根据你的CPU/GPU配置自动进行硬件优化
+  
+  # Training optimization
+  # 训练优化设置
+  COMPILE_MODEL: false  # Disabled: incompatible with VRT's checkpoint.checkpoint (causes AssertionError in torch.dynamo)
+                        # 已禁用：与VRT的checkpoint.checkpoint不兼容（会导致torch.dynamo的AssertionError）
+  GRADIENT_ACCUMULATION_STEPS: 6  # Accumulate gradients over N steps (reduced from 12 since batch_size doubled)
+                                  # 梯度累积步数（从12降低，因为batch_size加倍了）
+                                  # 有效批次大小 = BATCH_SIZE × GPU数量 × GRADIENT_ACCUMULATION_STEPS
+  MAX_GRAD_NORM: 1.0  # Gradient clipping norm
+                      # 梯度裁剪范数，防止梯度爆炸
+  
+  # 优化器配置
+  OPTIM:
+    TYPE: adamw         # Optimizer type: "adamw" (default) or "adamw8bit" (saves ~75% optimizer memory)
+                        # 优化器类型："adamw"（默认）或"adamw8bit"（节省约75%优化器内存）
+    LR: 1e-4  # Reduced from 2e-4 to improve stability (NaN fix)
+              # 学习率，从2e-4降低到1e-4以提高稳定性（修复NaN问题）
+    BETAS:  # Adam优化器的beta参数
+    - 0.9   # beta1: 一阶矩估计的指数衰减率
+    - 0.99  # beta2: 二阶矩估计的指数衰减率
+    WEIGHT_DECAY: 1e-4  # 权重衰减（L2正则化系数）
+  
+  # 学习率调度器配置
+  SCHED:
+    TYPE: cosine  # 调度器类型：余弦退火
+    WARMUP_STEPS: 256  # 预热步数，学习率从0线性增加到初始LR
+
+# ============================================
+# 损失函数配置 (Loss Configuration)
+# ============================================
+LOSS:
+  # Charbonnier损失（L1损失的平滑变体，对异常值更鲁棒）
+  CHARBONNIER:
+    DELTA: 1e-3  # 平滑参数，控制在0附近的平滑度
+    WEIGHT: 1.0  # 损失权重
+  
+  # VGG感知损失（使用预训练VGG网络提取特征，用于感知质量）
+  VGG_PERCEPTUAL:
+    LAYERS:  # 使用的VGG层
+    - relu3_3  # VGG的relu3_3层，提取中层特征
+    WEIGHT: 0.1  # 感知损失的权重（相对于Charbonnier损失）
+
+# ============================================
+# 日志和检查点配置 (Logging and Checkpoint Configuration)
+# ============================================
+LOG:
+  TENSORBOARD: true  # 是否启用TensorBoard记录训练曲线
+  SAVE_DIR: outputs  # 日志和检查点的保存目录
+  VAL_EVERY_STEPS: 1000  # 每隔多少步进行一次验证
+  
+  # Timing Logger 配置
+  # Timing Logger Configuration
+  ENABLE_TIMING_LOG: true        # 是否启用耗时日志
+                                 # Whether to enable timing logs
+  TIMING_CONSOLE: true           # 终端显示
+                                 # Display in console
+  TIMING_FILE: true              # 文件记录
+                                 # Record to file
+  TIMING_CONSOLE_INTERVAL: 10    # 终端更新间隔（每N个step）
+                                 # Console update interval (every N steps)
+  TIMING_FILE_INTERVAL: 50       # 文件刷新间隔（每N个step）
+                                 # File flush interval (every N steps)
+
+# ============================================
+# 测试配置 (Test Configuration)
+# ============================================
+TEST:
+  BATCH_SIZE: 1  # Test batch size
+                 # 测试批次大小
+  NUM_WORKERS: 2  # Test DataLoader workers
+                  # 测试时DataLoader的worker数量

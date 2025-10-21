@@ -1,0 +1,23 @@
+numpy>=1.23
+PyYAML>=6.0
+Pillow>=9.5
+einops>=0.6
+opencv-python>=4.8
+timm>=0.9
+yacs>=0.1.8
+tqdm>=4.65
+tensorboard>=2.13
+lpips>=0.1.4
+scipy>=1.10
+scikit-image>=0.21
+basicsr>=1.4.2
+# Install torch/torchvision appropriate to your CUDA/CPU environment:
+# For CPU-only (example):
+# torch==2.2.2+cpu
+# torchvision==0.17.2+cpu
+# For CUDA, visit: https://pytorch.org/get-started/locally/
+torch
+torchvision
+psutil>=5.9
+
+
