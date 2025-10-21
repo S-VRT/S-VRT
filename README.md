@@ -1,6 +1,6 @@
-# GoPro+Spike Video Deblurring
+# S-VRT: Spike-Enhanced Video Restoration Transformer
 
-Video deblurring using VRT (Video Restoration Transformer) with spike camera data fusion.
+GoPro+Spike Video Deblurring using VRT (Video Restoration Transformer) with spike camera data fusion.
 
 ## 🚀 Quick Start
 
@@ -221,4 +221,3 @@ If you use this code, please cite:
 ```bash
 python src/train.py --config configs/deblur/vrt_spike_baseline.yaml
 ```
-
