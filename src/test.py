@@ -22,6 +22,7 @@ from models.network_vrt import VRT  # type: ignore
 from src.data.datasets.spike_deblur_dataset import SpikeDeblurDataset
 from src.data.collate_fns import safe_spike_deblur_collate
 from src.models.integrate_vrt import VRTWithSpike
+from src.utils.path_manager import get_config_from_exp_dir, get_checkpoint_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,6 +38,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tile_overlap", type=int, default=32, help="Overlap between tiles")
     parser.add_argument("--enable_tiling", action="store_true", help="Force enable tiling even for small images")
     parser.add_argument("--disable_tiling", action="store_true", help="Disable tiling and process full images")
+    parser.add_argument("--exp_dir", type=str, default=None, help="Path to experiment directory (overrides config for loading)")
+    parser.add_argument("--checkpoint", type=str, default="best", help="Checkpoint to load: filename, 'best', or 'last'")
     return parser.parse_args()
 
 
@@ -239,8 +242,16 @@ def tile_inference(
 
 def main() -> None:
     args = parse_args()
-    with open(args.config, "r", encoding="utf-8") as f:
-        cfg: Dict = yaml.safe_load(f)
+    if args.exp_dir:
+        exp_dir = Path(args.exp_dir)
+        config_path = get_config_from_exp_dir(exp_dir)
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg: Dict = yaml.safe_load(f)
+        checkpoint_path = get_checkpoint_path(exp_dir, args.checkpoint)
+    else:
+        # old behavior
+        with open(args.config, "r", encoding="utf-8") as f:
+            cfg: Dict = yaml.safe_load(f)
     
     # Set environment variable for collate_fn to use
     save_dir = cfg["LOG"].get("SAVE_DIR", "outputs")
@@ -295,7 +306,24 @@ def main() -> None:
     img_size_h = int(cfg.get("MODEL", {}).get("IMG_SIZE_H", 256))
     img_size_w = int(cfg.get("MODEL", {}).get("IMG_SIZE_W", 256))
     
-    deform_groups = int(cfg.get("MODEL", {}).get("DEFORM_GROUPS", 12))
+    # CRITICAL: Must match training! VRT default is 16
+    deform_groups = int(cfg.get("MODEL", {}).get("DEFORM_GROUPS", 16))
+    
+    # Spike parameters (must be read BEFORE creating VRT to set embed_dims correctly)
+    spike_bins = int(cfg["DATA"]["K"])
+    
+    # CRITICAL: Read CHANNELS_PER_SCALE from config (must match training!)
+    # Default changed from [120]*7 to [96]*4 to match typical training config
+    channels_per_scale = cfg.get("MODEL", {}).get("CHANNELS_PER_SCALE", [96, 96, 96, 96])
+    
+    # Debug: Print the configuration being used
+    print(f"[test.py] channels_per_scale from config: {channels_per_scale}")
+    
+    # Configure VRT embed_dims to match training configuration
+    # Stage 1-4 use channels_per_scale, stages 5-7 and 8 extend with the last value
+    stage_channels = channels_per_scale
+    embed_dims_cfg = stage_channels + [stage_channels[-1]] * 3 + [stage_channels[-1]] * 6
+    print(f"[test.py] Final embed_dims_cfg for VRT: {embed_dims_cfg} (length={len(embed_dims_cfg)})")
 
     vrt = VRT(
         upscale=1,
@@ -303,12 +331,9 @@ def main() -> None:
         out_chans=3,
         img_size=[clip_len, img_size_h, img_size_w],
         window_size=window_size,
+        embed_dims=embed_dims_cfg,  # CRITICAL: Must match training config
         deformable_groups=deform_groups,
     )
-    
-    # Spike parameters
-    spike_bins = int(cfg["DATA"]["K"])
-    channels_per_scale = cfg.get("MODEL", {}).get("CHANNELS_PER_SCALE", [120] * 7)
     tsa_heads = int(cfg.get("MODEL", {}).get("SPIKE_TSA", {}).get("HEADS", 4))
     fuse_heads = int(cfg.get("MODEL", {}).get("FUSE", {}).get("HEADS", 4))
     
@@ -354,13 +379,78 @@ def main() -> None:
         fuse_mlp_ratio=fuse_mlp_ratio,
         fuse_chunk_cfg=fuse_chunk_cfg,
     ) if use_spike else vrt
+    
+    # Load checkpoint if specified or from exp_dir
+    if args.exp_dir:
+        print(f"[test.py] Loading checkpoint from: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        
+        # Handle different checkpoint formats
+        if "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
+        
+        # Load state dict
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+        if missing_keys:
+            print(f"[test.py] Warning: Missing keys in checkpoint: {missing_keys[:5]}{'...' if len(missing_keys) > 5 else ''}")
+        if unexpected_keys:
+            print(f"[test.py] Warning: Unexpected keys in checkpoint: {unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}")
+        print(f"[test.py] Checkpoint loaded successfully!")
+    else:
+        # Old checkpoint finding logic
+        checkpoint_path = cfg.get("TEST", {}).get("CHECKPOINT_PATH") or cfg.get("TRAIN", {}).get("CHECKPOINT_PATH")
+        if checkpoint_path is None:
+            # Auto-find the latest checkpoint in outputs/ckpts/
+            ckpt_dir = Path(cfg.get("LOG", {}).get("SAVE_DIR", "outputs")) / "ckpts"
+            if ckpt_dir.exists():
+                ckpt_files = list(ckpt_dir.glob("*.pth"))
+                if ckpt_files:
+                    # Use 'last.pth' if it exists, otherwise use the most recent file
+                    last_ckpt = ckpt_dir / "last.pth"
+                    if last_ckpt.exists():
+                        checkpoint_path = str(last_ckpt)
+                    else:
+                        checkpoint_path = str(max(ckpt_files, key=lambda p: p.stat().st_mtime))
+        
+        if checkpoint_path:
+            print(f"[test.py] Loading checkpoint from: {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            
+            # Handle different checkpoint formats
+            if "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+            elif "model" in checkpoint:
+                state_dict = checkpoint["model"]
+            else:
+                state_dict = checkpoint
+            
+            # Load state dict
+            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+            if missing_keys:
+                print(f"[test.py] Warning: Missing keys in checkpoint: {missing_keys[:5]}{'...' if len(missing_keys) > 5 else ''}")
+            if unexpected_keys:
+                print(f"[test.py] Warning: Unexpected keys in checkpoint: {unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}")
+            print(f"[test.py] Checkpoint loaded successfully!")
+        else:
+            print("[test.py] WARNING: No checkpoint found! Using randomly initialized weights.")
+    
     model = model.to(device)
     model.eval()
 
-    out_dir = Path(cfg["LOG"].get("SAVE_DIR", "outputs")) / "visuals" if not use_dir_api else Path(args.output)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    metrics_dir = Path(cfg["LOG"].get("SAVE_DIR", "outputs")) / "metrics"
-    metrics_dir.mkdir(parents=True, exist_ok=True)
+    if args.exp_dir:
+        out_dir = exp_dir / "test_results" / "visuals" if not use_dir_api else Path(args.output)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        metrics_dir = exp_dir / "test_results" / "metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        out_dir = Path(cfg["LOG"].get("SAVE_DIR", "outputs")) / "visuals" if not use_dir_api else Path(args.output)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        metrics_dir = Path(cfg["LOG"].get("SAVE_DIR", "outputs")) / "metrics"
+        metrics_dir.mkdir(parents=True, exist_ok=True)
 
     torch.cuda.reset_peak_memory_stats(device) if device.type == 'cuda' else None
     t0 = time.time()

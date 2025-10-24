@@ -19,6 +19,10 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
 import yaml
 
+import datetime
+import shutil
+from src.utils.path_manager import create_experiment_dir
+
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
 
@@ -45,6 +49,7 @@ from models.network_vrt import VRT  # type: ignore
 
 from src.data.datasets.spike_deblur_dataset import SpikeDeblurDataset
 from src.data.collate_fns import safe_spike_deblur_collate
+from src.data.preprocessing import get_preprocessor
 from src.losses import CharbonnierLoss, VGGPerceptualLoss
 from src.models.integrate_vrt import VRTWithSpike
 from src.utils.timing_logger import TimingLogger, set_global_timing_logger
@@ -351,7 +356,10 @@ def main() -> None:
     rank, world_size, local_rank = setup_distributed()
     is_main_process = (rank == 0)
     
-    with open(args.config, "r", encoding="utf-8") as f:
+    exp_dir = create_experiment_dir(REPO_ROOT, Path(args.config))
+
+    # Then load cfg from the snapshot to ensure consistency
+    with open(exp_dir / "configs" / Path(args.config).name, "r", encoding="utf-8") as f:
         cfg: Dict = yaml.safe_load(f)
 
     # Multi-GPU setup
@@ -367,18 +375,13 @@ def main() -> None:
     else:
         device = torch.device(args.device)
         num_gpus = 0
-    save_root = REPO_ROOT / cfg["LOG"]["SAVE_DIR"]
-    (save_root / "logs").mkdir(parents=True, exist_ok=True)
-    (save_root / "ckpts").mkdir(parents=True, exist_ok=True)
-    (save_root / "visuals").mkdir(parents=True, exist_ok=True)
-    (save_root / "metrics").mkdir(parents=True, exist_ok=True)
     
     # Set environment variable for collate_fn to use
-    os.environ["DEBLUR_SAVE_DIR"] = str(save_root)
+    # os.environ["DEBLUR_SAVE_DIR"] = str(exp_dir) # Assuming not needed, or set to str(exp_dir)
 
     # Seed & TensorBoard
     set_seed(int(cfg.get("SEED", 123)))
-    writer = SummaryWriter(log_dir=str(save_root / "logs" / "tb")) if cfg["LOG"].get("TENSORBOARD", True) else None
+    writer = SummaryWriter(log_dir=str(exp_dir / "logs" / "tb")) if cfg["LOG"].get("TENSORBOARD", True) else None
     progress_every = int(cfg["LOG"].get("PROGRESS_EVERY_STEPS", 20))
     
     # Setup timing logger
@@ -386,7 +389,7 @@ def main() -> None:
     timing_logger = None
     if enable_timing_log and is_main_process:
         timing_logger = TimingLogger(
-            log_dir=save_root / "logs",
+            log_dir=exp_dir / "logs",
             enable_console=cfg["LOG"].get("TIMING_CONSOLE", True),
             enable_file=cfg["LOG"].get("TIMING_FILE", True),
             console_update_interval=cfg["LOG"].get("TIMING_CONSOLE_INTERVAL", 10),
@@ -396,6 +399,65 @@ def main() -> None:
 
     # Dataset & Loader
     data_root = cfg["DATA"]["ROOT"]
+    
+    # Check preprocessing configuration and auto-prepare if enabled
+    preprocessing_cfg = cfg["DATA"].get("PREPROCESSING", {})
+    if preprocessing_cfg.get("AUTO_PREPARE", False) and is_main_process:
+        dataset_type = preprocessing_cfg.get("DATASET_TYPE", "gopro")
+        force_recompute = preprocessing_cfg.get("FORCE_RECOMPUTE", False)
+        
+        # Prepare kwargs based on dataset type
+        kwargs = {}
+        voxel_cfg = preprocessing_cfg.get("VOXEL", {})
+        if voxel_cfg:
+            kwargs["num_bins"] = voxel_cfg.get("NUM_BINS", 32)
+        
+        if dataset_type == "gopro":
+            gopro_cfg = preprocessing_cfg.get("GOPRO", {})
+            kwargs.update({
+                "spike_frames": gopro_cfg.get("SPIKE_TEMPORAL_FRAMES", 10),
+                "spike_height": gopro_cfg.get("SPIKE_HEIGHT", 396),
+                "spike_width": gopro_cfg.get("SPIKE_WIDTH", 640),
+            })
+        elif dataset_type == "x4k":
+            x4k_cfg = preprocessing_cfg.get("X4K", {})
+            kwargs.update({
+                "fps": x4k_cfg.get("FPS", 1000),
+                "exposure_frames": x4k_cfg.get("EXPOSURE_FRAMES", 33),
+            })
+        
+        # Get paths - support both absolute and relative
+        data_root_path = Path(data_root)
+        if not data_root_path.is_absolute():
+            data_root_path = REPO_ROOT / data_root_path
+        
+        # Create preprocessor
+        try:
+            print(f"\n[train] Checking preprocessing status for {dataset_type} dataset...")
+            preprocessor = get_preprocessor(
+                dataset_type=dataset_type,
+                data_root=data_root_path.parent / "raw" / dataset_type,  # Assume raw data is in ../raw/
+                output_root=data_root_path,
+                config_path=Path(args.config),
+                **kwargs,
+            )
+            
+            # Check if preprocessing is needed
+            is_ready = preprocessor.check_ready()
+            
+            if not is_ready or force_recompute:
+                print(f"[train] Dataset not ready. Running preprocessing pipeline...")
+                preprocessor.prepare(force=force_recompute)
+                print(f"[train] Preprocessing complete!")
+            else:
+                print(f"[train] Dataset already preprocessed and ready.")
+        except Exception as e:
+            print(f"[train] Warning: Preprocessing check/prepare failed: {e}")
+            print(f"[train] Continuing with existing data...")
+    
+    # Wait for main process to complete preprocessing
+    if world_size > 1:
+        dist.barrier()
     clip_len = int(cfg["DATA"]["CLIP_LEN"])  # baseline: 5
     crop_size = int(cfg["DATA"].get("CROP_SIZE", 256)) if cfg["DATA"].get("CROP_SIZE") else None
 
@@ -536,7 +598,8 @@ def main() -> None:
 
     # Model: VRT + Spike wrapper, align with MODEL.VRT_CFG and CHANNELS_PER_SCALE if available
     use_spike = bool(cfg.get("MODEL", {}).get("USE_SPIKE", True))
-    channels_per_scale = cfg.get("MODEL", {}).get("CHANNELS_PER_SCALE", [120] * 7)
+    # CRITICAL: Default changed from [120]*7 to [96,96,96,96] to match typical config
+    channels_per_scale = cfg.get("MODEL", {}).get("CHANNELS_PER_SCALE", [96, 96, 96, 96])
     tsa_heads = int(cfg.get("MODEL", {}).get("SPIKE_TSA", {}).get("HEADS", 4))
     fuse_heads = int(cfg.get("MODEL", {}).get("FUSE", {}).get("HEADS", 4))
     
@@ -564,6 +627,10 @@ def main() -> None:
     stage_channels = channels_per_scale  # [96, 96, 96, 96] for stage 1-4
     # Extend to 13 values for all RSTB blocks (stage 1-7 use first 7, stage 8 uses rest)
     embed_dims_cfg = stage_channels + [stage_channels[-1]] * 3 + [stage_channels[-1]] * 6
+    
+    if is_main_process:
+        print(f"[train] channels_per_scale from config: {channels_per_scale}")
+        print(f"[train] Final embed_dims_cfg for VRT: {embed_dims_cfg} (length={len(embed_dims_cfg)})")
     
     # Read gradient checkpointing settings from config (default: True for memory efficiency)
     vrt_cfg = cfg.get("MODEL", {}).get("VRT", {})
@@ -726,6 +793,13 @@ def main() -> None:
             )
             if is_main_process:
                 print(f"[train] Using 8-bit AdamW optimizer (saves ~75% optimizer memory)")
+                # Calculate expected optimizer state memory savings
+                param_count = sum(p.numel() for p in model_module.parameters() if p.requires_grad)
+                fp32_optim_mem = param_count * 8 / (1024**3)  # 8 bytes per param (momentum + variance in FP32)
+                int8_optim_mem = param_count * 2 / (1024**3)  # 2 bytes per param (momentum + variance in INT8)
+                saved_mem = fp32_optim_mem - int8_optim_mem
+                print(f"[train]   Optimizer state memory: {int8_optim_mem:.2f}GB (vs {fp32_optim_mem:.2f}GB for FP32)")
+                print(f"[train]   Memory saved: {saved_mem:.2f}GB ({saved_mem/fp32_optim_mem*100:.1f}%)")
         except ImportError:
             if is_main_process:
                 print("[train] Warning: bitsandbytes not installed. Install with: pip install bitsandbytes")
@@ -810,7 +884,7 @@ def main() -> None:
                 print(f"[train] Using checkpoint from config: {resume_path}")
         else:
             # Auto-find latest checkpoint
-            resume_path = find_latest_checkpoint(save_root)
+            resume_path = find_latest_checkpoint(exp_dir / "checkpoints")
             if resume_path is not None and is_main_process:
                 print(f"[train] Auto-found latest checkpoint: {resume_path}")
             elif is_main_process:
@@ -882,8 +956,8 @@ def main() -> None:
     # Setup profiler if requested
     profiler = None
     if args.profile and is_main_process:
-        (save_root / "prof").mkdir(parents=True, exist_ok=True)
-        prof_dir = save_root / "prof"
+        (exp_dir / "prof").mkdir(parents=True, exist_ok=True)
+        prof_dir = exp_dir / "prof"
         if is_main_process:
             print(f"[train] Profiling enabled for {args.profile_steps} steps, output: {prof_dir}")
         
@@ -1077,7 +1151,7 @@ def main() -> None:
             if step > 0 and step % val_every == 0 and is_main_process:
                 # Save checkpoint regardless of validation availability
                 # Use model_module to get unwrapped state_dict
-                ckpt_last = save_root / "ckpts" / "last.pth"
+                ckpt_last = exp_dir / "checkpoints" / "last.pth"
                 torch.save({'step': step, 'state_dict': model_module.state_dict()}, ckpt_last)
                 
                 if val_loader is not None:
@@ -1131,7 +1205,10 @@ def main() -> None:
                     # save best based on validation
                     if psnr_rgb > best_psnr:
                         best_psnr = psnr_rgb
-                        ckpt_best = save_root / "ckpts" / "best.pth"
+                        # First, construct name
+                        best_ckpt_name = f"epoch={epoch:03d}-val_psnr={best_psnr:.2f}.pth"
+                        ckpt_best = exp_dir / "checkpoints" / best_ckpt_name
+                        # Save to ckpt_best
                         best_checkpoint_dict = {
                             'step': step,
                             'epoch': epoch,
@@ -1143,8 +1220,13 @@ def main() -> None:
                         if use_amp:
                             best_checkpoint_dict['scaler'] = scaler.state_dict()
                         torch.save(best_checkpoint_dict, ckpt_best)
+                        # Also create a symlink or copy to "best.pth" for convenience
+                        best_link = exp_dir / "checkpoints" / "best.pth"
+                        if best_link.exists():
+                            best_link.unlink()
+                        best_link.symlink_to(best_ckpt_name)  # Use symlink for efficiency
                     # dump metrics snapshot
-                    metrics_path = save_root / "metrics" / f"val_step_{step}.json"
+                    metrics_path = exp_dir / "metrics" / f"val_step_{step}.json"
                     with open(metrics_path, 'w', encoding='utf-8') as f:
                         json.dump({'step': step, 'psnr_rgb': psnr_rgb, 'psnr_y': psnr_y, 'ssim_y': ssim_y, 'lpips': lpips_val}, f, ensure_ascii=False, indent=2)
                     print(f"[val] step {step} | PSNR_RGB={psnr_rgb:.2f} PSNR_Y={psnr_y:.2f} SSIM_Y={ssim_y:.4f} LPIPS={lpips_val:.4f}")
@@ -1180,7 +1262,7 @@ def main() -> None:
                 # stack last frame for quick glance: (3,H,W)
                 grid = torch.cat([b[-1], v[-1], s[-1]], dim=-1)  # concat width-wise
                 import torchvision.utils as vutils
-                out_path = save_root / "visuals" / f"step_{step:06d}.png"
+                out_path = exp_dir / "visuals" / f"step_{step:06d}.png"
                 vutils.save_image(grid, str(out_path))
             if step >= total_steps:
                 break
@@ -1206,7 +1288,7 @@ def main() -> None:
                 writer.add_scalar('epoch/throughput_samples_per_sec', samples_per_sec_epoch, epoch + 1)
                 writer.add_scalar('epoch/lr', lr_now, epoch + 1)
             # Persist JSON snapshot
-            epoch_metrics_path = save_root / "metrics" / f"epoch_{epoch+1:03d}.json"
+            epoch_metrics_path = exp_dir / "metrics" / f"epoch_{epoch+1:03d}.json"
             with open(epoch_metrics_path, 'w', encoding='utf-8') as f:
                 json.dump({
                     'epoch': epoch + 1,
@@ -1230,7 +1312,7 @@ def main() -> None:
         
         epoch += 1
     # 运行信息归档
-    run_txt = save_root / "logs" / f"run_{int(time.time())}.txt"
+    run_txt = exp_dir / "logs" / f"run_{int(time.time())}.txt"
     try:
         import subprocess
         git_rev = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=str(REPO_ROOT)).decode().strip()

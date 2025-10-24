@@ -11,9 +11,10 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH}"
 
 # NCCL environment variables for better multi-GPU performance
-export NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1  # Async error handling
 export NCCL_IB_DISABLE=0  # Enable InfiniBand if available (set to 1 to disable)
-export NCCL_DEBUG=INFO  # Set to WARN for less verbose output
+export NCCL_DEBUG=WARN  # Set to INFO for verbose output, WARN for production
+export NCCL_NVML_DISABLE=1  # Disable NVML to avoid driver/library version mismatch
 
 # OpenMP threading for CPU operations
 export OMP_NUM_THREADS=8
