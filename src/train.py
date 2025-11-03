@@ -7,6 +7,7 @@ import sys
 import time
 import random
 import json
+import logging
 from pathlib import Path
 from typing import Dict, Tuple, Optional
 
@@ -21,7 +22,8 @@ import yaml
 
 import datetime
 import shutil
-from src.utils.path_manager import create_experiment_dir
+from src.utils.path_manager import create_experiment_dir, get_config_from_exp_dir, get_checkpoint_path
+import re
 
 # Force unbuffered output
 sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
@@ -36,12 +38,18 @@ except ImportError:
 MEMORY_CEILING_GB = 200.0  # Maximum allowed system memory usage (80% of 250GB)
 MEMORY_WARNING_GB = 180.0  # Warning threshold (72% of 250GB)
 MEMORY_CHECK_INTERVAL = 10  # Check every N batches
-CACHE_CLEAR_INTERVAL = 500  # Clear dataset cache every N steps
+CACHE_CLEAR_INTERVAL = 200  # Clear dataset cache every N steps (reduced from 500 to prevent accumulation)
 
-# Add third_party to path for VRT import
+# Set up Python paths for imports (CRITICAL for both project and VRT imports)
 THIS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = THIS_DIR.parent
 VRT_ROOT = REPO_ROOT / "third_party" / "VRT"
+
+# Add project root to sys.path for 'src' imports
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# Add VRT to sys.path for VRT model imports
 if str(VRT_ROOT) not in sys.path:
     sys.path.insert(0, str(VRT_ROOT))
 
@@ -53,6 +61,59 @@ from src.data.preprocessing import get_preprocessor
 from src.losses import CharbonnierLoss, VGGPerceptualLoss
 from src.models.integrate_vrt import VRTWithSpike
 from src.utils.timing_logger import TimingLogger, set_global_timing_logger
+from src.loggers import WandBLogger
+
+
+def setup_logger(log_file: Path, rank: int = 0) -> logging.Logger:
+    """
+    设置logger，将日志同时输出到文件和控制台
+    
+    Args:
+        log_file: 日志文件路径
+        rank: 进程rank，只有rank 0会写日志
+    
+    Returns:
+        配置好的logger对象
+    """
+    logger = logging.getLogger('train')
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    
+    if rank == 0:
+        # 文件handler
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_file, mode='a')
+        file_handler.setLevel(logging.INFO)
+        
+        # 控制台handler
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(logging.INFO)
+        
+        # 格式化
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+    
+    return logger
+
+
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train VRT with Spike")
+    parser.add_argument("--config", type=str, required=True, help="Path to config YAML")
+    parser.add_argument("--exp_dir", type=str, default=None, help="Experiment directory for resume")
+    parser.add_argument("--device", type=str, default="cuda", help="Device to use")
+    parser.add_argument("--resume", type=str, default=None, help="Path to resume checkpoint")
+    parser.add_argument("--profile", action="store_true", help="Enable profiling")
+    parser.add_argument("--profile_steps", type=int, default=100, help="Number of steps to profile")
+    return parser.parse_args()
 
 
 def format_seconds(seconds: float) -> str:
@@ -130,35 +191,37 @@ def check_and_manage_memory(step: int, rank: int = 0, dataset = None) -> Tuple[b
     
     return False, ""
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train VRT+Spike baseline")
-    parser.add_argument("--config", type=str, required=True, help="Path to baseline YAML config")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint to resume from (overrides config)")
-    # DDP arguments
-    parser.add_argument("--local_rank", type=int, default=-1, help="Local rank for distributed training")
-    # Profiling
-    parser.add_argument("--profile", action="store_true", help="Enable torch.profiler")
-    parser.add_argument("--profile_steps", type=int, default=100, help="Number of steps to profile")
-    return parser.parse_args()
+def prune_step_checkpoints(ckpt_dir: Path, keep_last_n: int):
+    if keep_last_n <= 0:
+        return  # A value of 0 or less means keep all
+
+    # Find, sort, and filter step-based checkpoints
+    step_checkpoints = sorted(
+        [p for p in ckpt_dir.glob("step_*.pth")],
+        key=lambda p: int(re.search(r"step_(\d+).pth", str(p)).group(1))
+    )
+
+    # Remove the oldest checkpoints
+    if len(step_checkpoints) > keep_last_n:
+        for p in step_checkpoints[:-keep_last_n]:
+            p.unlink()
 
 
-def find_latest_checkpoint(save_root: Path) -> Optional[Path]:
+def find_latest_checkpoint(checkpoint_dir: Path) -> Optional[Path]:
     """
-    在ckpts目录中查找最新的checkpoint文件
+    在checkpoints目录中查找最新的checkpoint文件
     
     Args:
-        save_root: 保存根目录
+        checkpoint_dir: checkpoints目录路径
     
     Returns:
         最新checkpoint的路径，如果没有找到则返回None
     """
-    ckpt_dir = save_root / "ckpts"
-    if not ckpt_dir.exists():
+    if not checkpoint_dir.exists():
         return None
     
     # 查找所有.pth文件
-    ckpt_files = list(ckpt_dir.glob("*.pth"))
+    ckpt_files = list(checkpoint_dir.glob("*.pth"))
     if not ckpt_files:
         return None
     
@@ -356,11 +419,62 @@ def main() -> None:
     rank, world_size, local_rank = setup_distributed()
     is_main_process = (rank == 0)
     
-    exp_dir = create_experiment_dir(REPO_ROOT, Path(args.config))
-
-    # Then load cfg from the snapshot to ensure consistency
-    with open(exp_dir / "configs" / Path(args.config).name, "r", encoding="utf-8") as f:
+    # First load the base config to check for possible EXP_DIR
+    with open(args.config, "r", encoding="utf-8") as f:
         cfg: Dict = yaml.safe_load(f)
+
+    # Determine exp_dir
+    exp_dir = None
+    is_resume = False
+
+    if args.exp_dir:
+        exp_dir = Path(args.exp_dir)
+        # Check if this is actually a resume by looking for config snapshot
+        # (launch_train.sh may create exp_dir for new runs too)
+        config_snapshot_dir = exp_dir / "configs"
+        if config_snapshot_dir.exists() and list(config_snapshot_dir.glob("*.yaml")):
+            is_resume = True
+        else:
+            is_resume = False
+    elif cfg.get("TRAIN", {}).get("EXP_DIR"):
+        exp_dir = Path(cfg["TRAIN"]["EXP_DIR"])
+        # Check if this is actually a resume
+        config_snapshot_dir = exp_dir / "configs"
+        if config_snapshot_dir.exists() and list(config_snapshot_dir.glob("*.yaml")):
+            is_resume = True
+        else:
+            is_resume = False
+    else:
+        # Create new exp_dir
+        config_name = Path(args.config).stem
+        run_name = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_dir = Path(cfg.get("LOG", {}).get("SAVE_DIR", "outputs")) / config_name
+        exp_dir = base_dir / run_name
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[train.py] Created new experiment directory: {exp_dir}")
+
+    # Handle resume if applicable
+    if is_resume:
+        if not exp_dir.exists():
+            raise ValueError(f"Specified exp_dir {exp_dir} does not exist. Cannot resume.")
+        # Load config from exp_dir snapshot (ensures reproducibility)
+        config_path = get_config_from_exp_dir(exp_dir)
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg: Dict = yaml.safe_load(f)  # Override with exp_dir config
+        print(f"[train.py] Resuming from existing exp_dir: {exp_dir}")
+        print(f"[train.py] Using config snapshot: {config_path}")
+    else:
+        # Save config snapshot for new run
+        (exp_dir / "configs").mkdir(parents=True, exist_ok=True)
+        config_snapshot_path = exp_dir / "configs" / Path(args.config).name
+        shutil.copy2(args.config, config_snapshot_path)
+        print(f"[train.py] Saved config snapshot: {config_snapshot_path}")
+
+    # Create subdirectories (for both new and resume)
+    (exp_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+    (exp_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (exp_dir / "visuals").mkdir(parents=True, exist_ok=True)
+    (exp_dir / "metrics").mkdir(parents=True, exist_ok=True)
 
     # Multi-GPU setup
     if args.device == "cuda":
@@ -382,6 +496,22 @@ def main() -> None:
     # Seed & TensorBoard
     set_seed(int(cfg.get("SEED", 123)))
     writer = SummaryWriter(log_dir=str(exp_dir / "logs" / "tb")) if cfg["LOG"].get("TENSORBOARD", True) else None
+
+    wandb_cfg = cfg["LOG"].get("WANDB", {})
+    wandb_logger = WandBLogger(
+        cfg=cfg,
+        exp_dir=exp_dir,
+        enable=bool(wandb_cfg.get("ENABLE", False)),
+        project=wandb_cfg.get("PROJECT", "deblur"),
+        entity=wandb_cfg.get("ENTITY"),
+        run_name=wandb_cfg.get("RUN_NAME"),
+        job_type=wandb_cfg.get("JOB_TYPE"),
+        tags=wandb_cfg.get("TAGS"),
+        resume=wandb_cfg.get("RESUME", "allow"),
+        watch=wandb_cfg.get("WATCH"),
+        log_checkpoints=bool(wandb_cfg.get("LOG_CHECKPOINTS", True)),
+        log_images=bool(wandb_cfg.get("LOG_IMAGES", False)),
+    )
     progress_every = int(cfg["LOG"].get("PROGRESS_EVERY_STEPS", 20))
     
     # Setup timing logger
@@ -557,6 +687,14 @@ def main() -> None:
         "test",
     ]
     
+    # Get validation crop size from config (default to train crop_size to save memory)
+    # Set to None in config to use full resolution (requires more GPU memory)
+    val_crop_size = cfg["DATA"].get("VAL_CROP_SIZE", crop_size)
+    if is_main_process and val_crop_size is not None:
+        print(f"[train] Validation crop_size: {val_crop_size} (to save GPU memory during validation)")
+    elif is_main_process:
+        print(f"[train] WARNING: Validation using full resolution images (may cause OOM)")
+    
     for val_split in val_split_candidates:
         val_split_path = Path(data_root) / val_split
         if val_split_path.exists() and any(val_split_path.iterdir()):
@@ -567,7 +705,7 @@ def main() -> None:
                     split=val_split,
                     clip_length=clip_len,
                     voxel_dirname=cfg["DATA"].get("VOXEL_CACHE_DIRNAME", "spike_vox"),
-                    crop_size=None,
+                    crop_size=val_crop_size,  # Use configured val_crop_size instead of None
                     spike_dir=cfg["DATA"].get("SPIKE_DIR", "spike"),
                     num_voxel_bins=int(cfg["DATA"].get("NUM_VOXEL_BINS", 5)),
                     use_precomputed_voxels=bool(cfg["DATA"].get("USE_PRECOMPUTED_VOXELS", True)),
@@ -948,8 +1086,10 @@ def main() -> None:
     last_val_metrics = None  # type: ignore
     
     # Training performance monitoring
-    batch_times = []
-    data_times = []
+    # Use deque with fixed maxlen to prevent unbounded memory growth
+    from collections import deque
+    batch_times = deque(maxlen=100)  # Keep only last 100 samples
+    data_times = deque(maxlen=100)   # Keep only last 100 samples
     start_time = time.time()
     last_progress_t = start_time
     
@@ -984,6 +1124,9 @@ def main() -> None:
         print(f"[train] Total steps: {total_steps}, Validation every: {val_every} steps", flush=True)
         print(f"[train] Gradient accumulation steps: {grad_accum_steps}", flush=True)
     
+    save_every_epoch = cfg["LOG"].get("CHECKPOINT_SAVE_EVERY_EPOCH", False)
+    keep_last_n = cfg["LOG"].get("CHECKPOINT_KEEP_LAST_N", 0)
+
     while step < total_steps:
         # Set epoch for DistributedSampler
         if train_sampler is not None:
@@ -1106,6 +1249,15 @@ def main() -> None:
                         mem_reserved = torch.cuda.memory_reserved(i) / 1024**3
                         writer.add_scalar(f'gpu/memory_allocated_gb_gpu{i}', mem_allocated, step)
                         writer.add_scalar(f'gpu/memory_reserved_gb_gpu{i}', mem_reserved, step)
+                wandb_logger.log_metrics(
+                    {
+                        'train/loss': actual_loss,
+                        'train/charb': float(l_charb.item()),
+                        'train/vgg': float(l_vgg.item()),
+                        'train/lr': float(scheduler.get_last_lr()[0]),
+                    },
+                    step=step,
+                )
                 
                 # Enhanced logging with GPU info and throughput
                 gpu_mem_str = ""
@@ -1116,19 +1268,37 @@ def main() -> None:
                 
                 # Calculate throughput
                 if len(batch_times) >= 10:
-                    avg_batch_time = np.mean(batch_times[-50:])
-                    avg_data_time = np.mean(data_times[-50:])
+                    # Convert deque to list for slicing (deque doesn't support slice notation)
+                    avg_batch_time = np.mean(list(batch_times)[-50:])
+                    avg_data_time = np.mean(list(data_times)[-50:])
                     samples_per_sec = (batch_size * world_size if world_size > 1 else batch_size) / avg_batch_time
                     throughput_str = f" | {samples_per_sec:.1f} samples/s | data_time={avg_data_time*1000:.1f}ms"
                     writer.add_scalar('perf/samples_per_sec', samples_per_sec, step)
                     writer.add_scalar('perf/batch_time_ms', avg_batch_time * 1000, step)
                     writer.add_scalar('perf/data_time_ms', avg_data_time * 1000, step)
+                    wandb_logger.log_metrics(
+                        {
+                            'perf/samples_per_sec': float(samples_per_sec),
+                            'perf/batch_time_ms': float(avg_batch_time * 1000),
+                            'perf/data_time_ms': float(avg_data_time * 1000),
+                        },
+                        step=step,
+                    )
                 
                 print(f"step {step}/{total_steps} | loss={actual_loss:.4f} charb={l_charb.item():.4f} vgg={l_vgg.item():.4f} lr={scheduler.get_last_lr()[0]:.2e}{gpu_mem_str}{throughput_str}", flush=True)
             
             # Periodic memory monitoring (every 100 steps)
             if is_main_process and step % 100 == 0 and (micro_step + 1) % grad_accum_steps == 0:
                 log_memory_usage(rank, f"Step {step}")
+                # Log GPU memory to TensorBoard for tracking memory leaks
+                if torch.cuda.is_available() and writer:
+                    for i in range(num_gpus):
+                        mem_allocated = torch.cuda.memory_allocated(i) / 1024**3
+                        mem_reserved = torch.cuda.memory_reserved(i) / 1024**3
+                        mem_max_allocated = torch.cuda.max_memory_allocated(i) / 1024**3
+                        writer.add_scalar(f'memory/gpu{i}_allocated_gb', mem_allocated, step)
+                        writer.add_scalar(f'memory/gpu{i}_reserved_gb', mem_reserved, step)
+                        writer.add_scalar(f'memory/gpu{i}_max_allocated_gb', mem_max_allocated, step)
             
             # Periodic cache clearing to prevent unbounded growth
             if step > 0 and step % CACHE_CLEAR_INTERVAL == 0 and (micro_step + 1) % grad_accum_steps == 0:
@@ -1148,62 +1318,114 @@ def main() -> None:
                         print(f"    ✓ Cache cleared, memory: {mem.used/(1024**3):.1f}GB/{mem.total/(1024**3):.1f}GB", flush=True)
 
             # periodic validation (skip step 0 to avoid duplicate saves)
-            if step > 0 and step % val_every == 0 and is_main_process:
-                # Save checkpoint regardless of validation availability
-                # Use model_module to get unwrapped state_dict
-                ckpt_last = exp_dir / "checkpoints" / "last.pth"
-                torch.save({'step': step, 'state_dict': model_module.state_dict()}, ckpt_last)
+            # ALL processes participate in validation to avoid DDP sync issues
+            if step > 0 and step % val_every == 0:
+                # Save checkpoint only on main process
+                if is_main_process:
+                    # Use model_module to get unwrapped state_dict
+                    ckpt_last = exp_dir / "checkpoints" / "last.pth"
+                    torch.save({'step': step, 'state_dict': model_module.state_dict()}, ckpt_last)
+                    wandb_logger.log_checkpoint(ckpt_last)
                 
+                # ALL processes participate in validation
                 if val_loader is not None:
+                    # CRITICAL: Clear GPU cache before validation to prevent OOM
+                    # Training may have accumulated fragmented memory over 1000 steps
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+                    gc.collect()
+                    if is_main_process:
+                        print(f"[val] Cleared GPU cache before validation at step {step}", flush=True)
+                    
                     model.eval()
                     psnr_rgb_list = []
                     psnr_y_list = []
+                    ssim_list = []
                     lpips_list = []
                     with torch.no_grad():
-                        for vbatch in val_loader:
-                            v_blur = vbatch["blur"].to(device)
-                            v_sharp = vbatch["sharp"].to(device)
-                            v_spike = vbatch["spike_vox"].to(device)
+                        for val_idx, vbatch in enumerate(val_loader):
+                            v_blur = vbatch["blur"].to(device, non_blocking=True)
+                            v_sharp = vbatch["sharp"].to(device, non_blocking=True)
+                            v_spike = vbatch["spike_vox"].to(device, non_blocking=True)
                             v_recon = model(v_blur, v_spike) if use_spike else model(v_blur)
                             v_recon = torch.clamp(v_recon, 0.0, 1.0)
-                            psnr_rgb_list.append(compute_psnr(v_recon, v_sharp))
-                            y_recon = rgb_to_y(v_recon)
-                            y_sharp = rgb_to_y(v_sharp)
+                            
+                            # Compute all metrics in one pass to avoid re-iterating
+                            # Use .detach() and .item() to ensure no gradient graph is retained
+                            psnr_rgb_list.append(compute_psnr(v_recon.detach(), v_sharp.detach()))
+                            
+                            y_recon = rgb_to_y(v_recon.detach())
+                            y_sharp = rgb_to_y(v_sharp.detach())
                             psnr_y_list.append(compute_psnr(y_recon, y_sharp))
+                            
+                            # SSIM on Y channel
+                            try:
+                                ssim_val = compute_ssim(y_recon, y_sharp)
+                                ssim_list.append(ssim_val)
+                            except Exception:
+                                pass  # Skip SSIM for this batch if it fails
+                            
                             if lpips_model is not None:
                                 # merge (B,T) into batch for lpips expecting (N,3,H,W)
                                 nbt = v_recon.shape[0] * v_recon.shape[1]
-                                x_lp = v_recon.reshape(nbt, 3, *v_recon.shape[-2:])
-                                y_lp = v_sharp.reshape(nbt, 3, *v_sharp.shape[-2:])
+                                x_lp = v_recon.detach().reshape(nbt, 3, *v_recon.shape[-2:])
+                                y_lp = v_sharp.detach().reshape(nbt, 3, *v_sharp.shape[-2:])
                                 lp = lpips_model(x_lp, y_lp).mean().item()
                                 lpips_list.append(lp)
+                                # Clear LPIPS tensors immediately
+                                del x_lp, y_lp
+                            
+                            # Clear intermediate tensors to free GPU memory IMMEDIATELY
+                            del v_recon, v_blur, v_sharp, v_spike, y_recon, y_sharp
+                            
+                            # Periodic GPU cache clearing during validation to prevent accumulation
+                            # Clear every 5 batches to balance performance and memory
+                            if (val_idx + 1) % 5 == 0:
+                                if torch.cuda.is_available():
+                                    torch.cuda.empty_cache()
+                    
+                    # Aggregate metrics across all GPUs using all_reduce
                     psnr_rgb = float(np.mean(psnr_rgb_list)) if psnr_rgb_list else 0.0
                     psnr_y = float(np.mean(psnr_y_list)) if psnr_y_list else 0.0
-                    # SSIM on Y channel
-                    ssim_list = []
-                    try:
-                        for vbatch in val_loader:
-                            v_blur = vbatch["blur"].to(device)
-                            v_sharp = vbatch["sharp"].to(device)
-                            v_spike = vbatch["spike_vox"].to(device)
-                            v_recon = model(v_blur, v_spike) if use_spike else model(v_blur)
-                            v_recon = torch.clamp(v_recon, 0.0, 1.0)
-                            y_recon = rgb_to_y(v_recon)
-                            y_sharp = rgb_to_y(v_sharp)
-                            ssim_val = compute_ssim(y_recon, y_sharp)
-                            ssim_list.append(ssim_val)
-                        ssim_y = float(np.mean(ssim_list)) if ssim_list else 0.0
-                    except Exception:
-                        ssim_y = 0.0
+                    ssim_y = float(np.mean(ssim_list)) if ssim_list else 0.0
                     lpips_val = float(np.mean(lpips_list)) if lpips_list else 0.0
-                    if writer:
-                        writer.add_scalar('val/psnr_rgb', psnr_rgb, step)
-                        writer.add_scalar('val/psnr_y', psnr_y, step)
-                        writer.add_scalar('val/ssim_y', ssim_y, step)
-                        writer.add_scalar('val/lpips', lpips_val, step)
+                    
+                    # In multi-GPU setup, average metrics across all ranks
+                    if world_size > 1:
+                        metrics_tensor = torch.tensor(
+                            [psnr_rgb, psnr_y, ssim_y, lpips_val, float(len(psnr_rgb_list))],
+                            device=device
+                        )
+                        dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+                        # Average by total number of samples across all GPUs
+                        total_samples = metrics_tensor[4].item()
+                        if total_samples > 0:
+                            psnr_rgb = (metrics_tensor[0] / world_size).item()
+                            psnr_y = (metrics_tensor[1] / world_size).item()
+                            ssim_y = (metrics_tensor[2] / world_size).item()
+                            lpips_val = (metrics_tensor[3] / world_size).item()
+                    
+                    # Only main process logs metrics and saves checkpoints
+                    if is_main_process:
+                        if writer:
+                            writer.add_scalar('val/psnr_rgb', psnr_rgb, step)
+                            writer.add_scalar('val/psnr_y', psnr_y, step)
+                            writer.add_scalar('val/ssim_y', ssim_y, step)
+                            writer.add_scalar('val/lpips', lpips_val, step)
+                        wandb_logger.log_metrics(
+                            {
+                                'val/psnr_rgb': psnr_rgb,
+                                'val/psnr_y': psnr_y,
+                                'val/ssim_y': ssim_y,
+                                'val/lpips': lpips_val,
+                            },
+                            step=step,
+                        )
+                        wandb_logger.set_summary({'val/best_psnr_rgb': best_psnr})
 
-                    # save best based on validation
-                    if psnr_rgb > best_psnr:
+                    # save best checkpoint only on main process
+                    if is_main_process and psnr_rgb > best_psnr:
                         best_psnr = psnr_rgb
                         # First, construct name
                         best_ckpt_name = f"epoch={epoch:03d}-val_psnr={best_psnr:.2f}.pth"
@@ -1220,17 +1442,21 @@ def main() -> None:
                         if use_amp:
                             best_checkpoint_dict['scaler'] = scaler.state_dict()
                         torch.save(best_checkpoint_dict, ckpt_best)
+                        wandb_logger.log_checkpoint(ckpt_best, name=f"best-epoch{epoch:03d}")
                         # Also create a symlink or copy to "best.pth" for convenience
                         best_link = exp_dir / "checkpoints" / "best.pth"
                         if best_link.exists():
                             best_link.unlink()
                         best_link.symlink_to(best_ckpt_name)  # Use symlink for efficiency
-                    # dump metrics snapshot
-                    metrics_path = exp_dir / "metrics" / f"val_step_{step}.json"
-                    with open(metrics_path, 'w', encoding='utf-8') as f:
-                        json.dump({'step': step, 'psnr_rgb': psnr_rgb, 'psnr_y': psnr_y, 'ssim_y': ssim_y, 'lpips': lpips_val}, f, ensure_ascii=False, indent=2)
-                    print(f"[val] step {step} | PSNR_RGB={psnr_rgb:.2f} PSNR_Y={psnr_y:.2f} SSIM_Y={ssim_y:.4f} LPIPS={lpips_val:.4f}")
-                    # store last validation for epoch summary
+                    
+                    # dump metrics snapshot and print - only on main process
+                    if is_main_process:
+                        metrics_path = exp_dir / "metrics" / f"val_step_{step}.json"
+                        with open(metrics_path, 'w', encoding='utf-8') as f:
+                            json.dump({'step': step, 'psnr_rgb': psnr_rgb, 'psnr_y': psnr_y, 'ssim_y': ssim_y, 'lpips': lpips_val}, f, ensure_ascii=False, indent=2)
+                        print(f"[val] step {step} | PSNR_RGB={psnr_rgb:.2f} PSNR_Y={psnr_y:.2f} SSIM_Y={ssim_y:.4f} LPIPS={lpips_val:.4f}")
+                    
+                    # store last validation for epoch summary (all processes need this)
                     last_val_metrics = {
                         'step': step,
                         'psnr_rgb': psnr_rgb,
@@ -1238,9 +1464,23 @@ def main() -> None:
                         'ssim_y': ssim_y,
                         'lpips': lpips_val,
                     }
+                    
+                    # Explicitly clear GPU cache after validation to prevent memory accumulation
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    
                     model.train()
-                else:
+                    
+                    # Synchronize all processes after validation to avoid deadlock
+                    if world_size > 1:
+                        dist.barrier()
+                elif is_main_process:
+                    # No validation available message - only on main process
                     print(f"[train] step {step} | Checkpoint saved (no validation available)", flush=True)
+                
+                # Ensure all processes are synchronized after validation/checkpoint save
+                if world_size > 1:
+                    dist.barrier()
 
             # SOTA-style progress with ETA (non-intrusive, additional to existing prints)
             if is_main_process and (micro_step + 1) % grad_accum_steps == 0 and progress_every > 0 and step % progress_every == 0:
@@ -1309,8 +1549,28 @@ def main() -> None:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+                # Reset peak memory stats to track memory usage per epoch
+                for i in range(torch.cuda.device_count()):
+                    torch.cuda.reset_peak_memory_stats(i)
+                if is_main_process:
+                    print(f"[Memory] Cleared GPU cache and reset peak memory stats at end of epoch {epoch+1}", flush=True)
         
         epoch += 1
+        if save_every_epoch and is_main_process:
+            checkpoint_dict = {
+                'step': step,
+                'epoch': epoch,
+                'state_dict': model_module.state_dict(),
+                'optimizer': optim.state_dict(),
+                'scheduler': scheduler.state_dict(),
+            }
+            if use_amp:
+                checkpoint_dict['scaler'] = scaler.state_dict()
+            ckpt_epoch_path = exp_dir / "checkpoints" / f"epoch_{epoch:03d}.pth"
+            torch.save(checkpoint_dict, ckpt_epoch_path)
+        
+        epoch += 1
+
     # 运行信息归档
     run_txt = exp_dir / "logs" / f"run_{int(time.time())}.txt"
     try:
@@ -1348,6 +1608,8 @@ def main() -> None:
     if writer:
         writer.flush()
         writer.close()
+    
+    wandb_logger.close()
     
     # Cleanup distributed training
     cleanup_distributed()

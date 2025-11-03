@@ -31,6 +31,10 @@ python src/train.py --config configs/deblur/vrt_spike_baseline.yaml
 ### 4. Monitor Training
 ```bash
 tensorboard --logdir outputs/logs/tb
+
+# 或者启用 W&B 仪表盘（需提前登录）
+wandb login
+python src/train.py --config configs/deblur/vrt_spike_baseline.yaml LOG.WANDB.ENABLE=true LOG.WANDB.PROJECT=deblur
 ```
 
 ---

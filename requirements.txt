@@ -20,5 +20,6 @@ torch
 torchvision
 psutil>=5.9
 bitsandbytes>=0.41.0  # 8-bit AdamW optimizer (saves ~75% optimizer memory)
+wandb>=0.17
 
 

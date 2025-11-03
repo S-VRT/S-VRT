@@ -13,6 +13,8 @@ DATA:
   TRAIN_SPLIT: train  # 训练集分割名称
   VAL_SPLIT: val  # 验证集分割名称
   CROP_SIZE: 256  # 训练时随机裁剪的图像尺寸 (256x256)
+  VAL_CROP_SIZE: 256  # 验证时的crop尺寸 (建议与CROP_SIZE相同以节省GPU显存，设为null使用完整分辨率)
+                      # Validation crop size (recommended same as CROP_SIZE to save GPU memory, set to null for full resolution)
   CLIP_LEN: 5  # 视频片段长度（帧数），用于时序建模
   K: 32  # Spike数据的采样数量或分辨率参数
   NUM_VOXEL_BINS: 32  # Number of temporal bins for spike voxelization
@@ -184,12 +186,13 @@ TRAIN:
   # 训练续跑配置 (Resume Training)
   # Resume Training Configuration
   # ============================================
-  RESUME_FROM_CHECKPOINT: false  # true: 从最新checkpoint继续训练, false: 从头开始
+  RESUME_FROM_CHECKPOINT: true  # true: 从最新checkpoint继续训练, false: 从头开始
                                  # true: resume from latest checkpoint, false: start from scratch
-  CHECKPOINT_PATH: null          # 可选：指定具体checkpoint路径，null则自动找最新的
+  CHECKPOINT_PATH: outputs/vrt_spike_baseline/20251024_183310/checkpoints/last.pth          
+                                 # 可选：指定具体checkpoint路径，null则自动找最新的
                                  # Optional: specify checkpoint path, null to auto-find latest
   
-  EPOCHS: 1  # 训练总轮数
+  EPOCHS: 10  # 训练总轮数
   
   # DDP communication gradient compression (requires torch<2.2)
   # DDP通信梯度压缩（需要torch<2.2）
@@ -220,7 +223,7 @@ TRAIN:
   
   # 优化器配置
   OPTIM:
-    TYPE: adamw         # Optimizer type: "adamw" (default) or "adamw8bit" (saves ~75% optimizer memory)
+    TYPE: adamw8bit         # Optimizer type: "adamw" (default) or "adamw8bit" (saves ~75% optimizer memory)
                         # 优化器类型："adamw"（默认）或"adamw8bit"（节省约75%优化器内存）
     LR: 1e-5  # Reduced from 2e-4 to improve stability (NaN fix)
               # 学习率，从2e-4降低到1e-4以提高稳定性（修复NaN问题）
@@ -232,7 +235,7 @@ TRAIN:
   # 学习率调度器配置
   SCHED:
     TYPE: cosine  # 调度器类型：余弦退火
-    WARMUP_STEPS: 256  # 预热步数，学习率从0线性增加到初始LR
+    WARMUP_STEPS: 512  # 预热步数，学习率从0线性增加到初始LR
 
 # ============================================
 # 损失函数配置 (Loss Configuration)
@@ -254,8 +257,21 @@ LOSS:
 # ============================================
 LOG:
   TENSORBOARD: true  # 是否启用TensorBoard记录训练曲线
+  WANDB:
+    ENABLE: true        # 是否启用Weights & Biases日志
+    PROJECT: "deblur"    # W&B项目名称
+    ENTITY: null         # 可选：W&B团队/用户名
+    RUN_NAME: null       # 可选：自定义运行名称（null则自动生成）
+    RESUME: "allow"      # 运行恢复策略："never" | "must" | "allow"
+    JOB_TYPE: "train"    # 可选：W&B job类型
+    TAGS: []             # 可选：W&B标签列表
+    WATCH: null          # 可选："gradients" | "parameters" | null
+    LOG_CHECKPOINTS: true  # 是否上传checkpoint文件（仅主进程）
+    LOG_IMAGES: false      # 是否周期性上传样例图像
   SAVE_DIR: outputs  # 日志和检查点的保存目录
   VAL_EVERY_STEPS: 1000  # 每隔多少步进行一次验证
+  CHECKPOINT_SAVE_EVERY_EPOCH: true  # Enable saving checkpoints at the end of each epoch
+  CHECKPOINT_KEEP_LAST_N: 5  # Number of recent step-based checkpoints to keep (0 to keep all)
   
   # Timing Logger 配置
   # Timing Logger Configuration

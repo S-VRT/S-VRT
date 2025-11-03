@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tile_overlap", type=int, default=32, help="Overlap between tiles")
     parser.add_argument("--enable_tiling", action="store_true", help="Force enable tiling even for small images")
     parser.add_argument("--disable_tiling", action="store_true", help="Disable tiling and process full images")
-    parser.add_argument("--exp_dir", type=str, default=None, help="Path to experiment directory (overrides config for loading)")
+    parser.add_argument("--exp_dir", type=str, default=None, help="Path to experiment directory (overrides config for loading). If not provided, will auto-find the latest based on config name.")
     parser.add_argument("--checkpoint", type=str, default="best", help="Checkpoint to load: filename, 'best', or 'last'")
     return parser.parse_args()
 
@@ -242,146 +242,143 @@ def tile_inference(
 
 def main() -> None:
     args = parse_args()
+    # First load the base config to check for possible EXP_DIR
+    with open(args.config, "r", encoding="utf-8") as f:
+        cfg: Dict = yaml.safe_load(f)
+
+    # Determine exp_dir
     if args.exp_dir:
         exp_dir = Path(args.exp_dir)
-        config_path = get_config_from_exp_dir(exp_dir)
-        with open(config_path, "r", encoding="utf-8") as f:
-            cfg: Dict = yaml.safe_load(f)
-        checkpoint_path = get_checkpoint_path(exp_dir, args.checkpoint)
+    elif cfg.get("TEST", {}).get("EXP_DIR"):
+        exp_dir = Path(cfg["TEST"]["EXP_DIR"])
     else:
-        # old behavior
-        with open(args.config, "r", encoding="utf-8") as f:
-            cfg: Dict = yaml.safe_load(f)
-    
-    # Set environment variable for collate_fn to use
-    save_dir = cfg["LOG"].get("SAVE_DIR", "outputs")
-    os.environ["DEBLUR_SAVE_DIR"] = str(REPO_ROOT / save_dir)
+        # Auto-find latest exp_dir based on config name
+        config_name = Path(args.config).stem
+        base_dir = Path(cfg.get("LOG", {}).get("SAVE_DIR", "outputs")) / config_name
+        if base_dir.exists():
+            run_dirs = [d for d in base_dir.iterdir() if d.is_dir() and d.name.split('_')[0].isdigit()]  # Assume timestamp format like 20251024_XXXXXX
+            if run_dirs:
+                latest_run = max(run_dirs, key=lambda d: d.stat().st_mtime)
+                exp_dir = base_dir / latest_run
+                print(f"[test.py] Auto-found latest exp_dir: {exp_dir}")
+            else:
+                raise ValueError(f"No experiment directories found in {base_dir}. Please provide --exp_dir or run training first.")
+        else:
+            raise ValueError(f"Base directory {base_dir} does not exist. Please provide --exp_dir or run training first.")
 
+    # Now load the actual config from exp_dir
+    config_path = get_config_from_exp_dir(exp_dir)
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg: Dict = yaml.safe_load(f)  # Override with exp_dir config
+
+    # Setup device
     device = torch.device(args.device)
-    data_root = cfg["DATA"]["ROOT"]
-    clip_len = int(cfg["DATA"]["CLIP_LEN"])  # baseline: 5
-    crop_size = None  # validation full-size
+    print(f"[test.py] Using device: {device}")
 
-    # Prepare image extensions and align log paths
-    image_exts = set(cfg["DATA"].get("IMAGE_EXTS", [".png", ".jpg", ".jpeg", ".bmp"]))
-    align_log_paths = cfg["DATA"].get("ALIGN_LOG_PATHS", ["outputs/logs/align_x4k1000fps.txt"])
-
-    use_dir_api = args.input_blur is not None and args.input_spike_vox is not None and args.output is not None
-    if not use_dir_api:
-        # Dataset/val 分割
-        val_set = SpikeDeblurDataset(
-            root=data_root,
-            split=cfg["DATA"].get("VAL_SPLIT", "val"),
-            clip_length=clip_len,
-            voxel_dirname=cfg["DATA"].get("VOXEL_CACHE_DIRNAME", "spike_vox"),
-            crop_size=crop_size,
-            spike_dir=cfg["DATA"].get("SPIKE_DIR", "spike"),
-            num_voxel_bins=int(cfg["DATA"].get("NUM_VOXEL_BINS", 5)),
-            use_precomputed_voxels=bool(cfg["DATA"].get("USE_PRECOMPUTED_VOXELS", True)),
-            image_exts=image_exts,
-            align_log_paths=align_log_paths,
-        )
-        val_loader = DataLoader(
-            val_set,
-            batch_size=int(cfg.get("TEST", {}).get("BATCH_SIZE", 1)),
-            shuffle=False,
-            num_workers=int(cfg.get("TEST", {}).get("NUM_WORKERS", 2)),
-            collate_fn=safe_spike_deblur_collate,
+    # Build model
+    print("[test.py] Building model...")
+    use_spike = cfg.get("MODEL", {}).get("USE_SPIKE", True)
+    
+    # VRT backbone parameters
+    upscale = int(cfg.get("MODEL", {}).get("UPSCALE", 1))
+    clip_size = int(cfg.get("MODEL", {}).get("CLIP_SIZE", 6))
+    img_size = [int(cfg["DATA"]["HEIGHT"]), int(cfg["DATA"]["WIDTH"])]
+    window_size = [int(x) for x in cfg.get("MODEL", {}).get("WINDOW_SIZE", [6,8,8])]
+    depths = [int(x) for x in cfg.get("MODEL", {}).get("DEPTHS", [8,8,8,8,8,8,8, 4,4,4,4, 4,4])]
+    indep_reconsts = [int(x) for x in cfg.get("MODEL", {}).get("INDEP_RECONSTS", [11,12])]
+    embed_dims = [int(x) for x in cfg.get("MODEL", {}).get("EMBED_DIMS", [120,120,120,120,120,120,120, 180,180,180,180, 180,180])]
+    num_heads = [int(x) for x in cfg.get("MODEL", {}).get("NUM_HEADS", [6,6,6,6,6,6,6, 6,6,6,6, 6,6])]
+    pa_frames = float(cfg.get("MODEL", {}).get("PA_FRAMES", 2.5))
+    deformable_groups = int(cfg.get("MODEL", {}).get("DEFORMABLE_GROUPS", 12))
+    
+    # Attention parameters
+    tsa_heads = int(cfg.get("MODEL", {}).get("SPIKE_TSA", {}).get("HEADS", 8))
+    fuse_heads = int(cfg.get("MODEL", {}).get("FUSE", {}).get("HEADS", 8))
+    
+    # Checkpoint flags
+    use_checkpoint_attn = cfg.get("MODEL", {}).get("USE_CHECKPOINT_ATTN", False)
+    use_checkpoint_ffn = cfg.get("MODEL", {}).get("USE_CHECKPOINT_FFN", False)
+    
+    # Build VRT backbone
+    vrt = VRT(
+        upscale=upscale,
+        clip_size=clip_size,
+        img_size=img_size,
+        window_size=window_size,
+        num_blocks=depths,
+        depths=depths,
+        embed_dims=embed_dims,
+        num_heads=num_heads,
+        inputconv_groups=[1,1,1,1,1,1,1, 1,1,1,1, 1,1],
+        deformable_groups=deformable_groups,
+        attention_heads=tsa_heads,
+        attention_window=[3] + [3]*12,
+        pa_frames=pa_frames,
+        indep_reconsts=indep_reconsts,
+        use_checkpoint_attn=use_checkpoint_attn,
+        use_checkpoint_ffn=use_checkpoint_ffn,
+    )
+    
+    if use_spike:
+        spike_bins = int(cfg["DATA"]["K"])
+        channels_per_scale = embed_dims
+        temporal_strides = cfg.get("MODEL", {}).get("SPIKE_ENCODER", {}).get("TEMPORAL_STRIDES")
+        spatial_strides = cfg.get("MODEL", {}).get("SPIKE_ENCODER", {}).get("SPATIAL_STRIDES")
+        tsa_dropout = float(cfg.get("MODEL", {}).get("SPIKE_TSA", {}).get("DROPOUT", 0.0))
+        tsa_mlp_ratio = int(cfg.get("MODEL", {}).get("SPIKE_TSA", {}).get("MLP_RATIO", 2))
+        fuse_dropout = float(cfg.get("MODEL", {}).get("FUSE", {}).get("DROPOUT", 0.0))
+        fuse_mlp_ratio = int(cfg.get("MODEL", {}).get("FUSE", {}).get("MLP_RATIO", 2))
+        tsa_chunk_cfg = cfg.get("MODEL", {}).get("SPIKE_TSA")
+        fuse_chunk_cfg = cfg.get("MODEL", {}).get("FUSE")
+        
+        model = VRTWithSpike(
+            vrt_backbone=vrt,
+            spike_bins=spike_bins,
+            channels_per_scale=channels_per_scale,
+            temporal_strides=temporal_strides,
+            spatial_strides=spatial_strides,
+            tsa_heads=tsa_heads,
+            tsa_dropout=tsa_dropout,
+            tsa_mlp_ratio=tsa_mlp_ratio,
+            tsa_chunk_cfg=tsa_chunk_cfg,
+            fuse_heads=fuse_heads,
+            fuse_dropout=fuse_dropout,
+            fuse_mlp_ratio=fuse_mlp_ratio,
+            fuse_chunk_cfg=fuse_chunk_cfg,
         )
     else:
-        # 简单的目录 API：按名称对齐 (000000.png ↔ 000000.npy)
+        model = vrt
+    
+    # Setup data loader (only if not using directory API)
+    use_dir_api = args.input_blur is not None and args.input_spike_vox is not None
+    if use_dir_api:
         blur_dir = Path(args.input_blur)
         vox_dir = Path(args.input_spike_vox)
-        out_dir = Path(args.output)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        val_loader = None
+    else:
+        print("[test.py] Building validation dataloader...")
+        val_dataset = SpikeDeblurDataset(
+            blur_root=Path(cfg["DATA"]["BLUR_ROOT"]),
+            spike_vox_root=Path(cfg["DATA"]["SPIKE_VOX_ROOT"]),
+            gt_root=Path(cfg["DATA"].get("GT_ROOT")),
+            clip_len=int(cfg["DATA"]["CLIP_LEN"]),
+            K=int(cfg["DATA"]["K"]),
+            split=cfg["DATA"].get("VAL_SPLIT", "val"),
+            mode="test"
+        )
+        val_loader = DataLoader(
+            val_dataset,
+            batch_size=1,
+            shuffle=False,
+            num_workers=0,
+            collate_fn=safe_spike_deblur_collate,
+            pin_memory=False
+        )
+        print(f"[test.py] Validation dataset size: {len(val_dataset)}")
 
-    # Window size for VRT (default 8x8 for deblur task)
-    window_size = cfg.get("MODEL", {}).get("WINDOW_SIZE", [clip_len, 8, 8])
-    if isinstance(window_size, int):
-        window_size = [clip_len, window_size, window_size]
-    
-    use_spike = bool(cfg.get("MODEL", {}).get("USE_SPIKE", True))
-    
-    # Image size for VRT (default 256x256 for deblur task)
-    img_size_h = int(cfg.get("MODEL", {}).get("IMG_SIZE_H", 256))
-    img_size_w = int(cfg.get("MODEL", {}).get("IMG_SIZE_W", 256))
-    
-    # CRITICAL: Must match training! VRT default is 16
-    deform_groups = int(cfg.get("MODEL", {}).get("DEFORM_GROUPS", 16))
-    
-    # Spike parameters (must be read BEFORE creating VRT to set embed_dims correctly)
-    spike_bins = int(cfg["DATA"]["K"])
-    
-    # CRITICAL: Read CHANNELS_PER_SCALE from config (must match training!)
-    # Default changed from [120]*7 to [96]*4 to match typical training config
-    channels_per_scale = cfg.get("MODEL", {}).get("CHANNELS_PER_SCALE", [96, 96, 96, 96])
-    
-    # Debug: Print the configuration being used
-    print(f"[test.py] channels_per_scale from config: {channels_per_scale}")
-    
-    # Configure VRT embed_dims to match training configuration
-    # Stage 1-4 use channels_per_scale, stages 5-7 and 8 extend with the last value
-    stage_channels = channels_per_scale
-    embed_dims_cfg = stage_channels + [stage_channels[-1]] * 3 + [stage_channels[-1]] * 6
-    print(f"[test.py] Final embed_dims_cfg for VRT: {embed_dims_cfg} (length={len(embed_dims_cfg)})")
-
-    vrt = VRT(
-        upscale=1,
-        in_chans=3,
-        out_chans=3,
-        img_size=[clip_len, img_size_h, img_size_w],
-        window_size=window_size,
-        embed_dims=embed_dims_cfg,  # CRITICAL: Must match training config
-        deformable_groups=deform_groups,
-    )
-    tsa_heads = int(cfg.get("MODEL", {}).get("SPIKE_TSA", {}).get("HEADS", 4))
-    fuse_heads = int(cfg.get("MODEL", {}).get("FUSE", {}).get("HEADS", 4))
-    
-    # Spike encoder strides (optional, uses defaults if not specified)
-    temporal_strides = cfg.get("MODEL", {}).get("SPIKE_ENCODER", {}).get("TEMPORAL_STRIDES")
-    spatial_strides = cfg.get("MODEL", {}).get("SPIKE_ENCODER", {}).get("SPATIAL_STRIDES")
-    
-    # Spike TSA parameters
-    tsa_dropout = float(cfg.get("MODEL", {}).get("SPIKE_TSA", {}).get("DROPOUT", 0.0))
-    tsa_mlp_ratio = int(cfg.get("MODEL", {}).get("SPIKE_TSA", {}).get("MLP_RATIO", 2))
-    
-    # Fusion parameters
-    fuse_dropout = float(cfg.get("MODEL", {}).get("FUSE", {}).get("DROPOUT", 0.0))
-    fuse_mlp_ratio = int(cfg.get("MODEL", {}).get("FUSE", {}).get("MLP_RATIO", 2))
-    
-    # Build chunk config dictionaries for TSA and Fuse
-    tsa_chunk_cfg = {
-        "adaptive": cfg.get("MODEL", {}).get("SPIKE_TSA", {}).get("ADAPTIVE_CHUNK", True),
-        "max_batch_tokens": cfg.get("MODEL", {}).get("SPIKE_TSA", {}).get("MAX_BATCH_TOKENS", 49152),
-        "chunk_size": cfg.get("MODEL", {}).get("SPIKE_TSA", {}).get("CHUNK_SIZE", 64),
-        "chunk_shape": cfg.get("MODEL", {}).get("SPIKE_TSA", {}).get("CHUNK_SHAPE", "square"),
-    }
-    
-    fuse_chunk_cfg = {
-        "adaptive": cfg.get("MODEL", {}).get("FUSE", {}).get("ADAPTIVE_CHUNK", True),
-        "max_batch_tokens": cfg.get("MODEL", {}).get("FUSE", {}).get("MAX_BATCH_TOKENS", 49152),
-        "chunk_size": cfg.get("MODEL", {}).get("FUSE", {}).get("CHUNK_SIZE", 64),
-        "chunk_shape": cfg.get("MODEL", {}).get("FUSE", {}).get("CHUNK_SHAPE", "square"),
-    }
-    
-    model = VRTWithSpike(
-        vrt_backbone=vrt, 
-        spike_bins=spike_bins,
-        channels_per_scale=channels_per_scale,
-        temporal_strides=temporal_strides,
-        spatial_strides=spatial_strides,
-        tsa_heads=tsa_heads,
-        tsa_dropout=tsa_dropout,
-        tsa_mlp_ratio=tsa_mlp_ratio,
-        tsa_chunk_cfg=tsa_chunk_cfg,
-        fuse_heads=fuse_heads,
-        fuse_dropout=fuse_dropout,
-        fuse_mlp_ratio=fuse_mlp_ratio,
-        fuse_chunk_cfg=fuse_chunk_cfg,
-    ) if use_spike else vrt
-    
-    # Load checkpoint if specified or from exp_dir
-    if args.exp_dir:
+    # Load checkpoint
+    checkpoint_path = get_checkpoint_path(exp_dir, args.checkpoint)
+    if checkpoint_path and checkpoint_path.exists():
         print(f"[test.py] Loading checkpoint from: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
         
@@ -401,56 +398,16 @@ def main() -> None:
             print(f"[test.py] Warning: Unexpected keys in checkpoint: {unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}")
         print(f"[test.py] Checkpoint loaded successfully!")
     else:
-        # Old checkpoint finding logic
-        checkpoint_path = cfg.get("TEST", {}).get("CHECKPOINT_PATH") or cfg.get("TRAIN", {}).get("CHECKPOINT_PATH")
-        if checkpoint_path is None:
-            # Auto-find the latest checkpoint in outputs/ckpts/
-            ckpt_dir = Path(cfg.get("LOG", {}).get("SAVE_DIR", "outputs")) / "ckpts"
-            if ckpt_dir.exists():
-                ckpt_files = list(ckpt_dir.glob("*.pth"))
-                if ckpt_files:
-                    # Use 'last.pth' if it exists, otherwise use the most recent file
-                    last_ckpt = ckpt_dir / "last.pth"
-                    if last_ckpt.exists():
-                        checkpoint_path = str(last_ckpt)
-                    else:
-                        checkpoint_path = str(max(ckpt_files, key=lambda p: p.stat().st_mtime))
-        
-        if checkpoint_path:
-            print(f"[test.py] Loading checkpoint from: {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location="cpu")
-            
-            # Handle different checkpoint formats
-            if "state_dict" in checkpoint:
-                state_dict = checkpoint["state_dict"]
-            elif "model" in checkpoint:
-                state_dict = checkpoint["model"]
-            else:
-                state_dict = checkpoint
-            
-            # Load state dict
-            missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-            if missing_keys:
-                print(f"[test.py] Warning: Missing keys in checkpoint: {missing_keys[:5]}{'...' if len(missing_keys) > 5 else ''}")
-            if unexpected_keys:
-                print(f"[test.py] Warning: Unexpected keys in checkpoint: {unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}")
-            print(f"[test.py] Checkpoint loaded successfully!")
-        else:
-            print("[test.py] WARNING: No checkpoint found! Using randomly initialized weights.")
+        print("[test.py] WARNING: No checkpoint found! Using randomly initialized weights.")
     
     model = model.to(device)
     model.eval()
 
-    if args.exp_dir:
-        out_dir = exp_dir / "test_results" / "visuals" if not use_dir_api else Path(args.output)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        metrics_dir = exp_dir / "test_results" / "metrics"
-        metrics_dir.mkdir(parents=True, exist_ok=True)
-    else:
-        out_dir = Path(cfg["LOG"].get("SAVE_DIR", "outputs")) / "visuals" if not use_dir_api else Path(args.output)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        metrics_dir = Path(cfg["LOG"].get("SAVE_DIR", "outputs")) / "metrics"
-        metrics_dir.mkdir(parents=True, exist_ok=True)
+    # For out_dir and metrics_dir (remove old, always use exp_dir)
+    out_dir = exp_dir / "test_results" / "visuals" if not use_dir_api else Path(args.output)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir = exp_dir / "test_results" / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
 
     torch.cuda.reset_peak_memory_stats(device) if device.type == 'cuda' else None
     t0 = time.time()
