@@ -36,7 +36,7 @@
 
 # Default configuration
 DEFAULT_CONFIG="options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike_local.json"
-DEFAULT_GOPRO_ROOT="/media/mallm/hd4t/modelrepostore/datasets/GOPRO_Large"
+DEFAULT_GOPRO_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large"
 DEFAULT_SPIKE_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large_spike_seq"
 
 # Parse arguments

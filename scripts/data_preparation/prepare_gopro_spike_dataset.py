@@ -13,24 +13,25 @@ Spike camera data for training. It handles:
 
 Dataset Structure:
 ------------------
-Input (after unzipping):
-  - GOPRO_Large/
-    ├── train/
-    │   ├── GOPR0374_11_00/
-    │   │   ├── blur/         # Blurred frames
-    │   │   ├── sharp/        # Sharp (GT) frames
+Input (after unzipping gopro_spike.zip):
+  - gopro_spike/
+    ├── GOPRO_Large/
+    │   ├── train/
+    │   │   ├── GOPR0374_11_00/
+    │   │   │   ├── blur/         # Blurred frames
+    │   │   │   ├── sharp/        # Sharp (GT) frames
+    │   │   │   └── ...
     │   │   └── ...
-    │   └── ...
-    └── test/
-        └── ...
-  
-  - gopro_spike/GOPRO_Large_spike_seq/
-    ├── train/
-    │   ├── GOPR0374_11_00/
-    │   │   └── spike/        # Spike data (.dat files)
-    │   └── ...
-    ├── test/
-    └── config.yaml           # Spike camera config (250x400)
+    │   └── test/
+    │       └── ...
+    │
+    └── GOPRO_Large_spike_seq/
+        ├── train/
+        │   ├── GOPR0374_11_00/
+        │   │   └── spike/        # Spike data (.dat files)
+        │   └── ...
+        ├── test/
+        └── config.yaml           # Spike camera config (250x400)
 
 Output:
   - GOPRO_Large/
@@ -44,7 +45,11 @@ Output:
 
 Usage:
 ------
-    python prepare_gopro_spike_dataset.py --gopro_root /path/to/GOPRO_Large \\
+    # If zip extracted to /media/mallm/hd4t/modelrepostore/datasets/gopro_spike/
+    python prepare_gopro_spike_dataset.py --dataset_root /media/mallm/hd4t/modelrepostore/datasets/gopro_spike
+    
+    # Or specify paths explicitly
+    python prepare_gopro_spike_dataset.py --gopro_root /path/to/gopro_spike/GOPRO_Large \\
                                           --spike_root /path/to/gopro_spike/GOPRO_Large_spike_seq \\
                                           --generate_lmdb
 """
@@ -299,8 +304,8 @@ def main():
     parser.add_argument(
         "--gopro_root",
         type=str,
-        default="/media/mallm/hd4t/modelrepostore/datasets/GOPRO_Large",
-        help="Path to GOPRO_Large dataset root"
+        default="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large",
+        help="Path to GOPRO_Large dataset root (default: assumes zip extracted to gopro_spike/)"
     )
     
     parser.add_argument(
@@ -308,6 +313,13 @@ def main():
         type=str,
         default="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large_spike_seq",
         help="Path to GoPro Spike dataset root"
+    )
+    
+    parser.add_argument(
+        "--dataset_root",
+        type=str,
+        default="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike",
+        help="Root directory where zip file was extracted (if provided, will auto-detect gopro_root and spike_root)"
     )
     
     parser.add_argument(
@@ -337,6 +349,22 @@ def main():
     )
     
     args = parser.parse_args()
+    
+    # Auto-detect paths from dataset_root if provided
+    if args.dataset_root:
+        dataset_root = Path(args.dataset_root)
+        if dataset_root.exists():
+            # Check if we have the expected structure
+            auto_gopro = dataset_root / "GOPRO_Large"
+            auto_spike = dataset_root / "GOPRO_Large_spike_seq"
+            
+            if auto_gopro.exists():
+                args.gopro_root = str(auto_gopro)
+                print(f"Auto-detected GoPro root: {auto_gopro}")
+            
+            if auto_spike.exists():
+                args.spike_root = str(auto_spike)
+                print(f"Auto-detected Spike root: {auto_spike}")
     
     gopro_root = Path(args.gopro_root)
     spike_root = Path(args.spike_root)

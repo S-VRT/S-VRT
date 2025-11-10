@@ -41,6 +41,7 @@ def log(*args, **kwargs):
 def logger_info(logger_name, log_path='default_logger.log'):
     ''' set up logger
     modified by Kai Zhang (github: https://github.com/cszn)
+    Enhanced to create timestamped log files for each run
     '''
     log = logging.getLogger(logger_name)
     if log.hasHandlers():
@@ -49,11 +50,34 @@ def logger_info(logger_name, log_path='default_logger.log'):
         print('LogHandlers setup!')
         level = logging.INFO
         formatter = logging.Formatter('%(asctime)s.%(msecs)03d : %(message)s', datefmt='%y-%m-%d %H:%M:%S')
-        fh = logging.FileHandler(log_path, mode='a')
+        
+        # Generate timestamp for log file
+        timestamp = datetime.datetime.now().strftime('_%y%m%d_%H%M%S')
+        
+        # Process log_path to add timestamp
+        if os.path.isdir(log_path):
+            # If log_path is a directory, create log file with timestamp
+            log_file = os.path.join(log_path, logger_name + timestamp + '.log')
+        else:
+            # If log_path is a file path, insert timestamp before extension
+            dir_name = os.path.dirname(log_path)
+            file_name = os.path.basename(log_path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+            name, ext = os.path.splitext(file_name)
+            log_file = os.path.join(dir_name, name + timestamp + ext) if dir_name else (name + timestamp + ext)
+        
+        # Ensure directory exists
+        log_dir = os.path.dirname(log_file)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        
+        # Use 'w' mode to create a new file for each run instead of appending
+        fh = logging.FileHandler(log_file, mode='w')
         fh.setFormatter(formatter)
         log.setLevel(level)
         log.addHandler(fh)
-        # print(len(log.handlers))
+        print(f'Log file created: {log_file}')
 
         sh = logging.StreamHandler()
         sh.setFormatter(formatter)
