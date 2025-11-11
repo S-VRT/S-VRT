@@ -110,11 +110,11 @@ The script also generates meta info files in `data/meta_info/`:
 - `meta_info_GoPro_train_GT.txt`: Training sequences and frame counts
 - `meta_info_GoPro_test_GT.txt`: Test sequences and frame counts
 
-Format:
+Format (`folder frame_count border start_frame`):
 ```
-GOPR0374_11_00 150
-GOPR0374_11_01 80
-...
+GOPR0374_11_00 150 0 1
+GOPR0374_11_01 80 0 203
+# ...
 ```
 
 ## What the preparation script does
@@ -153,6 +153,14 @@ Make sure you've extracted the gopro_spike dataset and it contains `train/` and 
 ### Issue: "No common sequences found"
 
 The GoPro and Spike datasets must have matching sequence names. Check that both datasets are properly extracted and correspond to each other.
+
+### Issue: meta_info file is empty
+
+Existing `train_GT/`, `train_GT_blurred/`, `test_GT/`, or `test_GT_blurred/` directories might be empty if a previous run was interrupted. Remove the empty directories or force regeneration:
+```bash
+python scripts/data_preparation/prepare_gopro_spike_dataset.py --splits train test --force
+```
+The script will log `Warning: No frames found ...` for any skipped sequence and omit it from the meta info file.
 
 ### Issue: LMDB generation fails
 

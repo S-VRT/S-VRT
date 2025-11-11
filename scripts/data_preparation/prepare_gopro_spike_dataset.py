@@ -231,6 +231,26 @@ def verify_gopro_spike_alignment(gopro_root: Path, spike_root: Path, split: str 
     return len(common) > 0
 
 
+def _extract_frame_indices(frames: List[Path]) -> Tuple[int, int]:
+    """Return start frame index and frame count from a list of frame paths."""
+    if not frames:
+        return 0, 0
+
+    indices = sorted(int(frame.stem) for frame in frames)
+    start_frame = indices[0]
+    # Check for gaps
+    expected = list(range(start_frame, start_frame + len(indices)))
+    if indices != expected:
+        missing = sorted(set(expected) - set(indices))
+        extra = sorted(set(indices) - set(expected))
+        print(
+            "    Warning: Non-contiguous frame indices detected. "
+            f"start={start_frame}, count={len(indices)}, "
+            f"missing_samples={missing[:5]}, extra_samples={extra[:5]}"
+        )
+    return start_frame, len(indices)
+
+
 def generate_meta_info(gopro_root: Path, split: str = "train") -> Path:
     """
     Generate meta info file for the dataset.
@@ -255,9 +275,23 @@ def generate_meta_info(gopro_root: Path, split: str = "train") -> Path:
     with open(meta_info_file, 'w') as f:
         for seq in sequences:
             frames = sorted(seq.glob("*.png"))
+            lq_seq = (gopro_root / f"{split}_GT_blurred" / seq.name)
+            lq_frames = sorted(lq_seq.glob("*.png")) if lq_seq.exists() else []
+
+            start_frame, frame_count = _extract_frame_indices(frames)
+
+            if frame_count == 0:
+                print(f"    Warning: No frames found for {seq.name}, skipping.")
+                continue
+
+            if len(frames) != len(lq_frames):
+                print(
+                    f"    Warning: GT/LQ frame count mismatch for {seq.name}. "
+                    f"GT={len(frames)}, LQ={len(lq_frames)}"
+                )
+
             # Write: folder_name frame_count border start_frame
-            # For GoPro: border=0, start_frame=0
-            f.write(f"{seq.name} {len(frames)} 0 0\n")
+            f.write(f"{seq.name} {frame_count} 0 {start_frame}\n")
     
     print(f"  ✓ Generated meta info: {meta_info_file}")
     print(f"    {len(sequences)} sequences")

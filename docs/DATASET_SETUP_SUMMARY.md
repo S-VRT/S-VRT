@@ -193,6 +193,13 @@ bash launch_train.sh 1 --prepare-data --generate-lmdb
 bash launch_train.sh 1 --prepare-data --force-prepare
 ```
 
+### Issue: `meta_info_GoPro_test_GT.txt` is empty
+**Solution**: The organized `test_GT/` folders exist but contain no PNG frames (often due to a previous interrupted preparation). Delete the empty folders or rerun:
+```bash
+python scripts/data_preparation/prepare_gopro_spike_dataset.py --splits train test --force
+```
+The script prints `Warning: No frames found ...` for any skipped sequence.
+
 ## 📚 Documentation References
 
 - **Main Guide**: `DATA_PREPARATION_GUIDE.md`

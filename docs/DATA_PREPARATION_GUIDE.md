@@ -185,6 +185,14 @@ bash launch_train.sh 1 options/vrt/my_config.json --prepare-data
 - **Solution**: Sequence names must match between GoPro and Spike datasets
 - Verify both datasets are from the same source and version
 
+**Issue**: `meta_info_GoPro_test_GT.txt` (or train) is empty / reports `0 sequences`
+- **Solution**: The preparation script skips any sequence folder that has no PNG frames. This usually means `*_GT/` and `*_GT_blurred/` already existed but were empty or partially copied.
+- Delete the stale folders or rerun with `--force` to rebuild them:
+  ```bash
+  python scripts/data_preparation/prepare_gopro_spike_dataset.py --splits train test --force
+  ```
+- After forcing regeneration, re-run the script (or `launch_train.sh ... --prepare-data`) and re-check the meta info file.
+
 ### Training Issues
 
 **Issue**: "FileNotFoundError" during training

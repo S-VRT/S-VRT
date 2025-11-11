@@ -1,5 +1,5 @@
 {
-  "task": "gopro_rgbspike_channel_concat"
+  "task": "006_train_vrt_videodeblurring_gopro_rgbspike"
   , "model": "vrt"
   
   // ========================================
@@ -44,9 +44,9 @@
     "train": {
       "name": "train_dataset"
       , "dataset_type": "VideoRecurrentTrainDatasetRGBSpike"
-      , "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large/train_GT"
-      , "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large/train_GT_blurred"
-      , "dataroot_spike": "/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large_spike_seq/train"
+      , "dataroot_gt": "/storage/main/users/hengyuanwu/Datasets/gopro_spikeGOPRO_Large/train_GT"
+      , "dataroot_lq": "/storage/main/users/hengyuanwu/Datasets/gopro_spikeGOPRO_Large/train_GT_blurred"
+      , "dataroot_spike": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large_spike_seq/train"
       , "spike_h": 250
       , "spike_w": 400
       , "spike_channels": 1
@@ -73,8 +73,8 @@
     , "test": {
       "name": "test_dataset"
       , "dataset_type": "VideoRecurrentTestDataset"
-      , "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large/test_GT"
-      , "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large/test_GT_blurred"
+      , "dataroot_gt": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large/test_GT"
+      , "dataroot_lq": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large/test_GT_blurred"
       , "cache_data": false
       , "io_backend": {"type": "disk"}
       , "num_frame": -1
@@ -153,9 +153,9 @@
     "use_tensorboard": true
     , "use_wandb": true
     ,"wandb_api_key": "ae83599fc8904d8986df7ba9e6f3328e042dcfb2"
-    , "wandb_project": "Deblur"
+    , "wandb_project": "vrt-videodeblurring"
     , "wandb_entity": null
-    , "wandb_name": "gopro_rgbspike_channel_concat"
+    , "wandb_name": "Deblur"
   }
 
 }
