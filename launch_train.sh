@@ -36,8 +36,8 @@
 
 # Default configuration
 DEFAULT_CONFIG="options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike_local.json"
-DEFAULT_GOPRO_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large"
-DEFAULT_SPIKE_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large_spike_seq"
+DEFAULT_GOPRO_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large"
+DEFAULT_SPIKE_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large_spike_seq"
 
 # Parse arguments
 GPU_COUNT=""
@@ -309,6 +309,11 @@ if [[ $EXIT_CODE -eq 0 ]]; then
     echo "Training completed successfully"
 else
     echo "Training exited with code: $EXIT_CODE"
+    if [[ -t 1 ]]; then
+        echo ""
+        echo "Training failed. Press Enter to close this window..."
+        read -r _
+    fi
 fi
 echo "=========================================="
 

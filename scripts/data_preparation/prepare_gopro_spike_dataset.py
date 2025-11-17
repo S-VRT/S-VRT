@@ -67,74 +67,122 @@ SCRIPT_DIR = Path(__file__).parent.absolute()
 KAIR_ROOT = SCRIPT_DIR.parent.parent
 sys.path.insert(0, str(KAIR_ROOT))
 
+# -----------------------------------------------------------------------------
+# Centralized dataset path defaults (environment-driven only)
+# -----------------------------------------------------------------------------
+ENV_DATASET_ROOT = os.environ.get("SVRT_DATASET_ROOT")
+ENV_GOPRO_ROOT = os.environ.get("SVRT_GOPRO_ROOT")
+ENV_SPIKE_ROOT = os.environ.get("SVRT_SPIKE_ROOT")
 
-def validate_gopro_structure(gopro_root: Path) -> Tuple[bool, str]:
+DEFAULT_DATASET_ROOT = ENV_DATASET_ROOT
+DEFAULT_GOPRO_ROOT = ENV_GOPRO_ROOT or (
+    str(Path(ENV_DATASET_ROOT) / "GOPRO_Large") if ENV_DATASET_ROOT else None
+)
+DEFAULT_SPIKE_ROOT = ENV_SPIKE_ROOT or (
+    str(Path(ENV_DATASET_ROOT) / "GOPRO_Large_spike_seq") if ENV_DATASET_ROOT else None
+)
+
+SPIKE_CONFIG_FILENAME = "config.yaml"
+DEFAULT_SPIKE_CONFIG = {
+    "spike_h": 250,
+    "spike_w": 400,
+    "is_labeled": False,
+    "labeled_data_type": [0],
+}
+
+
+def validate_gopro_structure(gopro_root: Path, required_splits: List[str]) -> Tuple[bool, str]:
     """Validate the GoPro dataset has the expected structure."""
     if not gopro_root.exists():
         return False, f"GoPro root does not exist: {gopro_root}"
     
-    train_dir = gopro_root / "train"
-    test_dir = gopro_root / "test"
+    available_splits = [split for split in required_splits if (gopro_root / split).exists()]
+    if not available_splits:
+        return False, (
+            f"None of the requested splits {required_splits} exist under {gopro_root}. "
+            "At least one split (e.g., 'train') is required."
+        )
     
-    if not train_dir.exists() or not test_dir.exists():
-        return False, f"Missing train or test directory in {gopro_root}"
+    for split in available_splits:
+        split_dir = gopro_root / split
+        subdirs = [d for d in split_dir.iterdir() if d.is_dir()]
+        if not subdirs:
+            return False, f"No sequences found in {split_dir}"
+        
+        # Check first subdir for blur/sharp folders
+        first_subdir = subdirs[0]
+        has_blur = (first_subdir / "blur").exists()
+        has_sharp = (first_subdir / "sharp").exists()
+        
+        if not (has_blur and has_sharp):
+            return False, f"Expected blur/sharp folders in {first_subdir}"
     
-    # Check if we have the raw structure (with subdirs containing blur/sharp)
-    train_subdirs = [d for d in train_dir.iterdir() if d.is_dir()]
-    if not train_subdirs:
-        return False, f"No training sequences found in {train_dir}"
-    
-    # Check first subdir for blur/sharp folders
-    first_subdir = train_subdirs[0]
-    has_blur = (first_subdir / "blur").exists()
-    has_sharp = (first_subdir / "sharp").exists()
-    
-    if not (has_blur and has_sharp):
-        return False, f"Expected blur/sharp folders in {first_subdir}"
-    
-    return True, "GoPro structure is valid"
+    return True, f"GoPro structure is valid for splits: {', '.join(available_splits)}"
 
 
-def validate_spike_structure(spike_root: Path) -> Tuple[bool, str]:
+def validate_spike_structure(spike_root: Path, required_splits: List[str]) -> Tuple[bool, str]:
     """Validate the Spike dataset has the expected structure."""
     if not spike_root.exists():
         return False, f"Spike root does not exist: {spike_root}"
     
-    train_dir = spike_root / "train"
-    test_dir = spike_root / "test"
     config_file = spike_root / "config.yaml"
-    
-    if not train_dir.exists() or not test_dir.exists():
-        return False, f"Missing train or test directory in {spike_root}"
     
     if not config_file.exists():
         return False, f"Missing config.yaml in {spike_root}"
     
-    # Check if we have spike subdirectories
-    train_subdirs = [d for d in train_dir.iterdir() if d.is_dir()]
-    if not train_subdirs:
-        return False, f"No training sequences found in {train_dir}"
+    available_splits = [split for split in required_splits if (spike_root / split).exists()]
+    if not available_splits:
+        return False, (
+            f"None of the requested splits {required_splits} exist under {spike_root}. "
+            "At least one split (e.g., 'train') is required."
+        )
     
-    # Check first subdir for spike folder
-    first_subdir = train_subdirs[0]
-    spike_dir = first_subdir / "spike"
-    if not spike_dir.exists():
-        return False, f"Expected spike folder in {first_subdir}"
+    for split in available_splits:
+        split_dir = spike_root / split
+        subdirs = [d for d in split_dir.iterdir() if d.is_dir()]
+        if not subdirs:
+            return False, f"No sequences found in {split_dir}"
+        
+        # Check first subdir for spike folder
+        first_subdir = subdirs[0]
+        spike_dir = first_subdir / "spike"
+        if not spike_dir.exists():
+            return False, f"Expected spike folder in {first_subdir}"
+        
+        # Check for .dat files
+        dat_files = list(spike_dir.glob("*.dat"))
+        if not dat_files:
+            return False, f"No .dat files found in {spike_dir}"
     
-    # Check for .dat files
-    dat_files = list(spike_dir.glob("*.dat"))
-    if not dat_files:
-        return False, f"No .dat files found in {spike_dir}"
-    
-    return True, "Spike structure is valid"
+    return True, f"Spike structure is valid for splits: {', '.join(available_splits)}"
 
 
 def load_spike_config(spike_root: Path) -> dict:
     """Load spike camera configuration."""
-    config_file = spike_root / "config.yaml"
+    config_file = spike_root / SPIKE_CONFIG_FILENAME
     with open(config_file, 'r') as f:
         config = yaml.safe_load(f)
     return config
+
+
+def ensure_spike_config(spike_root: Path, config_values: dict, force: bool = False) -> Path:
+    """Ensure spike config.yaml exists with the provided values."""
+    config_file = spike_root / SPIKE_CONFIG_FILENAME
+
+    if config_file.exists() and not force:
+        print(f"  ✓ Spike config already present: {config_file}")
+        return config_file
+
+    if not spike_root.exists():
+        raise FileNotFoundError(
+            f"Spike root does not exist, cannot write config: {spike_root}"
+        )
+
+    with open(config_file, "w") as f:
+        yaml.safe_dump(config_values, f, sort_keys=False)
+
+    print(f"  ✓ Wrote spike config: {config_file}")
+    return config_file
 
 
 def organize_gopro_data(gopro_root: Path, split: str = "train", force: bool = False) -> Path:
@@ -205,6 +253,10 @@ def verify_gopro_spike_alignment(gopro_root: Path, spike_root: Path, split: str 
     gopro_dir = gopro_root / split
     spike_dir = spike_root / split
     
+    if not gopro_dir.exists() or not spike_dir.exists():
+        print(f"  Skipping alignment for split '{split}' (missing directory).")
+        return False
+    
     gopro_seqs = set([d.name for d in gopro_dir.iterdir() if d.is_dir()])
     spike_seqs = set([d.name for d in spike_dir.iterdir() if d.is_dir()])
     
@@ -269,6 +321,10 @@ def generate_meta_info(gopro_root: Path, split: str = "train") -> Path:
     
     # Create meta_info directory if it doesn't exist
     meta_info_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    if not gt_dir.exists():
+        print(f"  Warning: GT directory missing for split '{split}' ({gt_dir}), skipping meta info.")
+        return meta_info_file
     
     sequences = sorted([d for d in gt_dir.iterdir() if d.is_dir()])
     
@@ -338,22 +394,25 @@ def main():
     parser.add_argument(
         "--gopro_root",
         type=str,
-        default="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large",
-        help="Path to GOPRO_Large dataset root (default: assumes zip extracted to gopro_spike/)"
+        default=DEFAULT_GOPRO_ROOT,
+        help="Path to GOPRO_Large dataset root "
+             "(default driven by $SVRT_GOPRO_ROOT or $SVRT_DATASET_ROOT/GOPRO_Large)"
     )
     
     parser.add_argument(
         "--spike_root",
         type=str,
-        default="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large_spike_seq",
-        help="Path to GoPro Spike dataset root"
+        default=DEFAULT_SPIKE_ROOT,
+        help="Path to GoPro Spike dataset root "
+             "(default driven by $SVRT_SPIKE_ROOT or $SVRT_DATASET_ROOT/GOPRO_Large_spike_seq)"
     )
     
     parser.add_argument(
         "--dataset_root",
         type=str,
-        default="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike",
-        help="Root directory where zip file was extracted (if provided, will auto-detect gopro_root and spike_root)"
+        default=DEFAULT_DATASET_ROOT,
+        help="Root directory where the combined dataset was extracted. "
+             "When provided (or via $SVRT_DATASET_ROOT), gopro/spike roots auto-detect."
     )
     
     parser.add_argument(
@@ -400,29 +459,65 @@ def main():
                 args.spike_root = str(auto_spike)
                 print(f"Auto-detected Spike root: {auto_spike}")
     
+    if not args.gopro_root or not args.spike_root:
+        print("✗ Missing dataset paths.")
+        print("  Please provide --gopro_root/--spike_root or set the environment variables")
+        print("  SVRT_DATASET_ROOT, SVRT_GOPRO_ROOT, SVRT_SPIKE_ROOT accordingly.")
+        return 1
+    
     gopro_root = Path(args.gopro_root)
     spike_root = Path(args.spike_root)
     
     print("=" * 70)
     print("GoPro + Spike Dataset Preparation")
     print("=" * 70)
+    
+    requested_splits = args.splits or ["train", "test"]
+    available_splits = []
+    missing_splits = []
+    for split in requested_splits:
+        if (gopro_root / split).exists():
+            available_splits.append(split)
+        else:
+            missing_splits.append(split)
+    
+    if not available_splits:
+        print(f"✗ None of the requested splits {requested_splits} exist under {gopro_root}.")
+        print("  Please double-check the dataset path or provide --splits with valid values.")
+        return 1
+    
+    if missing_splits:
+        print(f"  Warning: Skipping missing splits: {', '.join(missing_splits)}")
+    
+    args.splits = available_splits
+    
     print(f"GoPro root: {gopro_root}")
     print(f"Spike root: {spike_root}")
-    print(f"Splits: {args.splits}")
+    print(f"Requested splits: {requested_splits}")
+    print(f"Using splits: {args.splits}")
     print(f"Generate LMDB: {args.generate_lmdb}")
     print()
     
+    # Step 0: Ensure spike config exists
+    print("Step 0: Preparing spike config...")
+    try:
+        ensure_spike_config(spike_root, DEFAULT_SPIKE_CONFIG, force=args.force)
+    except FileNotFoundError as exc:
+        print(f"  ✗ {exc}")
+        return 1
+    print()
+
     # Step 1: Validate dataset structure
     if not args.skip_validation:
         print("Step 1: Validating dataset structure...")
         
-        valid, msg = validate_gopro_structure(gopro_root)
+        valid, msg = validate_gopro_structure(gopro_root, args.splits)
         if not valid:
             print(f"  ✗ GoPro validation failed: {msg}")
             return 1
         print(f"  ✓ {msg}")
         
-        valid, msg = validate_spike_structure(spike_root)
+        valid, msg = validate_spike_structure(spike_root, args.splits)
         if not valid:
             print(f"  ✗ Spike validation failed: {msg}")
             return 1

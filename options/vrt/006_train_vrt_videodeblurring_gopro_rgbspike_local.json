@@ -71,15 +71,23 @@
       // 数据集类型：VideoRecurrentTrainDatasetRGBSpike 表示支持 RGB 和 Spike 数据的视频循环训练数据集
       , "dataset_type": "VideoRecurrentTrainDatasetRGBSpike"
       // 真实标签（Ground Truth）数据路径：清晰视频帧的存储路径
-      , "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large/train_GT"
+      , "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/train_GT"
       // 低质量（Low Quality）数据路径：模糊视频帧的存储路径
-      , "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large/train_GT_blurred"
+      , "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/train_GT_blurred"
       // Spike 数据路径：Spike 序列数据的存储路径
-      , "dataroot_spike": "/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large_spike_seq/train"
+      , "dataroot_spike": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large_spike_seq/train"
       // Spike 数据高度：Spike 图像的高度（像素）
       , "spike_h": 250
       // Spike 数据宽度：Spike 图像的宽度（像素）
       , "spike_w": 400
+      // Spike 配置文件：记录 Spike 相机配置与标注信息
+      , "spike_config": {
+        "path": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large_spike_seq/config.yaml",
+        "spike_h": 250,
+        "spike_w": 400,
+        "is_labeled": false,
+        "labeled_data_type": [0]
+      }
       // Spike 数据通道数：1 表示单通道（灰度）Spike 数据
       , "spike_channels": 1
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
