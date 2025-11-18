@@ -1,4 +1,5 @@
 import os
+import shutil
 import torch
 import torch.nn as nn
 from utils.utils_bnorm import merge_bn, tidy_sequential
@@ -171,11 +172,30 @@ class ModelBase():
             
         save_filename = '{}_{}.pth'.format(iter_label, network_label)
         save_path = os.path.join(save_dir, save_filename)
-        network = self.get_bare_model(network)
-        state_dict = network.state_dict()
-        for key, param in state_dict.items():
-            state_dict[key] = param.cpu()
-        torch.save(state_dict, save_path)
+        tmp_save_path = save_path + '.tmp'
+        
+        try:
+            network = self.get_bare_model(network)
+            state_dict = network.state_dict()
+            for key, param in state_dict.items():
+                state_dict[key] = param.cpu()
+            
+            # Save to temporary file first (atomic write)
+            torch.save(state_dict, tmp_save_path)
+            
+            # Atomically rename temporary file to final path
+            # This ensures the checkpoint file is either complete or doesn't exist
+            shutil.move(tmp_save_path, save_path)
+            
+        except Exception as e:
+            # Clean up temporary file if it exists
+            if os.path.exists(tmp_save_path):
+                try:
+                    os.remove(tmp_save_path)
+                except OSError:
+                    pass  # Ignore cleanup errors
+            # Re-raise the exception to notify caller
+            raise RuntimeError(f'Failed to save network checkpoint to {save_path}: {str(e)}') from e
 
     # ----------------------------------------
     # load the state_dict of the network
@@ -207,7 +227,25 @@ class ModelBase():
             
         save_filename = '{}_{}.pth'.format(iter_label, optimizer_label)
         save_path = os.path.join(save_dir, save_filename)
-        torch.save(optimizer.state_dict(), save_path)
+        tmp_save_path = save_path + '.tmp'
+        
+        try:
+            # Save to temporary file first (atomic write)
+            torch.save(optimizer.state_dict(), tmp_save_path)
+            
+            # Atomically rename temporary file to final path
+            # This ensures the checkpoint file is either complete or doesn't exist
+            shutil.move(tmp_save_path, save_path)
+            
+        except Exception as e:
+            # Clean up temporary file if it exists
+            if os.path.exists(tmp_save_path):
+                try:
+                    os.remove(tmp_save_path)
+                except OSError:
+                    pass  # Ignore cleanup errors
+            # Re-raise the exception to notify caller
+            raise RuntimeError(f'Failed to save optimizer checkpoint to {save_path}: {str(e)}') from e
 
     # ----------------------------------------
     # load the state_dict of the optimizer

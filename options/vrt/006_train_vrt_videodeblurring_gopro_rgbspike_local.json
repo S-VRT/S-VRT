@@ -54,9 +54,15 @@
   , "path": {
     // 实验根目录：所有输出文件（模型、日志、图像等）的保存路径
     "root": "experiments"
-    // 预训练的生成器（Generator）模型路径：null 表示从头开始训练
+    // 预训练的生成器（Generator）模型路径，支持三种模式：
+    //   - null：从头开始训练，不自动查找检查点
+    //   - "auto"：自动查找 models 目录中的最新检查点（用于恢复训练）
+    //   - "path/to/model.pth"：使用指定的预训练模型路径
     , "pretrained_netG": null
-    // 预训练的编码器（Encoder）模型路径：null 表示不使用预训练编码器
+    // 预训练的编码器（Encoder）模型路径，支持三种模式：
+    //   - null：不使用预训练编码器，不自动查找检查点
+    //   - "auto"：自动查找 models 目录中的最新检查点（用于恢复训练）
+    //   - "path/to/model.pth"：使用指定的预训练模型路径
     , "pretrained_netE": null
   }
 
@@ -105,9 +111,9 @@
       // 缩放因子：1 表示不进行缩放
       , "scale": 1
       // 输入帧数：每个训练样本使用的视频帧数量
-      , "num_frame": 6
+      , "num_frame": 4
       // 真实标签图像尺寸：训练时裁剪的真实标签图像大小（像素）
-      , "gt_size": 224
+      , "gt_size": 192
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       , "interval_list": [1]
       // 是否随机反转视频序列：false 表示不反转
@@ -121,9 +127,9 @@
       // 是否打乱数据顺序：true 表示每个 epoch 随机打乱数据
       , "dataloader_shuffle": true
       // 数据加载器工作进程数：用于并行加载数据的进程数
-      , "dataloader_num_workers": 12
+      , "dataloader_num_workers": 120
       // 批次大小：每个批次包含的样本数量
-      , "dataloader_batch_size": 3
+      , "dataloader_batch_size": 6
       // 预取因子：每个工作进程预取的批次数量
       , "dataloader_prefetch_factor": 2
       // 是否保持工作进程持久化：true 表示工作进程在 epoch 之间保持活跃，提高效率
@@ -160,10 +166,10 @@
     , "in_chans": 4
     // 上采样倍数：1 表示不进行上采样（保持原始分辨率）
     , "upscale": 1
-    // 图像尺寸：[时间, 高度, 宽度]，[6,224,224] 表示 6 帧，每帧 224x224
-    , "img_size": [6,224,224]
-    // 窗口大小：[时间, 高度, 宽度]，[6,8,8] 表示 6 帧时间窗口，8x8 空间窗口
-    , "window_size": [6,8,8]
+    // 图像尺寸：[时间, 高度, 宽度]，[4,192,192] 表示 4 帧，每帧 192x192
+    , "img_size": [4,192,192]
+    // 窗口大小：[时间, 高度, 宽度]，[4,8,8] 表示 4 帧时间窗口，8x8 空间窗口
+    , "window_size": [4,8,8]
     // 各层深度：每个 Transformer 块的层数，共 11 个块
     // 前 7 个元素对应 stage1-7（每个深度为 8），后 4 个元素对应 stage8 中的 4 个 RTMSA 块（每个深度为 4）
     // 注意：stage8 还有一个初始的 Linear 层（不计入 depths）
@@ -180,7 +186,7 @@
     , "num_heads": [6,6,6,6,6,6,6, 6,6, 6,6]
     // SPyNet 光流网络路径：null 表示自动下载预训练的 SpyNet 模型
     // 如果指定路径但文件不存在，会自动从 GitHub 下载
-    , "spynet_path": null
+    , "spynet_path": "model_zoo/vrt/spynet_sintel_final-3d2a1287.pth"
     // 并行对齐帧数：用于对齐的并行帧数量（支持 2、4、6）
     // 当 pa_frames=2 时，使用 get_flow_2frames 计算相邻帧之间的光流
     // 注意：光流计算时只使用 RGB 通道（前 3 个通道），即使输入包含 Spike 通道
@@ -230,7 +236,7 @@
     // 生成器优化器类型："adam" 表示使用 Adam 优化器
     , "G_optimizer_type": "adam"
     // 生成器学习率：初始学习率
-    , "G_optimizer_lr": 4e-4
+    , "G_optimizer_lr": 4e-5
     // Adam 优化器的 beta 参数：[beta1, beta2]，用于计算梯度的一阶和二阶矩估计
     , "G_optimizer_betas": [0.9,0.99]
     // 权重衰减（L2 正则化）系数：0 表示不使用权重衰减
@@ -273,11 +279,11 @@
 
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
-    , "checkpoint_test": 2000
+    , "checkpoint_test": 200
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     , "checkpoint_save": 2000
     // 打印检查点间隔：每训练多少迭代打印一次训练信息
-    , "checkpoint_print": 200
+    , "checkpoint_print": 50
   }
 
   // ========================================
@@ -296,8 +302,8 @@
     , "num_frame_testing": 18
     // 测试时的重叠帧数：2 表示相邻测试窗口之间有 2 帧重叠（用于滑动窗口测试）
     , "num_frame_overlapping": 2
-    // 测试时的补丁大小：224 表示将大图像分割成 224x224 的补丁进行测试
-    , "size_patch_testing": 224
+    // 测试时的补丁大小：192 表示将大图像分割成 192x192 的补丁进行测试
+    , "size_patch_testing": 192
   }
 
   // ========================================

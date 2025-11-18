@@ -84,18 +84,48 @@ def main(json_path='options/vrt/006_train_vrt_videodeblurring_gopro.json'):
     
     # 查找生成器网络 G 的最新检查点
     # init_iter_G: 检查点对应的迭代次数，init_path_G: 检查点文件路径
-    init_iter_G, init_path_G = option.find_last_checkpoint(opt['path']['models'], net_type='G',
-                                                           pretrained_path=opt['path']['pretrained_netG'])
+    # 如果 pretrained_netG 为 None/null，则从头开始训练，不自动查找检查点
+    # 如果 pretrained_netG 为 "auto"，则自动查找检查点（用于恢复训练）
+    # 如果 pretrained_netG 为其他字符串（指定了路径），则使用指定的路径，不自动查找检查点
+    if opt['path']['pretrained_netG'] is None:
+        init_iter_G = 0
+        init_path_G = None
+    elif opt['path']['pretrained_netG'] == "auto":
+        # "auto" 表示自动查找检查点（恢复训练）
+        init_iter_G, init_path_G = option.find_last_checkpoint(opt['path']['models'], net_type='G',
+                                                               pretrained_path=None)
+    else:
+        # 指定了路径，直接使用指定的路径
+        init_iter_G = 0  # 无法从路径中提取迭代次数，设为 0
+        init_path_G = opt['path']['pretrained_netG']
+    
     # 查找编码器网络 E 的最新检查点
-    init_iter_E, init_path_E = option.find_last_checkpoint(opt['path']['models'], net_type='E',
-                                                           pretrained_path=opt['path']['pretrained_netE'])
+    # 如果 pretrained_netE 为 None/null，则不自动查找检查点
+    # 如果 pretrained_netE 为 "auto"，则自动查找检查点（用于恢复训练）
+    # 如果 pretrained_netE 为其他字符串（指定了路径），则使用指定的路径，不自动查找检查点
+    if opt['path']['pretrained_netE'] is None:
+        init_iter_E = 0
+        init_path_E = None
+    elif opt['path']['pretrained_netE'] == "auto":
+        # "auto" 表示自动查找检查点（恢复训练）
+        init_iter_E, init_path_E = option.find_last_checkpoint(opt['path']['models'], net_type='E',
+                                                               pretrained_path=None)
+    else:
+        # 指定了路径，直接使用指定的路径
+        init_iter_E = 0  # 无法从路径中提取迭代次数，设为 0
+        init_path_E = opt['path']['pretrained_netE']
+    
     # 更新配置中的预训练模型路径
     opt['path']['pretrained_netG'] = init_path_G
     opt['path']['pretrained_netE'] = init_path_E
     
-    # 查找优化器的最新检查点
-    init_iter_optimizerG, init_path_optimizerG = option.find_last_checkpoint(opt['path']['models'],
-                                                                             net_type='optimizerG')
+    # 查找优化器的最新检查点（只有当 G 或 E 有检查点时才查找优化器检查点）
+    if init_iter_G > 0 or init_iter_E > 0:
+        init_iter_optimizerG, init_path_optimizerG = option.find_last_checkpoint(opt['path']['models'],
+                                                                                 net_type='optimizerG')
+    else:
+        init_iter_optimizerG = 0
+        init_path_optimizerG = None
     opt['path']['pretrained_optimizerG'] = init_path_optimizerG
     
     # 当前训练步数取所有检查点中最大的迭代次数（用于恢复训练）
@@ -272,13 +302,30 @@ def main(json_path='options/vrt/006_train_vrt_videodeblurring_gopro.json'):
                                                                           model.current_learning_rate())
                 # 将损失信息合并到消息中
                 for k, v in logs.items():  # 合并日志信息到消息
-                    message += '{:s}: {:.3e} '.format(k, v)
+                    if k.startswith('time_'):
+                        # 耗时信息使用不同的格式
+                        message += '{:s}: {:.4f}s '.format(k.replace('time_', ''), v)
+                    else:
+                        message += '{:s}: {:.3e} '.format(k, v)
                 logger.info(message)  # 写入日志文件
                 
                 # 记录到 TensorBoard 和 WANDB（用于可视化）
                 if tb_logger is not None:
-                    logs['learning_rate'] = model.current_learning_rate()
-                    tb_logger.log_scalars(current_step, logs, tag_prefix='train')
+                    # 分离训练指标和耗时指标，分别记录到不同命名空间
+                    train_logs = {}
+                    time_logs = {}
+                    for key, value in logs.items():
+                        if key.startswith('time_'):
+                            # 去掉 time_ 前缀，便于在 WANDB/TensorBoard 中单独分组展示
+                            time_logs[key[5:]] = value
+                        else:
+                            train_logs[key] = value
+                    train_logs['learning_rate'] = model.current_learning_rate()
+                    
+                    if train_logs:
+                        tb_logger.log_scalars(current_step, train_logs, tag_prefix='train')
+                    if time_logs:
+                        tb_logger.log_scalars(current_step, time_logs, tag_prefix='time')
 
             # -------------------------------
             # 5) 保存模型检查点
@@ -320,6 +367,9 @@ def main(json_path='options/vrt/006_train_vrt_videodeblurring_gopro.json'):
                 test_results['ssim'] = []  # 结构相似性指数（RGB 通道）
                 test_results['psnr_y'] = []  # 峰值信噪比（Y 通道，亮度）
                 test_results['ssim_y'] = []  # 结构相似性指数（Y 通道，亮度）
+
+                # 初始化 gt 变量，避免在循环外部引用时出现 UnboundLocalError
+                gt = None
 
                 # 遍历测试数据
                 for idx, test_data in enumerate(test_loader):
@@ -367,39 +417,41 @@ def main(json_path='options/vrt/006_train_vrt_videodeblurring_gopro.json'):
                         # -----------------------
                         # 计算 PSNR 和 SSIM
                         # -----------------------
-                        # 处理真实标签图像
-                        img_gt = gt[i, ...].clamp_(0, 1).numpy()
-                        if img_gt.ndim == 3:
-                            # 从 CHW-RGB 格式转换为 HWC-BGR 格式
-                            img_gt = np.transpose(img_gt[[2, 1, 0], :, :], (1, 2, 0))  # CHW-RGB to HWC-BGR
-                        img_gt = (img_gt * 255.0).round().astype(np.uint8)  # float32 to uint8
-                        img_gt = np.squeeze(img_gt)  # 移除单维度
+                        # 只有在有真实标签时才计算指标
+                        if gt is not None:
+                            # 处理真实标签图像
+                            img_gt = gt[i, ...].clamp_(0, 1).numpy()
+                            if img_gt.ndim == 3:
+                                # 从 CHW-RGB 格式转换为 HWC-BGR 格式
+                                img_gt = np.transpose(img_gt[[2, 1, 0], :, :], (1, 2, 0))  # CHW-RGB to HWC-BGR
+                            img_gt = (img_gt * 255.0).round().astype(np.uint8)  # float32 to uint8
+                            img_gt = np.squeeze(img_gt)  # 移除单维度
 
-                        # 计算 RGB 通道的 PSNR 和 SSIM
-                        test_results_folder['psnr'].append(util.calculate_psnr(img, img_gt, border=0))
-                        test_results_folder['ssim'].append(util.calculate_ssim(img, img_gt, border=0))
-                        
-                        # 如果是 RGB 图像，计算 Y 通道（亮度）的指标
-                        if img_gt.ndim == 3:  # RGB image
-                            # 转换为 YCbCr 颜色空间，只取 Y 通道（亮度）
-                            img = util.bgr2ycbcr(img.astype(np.float32) / 255.) * 255.
-                            img_gt = util.bgr2ycbcr(img_gt.astype(np.float32) / 255.) * 255.
-                            # 计算 Y 通道的 PSNR 和 SSIM
-                            test_results_folder['psnr_y'].append(util.calculate_psnr(img, img_gt, border=0))
-                            test_results_folder['ssim_y'].append(util.calculate_ssim(img, img_gt, border=0))
-                        else:
-                            # 灰度图像，Y 通道指标等于 RGB 指标
-                            test_results_folder['psnr_y'] = test_results_folder['psnr']
-                            test_results_folder['ssim_y'] = test_results_folder['ssim']
+                            # 计算 RGB 通道的 PSNR 和 SSIM
+                            test_results_folder['psnr'].append(util.calculate_psnr(img, img_gt, border=0))
+                            test_results_folder['ssim'].append(util.calculate_ssim(img, img_gt, border=0))
+                            
+                            # 如果是 RGB 图像，计算 Y 通道（亮度）的指标
+                            if img_gt.ndim == 3:  # RGB image
+                                # 转换为 YCbCr 颜色空间，只取 Y 通道（亮度）
+                                img = util.bgr2ycbcr(img.astype(np.float32) / 255.) * 255.
+                                img_gt = util.bgr2ycbcr(img_gt.astype(np.float32) / 255.) * 255.
+                                # 计算 Y 通道的 PSNR 和 SSIM
+                                test_results_folder['psnr_y'].append(util.calculate_psnr(img, img_gt, border=0))
+                                test_results_folder['ssim_y'].append(util.calculate_ssim(img, img_gt, border=0))
+                            else:
+                                # 灰度图像，Y 通道指标等于 RGB 指标
+                                test_results_folder['psnr_y'] = test_results_folder['psnr']
+                                test_results_folder['ssim_y'] = test_results_folder['ssim']
 
-                    # 计算当前测试序列的平均指标
-                    psnr = sum(test_results_folder['psnr']) / len(test_results_folder['psnr'])
-                    ssim = sum(test_results_folder['ssim']) / len(test_results_folder['ssim'])
-                    psnr_y = sum(test_results_folder['psnr_y']) / len(test_results_folder['psnr_y'])
-                    ssim_y = sum(test_results_folder['ssim_y']) / len(test_results_folder['ssim_y'])
+                    # 如果有计算的指标，记录并保存结果
+                    if len(test_results_folder['psnr']) > 0:
+                        # 计算当前测试序列的平均指标
+                        psnr = sum(test_results_folder['psnr']) / len(test_results_folder['psnr'])
+                        ssim = sum(test_results_folder['ssim']) / len(test_results_folder['ssim'])
+                        psnr_y = sum(test_results_folder['psnr_y']) / len(test_results_folder['psnr_y'])
+                        ssim_y = sum(test_results_folder['ssim_y']) / len(test_results_folder['ssim_y'])
 
-                    # 如果有真实标签，记录并保存结果
-                    if gt is not None:
                         logger.info('Testing {:20s} ({:2d}/{}) - PSNR: {:.2f} dB; SSIM: {:.4f}; '
                                     'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
                                     format(folder[0], idx, len(test_loader), psnr, ssim, psnr_y, ssim_y))
@@ -412,7 +464,7 @@ def main(json_path='options/vrt/006_train_vrt_videodeblurring_gopro.json'):
                         logger.info('Testing {:20s}  ({:2d}/{})'.format(folder[0], idx, len(test_loader)))
 
                 # 汇总所有测试序列的 PSNR/SSIM 平均值
-                if gt is not None:
+                if len(test_results['psnr']) > 0:
                     ave_psnr = sum(test_results['psnr']) / len(test_results['psnr'])
                     ave_ssim = sum(test_results['ssim']) / len(test_results['ssim'])
                     ave_psnr_y = sum(test_results['psnr_y']) / len(test_results['psnr_y'])

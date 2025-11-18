@@ -139,6 +139,34 @@ export NCCL_ASYNC_ERROR_HANDLING=1
 # Uncomment for improved stability with some models:
 # export CUDA_DEVICE_MAX_CONNECTIONS=1
 
+# Function to handle errors gracefully
+# Shows error message and waits for user confirmation, then exits with code 0
+# This prevents terminal windows from closing on error, allowing users to
+# see the error and retry in the same terminal session
+handle_error() {
+    local exit_code=$1
+    local message="${2:-}"
+    
+    if [[ $exit_code -ne 0 ]]; then
+        echo ""
+        if [[ -n "$message" ]]; then
+            echo "$message"
+        fi
+        echo ""
+        echo "错误信息已显示在上方。"
+        echo "您可以在修复问题后，在同一终端会话中重新运行此脚本。"
+        echo ""
+        # Check if running in an interactive terminal
+        if [[ -t 1 ]]; then
+            echo "按 Enter 键继续（脚本将结束，但终端保持打开）..."
+            read -r _
+        fi
+        # Exit with code 0 to prevent terminal from closing
+        # The actual error code is already displayed in the message
+        exit 0
+    fi
+}
+
 echo "=========================================="
 echo "VRT Training Launch Script"
 echo "=========================================="
@@ -196,7 +224,8 @@ if [[ "$PREPARE_DATA" == true ]]; then
         echo ""
         echo "Please fix the data preparation issues before training."
         echo "Check the error messages above for details."
-        exit $PREP_EXIT_CODE
+        handle_error $PREP_EXIT_CODE "数据准备失败，请检查上面的错误信息。"
+        # handle_error will exit with code 0 to keep terminal open
     fi
     
     echo "=========================================="
@@ -307,14 +336,13 @@ echo ""
 echo "=========================================="
 if [[ $EXIT_CODE -eq 0 ]]; then
     echo "Training completed successfully"
+    echo "=========================================="
+    # Success - exit normally
+    exit 0
 else
     echo "Training exited with code: $EXIT_CODE"
-    if [[ -t 1 ]]; then
-        echo ""
-        echo "Training failed. Press Enter to close this window..."
-        read -r _
-    fi
+    echo "=========================================="
+    # Use handle_error to show error and keep terminal open
+    handle_error $EXIT_CODE "训练失败，请检查上面的错误信息。"
+    # handle_error will exit with code 0 to keep terminal open
 fi
-echo "=========================================="
-
-exit $EXIT_CODE

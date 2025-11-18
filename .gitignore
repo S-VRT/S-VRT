@@ -40,7 +40,6 @@ ENV/
 *.ipynb_checkpoints
 
 # Model files and data
-*.pth
 *.pt
 *.ckpt
 *.safetensors
@@ -49,7 +48,6 @@ ENV/
 *.onnx
 *.tflite
 *.bin
-model_zoo/
 pretrained_models/
 experiments/
 results/

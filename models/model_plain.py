@@ -11,6 +11,7 @@ from models.loss_ssim import SSIMLoss
 
 from utils.utils_model import test_mode
 from utils.utils_regularizers import regularizer_orth, regularizer_clip
+from utils.utils_timer import Timer
 
 
 class ModelPlain(ModelBase):
@@ -44,6 +45,11 @@ class ModelPlain(ModelBase):
         self.load_optimizers()                # load optimizer
         self.define_scheduler()               # define scheduler
         self.log_dict = OrderedDict()         # log
+        # 初始化计时器
+        self.timer = Timer(device=self.device, sync_cuda=True)
+        # 将计时器传递给网络，以便网络内部模块可以使用
+        if hasattr(self.get_bare_model(self.netG), 'set_timer'):
+            self.get_bare_model(self.netG).set_timer(self.timer)
 
     # ----------------------------------------
     # load pre-trained G model
@@ -147,24 +153,35 @@ class ModelPlain(ModelBase):
     # feed L/H data
     # ----------------------------------------
     def feed_data(self, data, need_H=True):
-        self.L = data['L'].to(self.device)
-        if need_H:
-            self.H = data['H'].to(self.device)
+        with self.timer.timer('data_load'):
+            self.L = data['L'].to(self.device)
+            if need_H:
+                self.H = data['H'].to(self.device)
 
     # ----------------------------------------
     # feed L to netG
     # ----------------------------------------
     def netG_forward(self):
-        self.E = self.netG(self.L)
+        with self.timer.timer('forward'):
+            self.E = self.netG(self.L)
 
     # ----------------------------------------
     # update parameters and get loss
     # ----------------------------------------
     def optimize_parameters(self, current_step):
-        self.G_optimizer.zero_grad()
+        # 重置当前迭代的计时
+        self.timer.current_timings.clear()
+        
+        with self.timer.timer('zero_grad'):
+            self.G_optimizer.zero_grad()
+        
         self.netG_forward()
-        G_loss = self.G_lossfn_weight * self.G_lossfn(self.E, self.H)
-        G_loss.backward()
+        
+        with self.timer.timer('loss_compute'):
+            G_loss = self.G_lossfn_weight * self.G_lossfn(self.E, self.H)
+        
+        with self.timer.timer('backward'):
+            G_loss.backward()
 
         # ------------------------------------
         # clip_grad
@@ -172,25 +189,30 @@ class ModelPlain(ModelBase):
         # `clip_grad_norm` helps prevent the exploding gradient problem.
         G_optimizer_clipgrad = self.opt_train['G_optimizer_clipgrad'] if self.opt_train['G_optimizer_clipgrad'] else 0
         if G_optimizer_clipgrad > 0:
-            torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.opt_train['G_optimizer_clipgrad'], norm_type=2)
+            with self.timer.timer('clip_grad'):
+                torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.opt_train['G_optimizer_clipgrad'], norm_type=2)
 
-        self.G_optimizer.step()
+        with self.timer.timer('optimizer_step'):
+            self.G_optimizer.step()
 
         # ------------------------------------
         # regularizer
         # ------------------------------------
         G_regularizer_orthstep = self.opt_train['G_regularizer_orthstep'] if self.opt_train['G_regularizer_orthstep'] else 0
         if G_regularizer_orthstep > 0 and current_step % G_regularizer_orthstep == 0 and current_step % self.opt['train']['checkpoint_save'] != 0:
-            self.netG.apply(regularizer_orth)
+            with self.timer.timer('regularizer_orth'):
+                self.netG.apply(regularizer_orth)
         G_regularizer_clipstep = self.opt_train['G_regularizer_clipstep'] if self.opt_train['G_regularizer_clipstep'] else 0
         if G_regularizer_clipstep > 0 and current_step % G_regularizer_clipstep == 0 and current_step % self.opt['train']['checkpoint_save'] != 0:
-            self.netG.apply(regularizer_clip)
+            with self.timer.timer('regularizer_clip'):
+                self.netG.apply(regularizer_clip)
 
         # self.log_dict['G_loss'] = G_loss.item()/self.E.size()[0]  # if `reduction='sum'`
         self.log_dict['G_loss'] = G_loss.item()
 
         if self.opt_train['E_decay'] > 0:
-            self.update_E(self.opt_train['E_decay'])
+            with self.timer.timer('update_E'):
+                self.update_E(self.opt_train['E_decay'])
 
     # ----------------------------------------
     # test / inference
@@ -214,7 +236,12 @@ class ModelPlain(ModelBase):
     # get log_dict
     # ----------------------------------------
     def current_log(self):
-        return self.log_dict
+        log_dict = self.log_dict.copy()
+        # 添加耗时信息到日志
+        current_timings = self.timer.get_current_timings()
+        for key, value in current_timings.items():
+            log_dict[f'time_{key}'] = value
+        return log_dict
 
     # ----------------------------------------
     # get L, E, H image

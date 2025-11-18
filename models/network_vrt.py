@@ -1418,8 +1418,13 @@ class VRT(nn.Module):
         """Return up to the first `channels` feature channels (default: RGB)."""
         return x[:, :, :min(channels, x.size(2)), :, :]
 
+    def set_timer(self, timer):
+        """设置计时器，用于记录各个模块的耗时"""
+        self.timer = timer
+
     def forward(self, x):
         # x: (N, D, C, H, W)
+        timer = getattr(self, 'timer', None)
 
         # main network
         if self.pa_frames:
@@ -1431,10 +1436,18 @@ class VRT(nn.Module):
             x_lq_rgb = self.extract_rgb(x_lq)
 
             # calculate flows
-            flows_backward, flows_forward = self.get_flows(x)
+            if timer is not None:
+                with timer.timer('flow_estimation'):
+                    flows_backward, flows_forward = self.get_flows(x)
+            else:
+                flows_backward, flows_forward = self.get_flows(x)
 
             # warp input
-            x_backward, x_forward = self.get_aligned_image_2frames(x,  flows_backward[0], flows_forward[0])
+            if timer is not None:
+                with timer.timer('flow_warp'):
+                    x_backward, x_forward = self.get_aligned_image_2frames(x,  flows_backward[0], flows_forward[0])
+            else:
+                x_backward, x_forward = self.get_aligned_image_2frames(x,  flows_backward[0], flows_forward[0])
             x = torch.cat([x, x_backward, x_forward], 2)
 
             # concatenate noise level map
@@ -1443,17 +1456,37 @@ class VRT(nn.Module):
 
             if self.upscale == 1:
                 # video deblurring, etc.
-                x = self.conv_first(x.transpose(1, 2))
-                x = x + self.conv_after_body(
-                    self.forward_features(x, flows_backward, flows_forward).transpose(1, 4)).transpose(1, 4)
-                x = self.conv_last(x).transpose(1, 2)
+                if timer is not None:
+                    with timer.timer('conv_first'):
+                        x = self.conv_first(x.transpose(1, 2))
+                    with timer.timer('forward_features'):
+                        x_features = self.forward_features(x, flows_backward, flows_forward)
+                    with timer.timer('conv_after_body'):
+                        x = x + self.conv_after_body(x_features.transpose(1, 4)).transpose(1, 4)
+                    with timer.timer('conv_last'):
+                        x = self.conv_last(x).transpose(1, 2)
+                else:
+                    x = self.conv_first(x.transpose(1, 2))
+                    x = x + self.conv_after_body(
+                        self.forward_features(x, flows_backward, flows_forward).transpose(1, 4)).transpose(1, 4)
+                    x = self.conv_last(x).transpose(1, 2)
                 return x + x_lq_rgb
             else:
                 # video sr
-                x = self.conv_first(x.transpose(1, 2))
-                x = x + self.conv_after_body(
-                    self.forward_features(x, flows_backward, flows_forward).transpose(1, 4)).transpose(1, 4)
-                x = self.conv_last(self.upsample(self.conv_before_upsample(x))).transpose(1, 2)
+                if timer is not None:
+                    with timer.timer('conv_first'):
+                        x = self.conv_first(x.transpose(1, 2))
+                    with timer.timer('forward_features'):
+                        x_features = self.forward_features(x, flows_backward, flows_forward)
+                    with timer.timer('conv_after_body'):
+                        x = x + self.conv_after_body(x_features.transpose(1, 4)).transpose(1, 4)
+                    with timer.timer('upsample'):
+                        x = self.conv_last(self.upsample(self.conv_before_upsample(x))).transpose(1, 2)
+                else:
+                    x = self.conv_first(x.transpose(1, 2))
+                    x = x + self.conv_after_body(
+                        self.forward_features(x, flows_backward, flows_forward).transpose(1, 4)).transpose(1, 4)
+                    x = self.conv_last(self.upsample(self.conv_before_upsample(x))).transpose(1, 2)
                 _, _, C, H, W = x.shape
                 x_lq_rgb = torch.nn.functional.interpolate(
                     x_lq_rgb, size=(C, H, W), mode='trilinear', align_corners=False)
@@ -1463,9 +1496,17 @@ class VRT(nn.Module):
             x_mean = x.mean([1,3,4], keepdim=True)
             x = x - x_mean
 
-            x = self.conv_first(x.transpose(1, 2))
-            x = x + self.conv_after_body(
-                self.forward_features(x, [], []).transpose(1, 4)).transpose(1, 4)
+            if timer is not None:
+                with timer.timer('conv_first'):
+                    x = self.conv_first(x.transpose(1, 2))
+                with timer.timer('forward_features'):
+                    x_features = self.forward_features(x, [], [])
+                with timer.timer('conv_after_body'):
+                    x = x + self.conv_after_body(x_features.transpose(1, 4)).transpose(1, 4)
+            else:
+                x = self.conv_first(x.transpose(1, 2))
+                x = x + self.conv_after_body(
+                    self.forward_features(x, [], []).transpose(1, 4)).transpose(1, 4)
 
             x = torch.cat(torch.unbind(x , 2) , 1)
             x = self.conv_last(self.reflection_pad2d(F.leaky_relu(self.linear_fuse(x), 0.2), pad=3))
@@ -1593,21 +1634,48 @@ class VRT(nn.Module):
 
     def forward_features(self, x, flows_backward, flows_forward):
         '''Main network for feature extraction.'''
+        timer = getattr(self, 'timer', None)
 
-        x1 = self.stage1(x, flows_backward[0::4], flows_forward[0::4])
-        x2 = self.stage2(x1, flows_backward[1::4], flows_forward[1::4])
-        x3 = self.stage3(x2, flows_backward[2::4], flows_forward[2::4])
-        x4 = self.stage4(x3, flows_backward[3::4], flows_forward[3::4])
-        x = self.stage5(x4, flows_backward[2::4], flows_forward[2::4])
-        x = self.stage6(x + x3, flows_backward[1::4], flows_forward[1::4])
-        x = self.stage7(x + x2, flows_backward[0::4], flows_forward[0::4])
-        x = x + x1
+        if timer is not None:
+            with timer.timer('stage1'):
+                x1 = self.stage1(x, flows_backward[0::4], flows_forward[0::4])
+            with timer.timer('stage2'):
+                x2 = self.stage2(x1, flows_backward[1::4], flows_forward[1::4])
+            with timer.timer('stage3'):
+                x3 = self.stage3(x2, flows_backward[2::4], flows_forward[2::4])
+            with timer.timer('stage4'):
+                x4 = self.stage4(x3, flows_backward[3::4], flows_forward[3::4])
+            with timer.timer('stage5'):
+                x = self.stage5(x4, flows_backward[2::4], flows_forward[2::4])
+            with timer.timer('stage6'):
+                x = self.stage6(x + x3, flows_backward[1::4], flows_forward[1::4])
+            with timer.timer('stage7'):
+                x = self.stage7(x + x2, flows_backward[0::4], flows_forward[0::4])
+            x = x + x1
 
-        for layer in self.stage8:
-            x = layer(x)
+            with timer.timer('stage8'):
+                for layer in self.stage8:
+                    x = layer(x)
 
-        x = rearrange(x, 'n c d h w -> n d h w c')
-        x = self.norm(x)
-        x = rearrange(x, 'n d h w c -> n c d h w')
+            with timer.timer('norm'):
+                x = rearrange(x, 'n c d h w -> n d h w c')
+                x = self.norm(x)
+                x = rearrange(x, 'n d h w c -> n c d h w')
+        else:
+            x1 = self.stage1(x, flows_backward[0::4], flows_forward[0::4])
+            x2 = self.stage2(x1, flows_backward[1::4], flows_forward[1::4])
+            x3 = self.stage3(x2, flows_backward[2::4], flows_forward[2::4])
+            x4 = self.stage4(x3, flows_backward[3::4], flows_forward[3::4])
+            x = self.stage5(x4, flows_backward[2::4], flows_forward[2::4])
+            x = self.stage6(x + x3, flows_backward[1::4], flows_forward[1::4])
+            x = self.stage7(x + x2, flows_backward[0::4], flows_forward[0::4])
+            x = x + x1
+
+            for layer in self.stage8:
+                x = layer(x)
+
+            x = rearrange(x, 'n c d h w -> n d h w c')
+            x = self.norm(x)
+            x = rearrange(x, 'n d h w c -> n c d h w')
 
         return x

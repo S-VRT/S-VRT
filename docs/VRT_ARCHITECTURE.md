@@ -74,7 +74,10 @@ VRT
 **实现**:
 ```python
 if self.pa_frames:
-    conv_first_in_chans = in_chans*(1+2*pa_frames)  # RGB+Spike: 4*9 = 36
+    if self.nonblind_denoising:
+        conv_first_in_chans = in_chans*(1+2*self.pa_frames)+1
+    else:
+        conv_first_in_chans = in_chans*(1+2*self.pa_frames)
 else:
     conv_first_in_chans = in_chans
 
@@ -87,17 +90,20 @@ self.conv_first = nn.Conv3d(
 ```
 
 **张量形状变化**:
-- 输入: `(B, N, C*(1+2*2), H, W)` → `(B, 9*C, N, H, W)` (转置后)
+- 输入: `(B, N, C*(1+2*pa_frames), H, W)` → `(B, C*(1+2*pa_frames), N, H, W)` (转置后)
 - 输出: `(B, embed_dims[0], N, H, W)`
 
 **说明**:
-- `pa_frames=2` 表示使用前后各 2 帧进行对齐
-- 输入包含: 当前帧 + 前 2 帧 + 后 2 帧 → 共 9 帧的信息
-- RGB+Spike (4通道) 时，输入通道数为 `4*9=36`
+- `pa_frames` 参数控制用于光流计算的帧数（通常为 2、4 或 6）
+- 输入通道数计算公式: `in_chans * (1 + 2 * pa_frames)`
+  - `pa_frames=2`: `in_chans * 5` (当前帧 + 前2帧对齐 + 后2帧对齐)
+  - `pa_frames=4`: `in_chans * 9` (当前帧 + 前4帧对齐 + 后4帧对齐)
+- RGB+Spike (4通道) 且 `pa_frames=2` 时，输入通道数为 `4*5=20`
+- RGB+Spike (4通道) 且 `pa_frames=4` 时，输入通道数为 `4*9=36`
 
 ### 3.2 光流估计模块 (SpyNet)
 
-**位置**: `network_vrt.py` 第 359-516 行
+**位置**: `network_vrt.py` 第 359-440 行 (SpyNet 类), 第 1496 行 (`get_flow_2frames` 方法)
 
 **功能**: 估计相邻帧之间的光流 (Optical Flow)
 
