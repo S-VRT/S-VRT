@@ -358,30 +358,39 @@ def generate_meta_info(gopro_root: Path, split: str = "train") -> Path:
 def generate_lmdb(gopro_root: Path, split: str = "train"):
     """Generate LMDB files for faster data loading."""
     try:
-        from scripts.data_preparation import create_lmdb_for_vrt
-        
-        gt_dir = gopro_root / f"{split}_GT"
-        lq_dir = gopro_root / f"{split}_GT_blurred"
-        
-        print(f"  Generating LMDB for {split} GT...")
-        create_lmdb_for_vrt.main(
-            folder_path=str(gt_dir),
-            lmdb_path=str(gt_dir) + ".lmdb",
-            mode="GT"
-        )
-        
-        print(f"  Generating LMDB for {split} LQ...")
-        create_lmdb_for_vrt.main(
-            folder_path=str(lq_dir),
-            lmdb_path=str(lq_dir) + ".lmdb",
-            mode="LQ"
-        )
-        
-        print(f"  ✓ LMDB generation complete for {split}")
-        
+        from scripts.data_preparation import create_lmdb as create_lmdb_module
     except ImportError as e:
-        print(f"  Warning: Could not generate LMDB: {e}")
-        print("  You can generate it later using create_lmdb_for_vrt.py")
+        print(f"  Warning: Could not import create_lmdb: {e}")
+        print("  You can generate it later using scripts/data_preparation/create_lmdb.py")
+        return
+
+    gt_dir = gopro_root / f"{split}_GT"
+    lq_dir = gopro_root / f"{split}_GT_blurred"
+
+    def _build_lmdb(target_dir: Path, label: str):
+        if not target_dir.exists():
+            print(f"  Warning: {label} directory {target_dir} not found. Skipping.")
+            return
+
+        lmdb_path = Path(str(target_dir) + ".lmdb")
+        img_path_list, keys = create_lmdb_module.prepare_keys_gopro(str(target_dir))
+        if not img_path_list:
+            print(f"  Warning: No images found in {target_dir}. Skipping LMDB creation.")
+            return
+
+        print(f"  Generating LMDB for {split} {label}...")
+        create_lmdb_module.make_lmdb_from_imgs(
+            str(target_dir),
+            str(lmdb_path),
+            img_path_list,
+            keys,
+            multiprocessing_read=True
+        )
+
+    _build_lmdb(gt_dir, "GT")
+    _build_lmdb(lq_dir, "LQ")
+
+    print(f"  ✓ LMDB generation complete for {split}")
 
 
 def main():

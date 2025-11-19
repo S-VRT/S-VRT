@@ -123,14 +123,19 @@ class ModelVRT(ModelPlain):
             not_overlap_border = False
             b, d, c, h, w = lq.size()
             c = c - 1 if self.opt['netG'].get('nonblind_denoising', False) else c
+            c_out = self.opt['netG'].get('out_chans', c)
             stride = num_frame_testing - num_frame_overlapping
             d_idx_list = list(range(0, d-num_frame_testing, stride)) + [max(0, d-num_frame_testing)]
-            E = torch.zeros(b, d, c, h*sf, w*sf)
-            W = torch.zeros(b, d, 1, 1, 1)
+            E = None
+            W = None
 
             for d_idx in d_idx_list:
                 lq_clip = lq[:, d_idx:d_idx+num_frame_testing, ...]
                 out_clip = self._test_clip(lq_clip)
+                if E is None:
+                    c_out = out_clip.size(2)
+                    E = torch.zeros(b, d, c_out, h*sf, w*sf)
+                    W = torch.zeros(b, d, 1, 1, 1)
                 out_clip_mask = torch.ones((b, min(num_frame_testing, d), 1, 1, 1))
 
                 if not_overlap_border:
@@ -171,11 +176,12 @@ class ModelVRT(ModelPlain):
             # test patch by patch
             b, d, c, h, w = lq.size()
             c = c - 1 if self.opt['netG'].get('nonblind_denoising', False) else c
+            c_out = self.opt['netG'].get('out_chans', c)
             stride = size_patch_testing - overlap_size
             h_idx_list = list(range(0, h-size_patch_testing, stride)) + [max(0, h-size_patch_testing)]
             w_idx_list = list(range(0, w-size_patch_testing, stride)) + [max(0, w-size_patch_testing)]
-            E = torch.zeros(b, d, c, h*sf, w*sf)
-            W = torch.zeros_like(E)
+            E = None
+            W = None
 
             for h_idx in h_idx_list:
                 for w_idx in w_idx_list:
@@ -184,6 +190,11 @@ class ModelVRT(ModelPlain):
                         out_patch = self.netE(in_patch).detach().cpu()
                     else:
                         out_patch = self.netG(in_patch).detach().cpu()
+
+                    if E is None:
+                        c_out = out_patch.size(2)
+                        E = torch.zeros(b, d, c_out, h*sf, w*sf)
+                        W = torch.zeros_like(E)
 
                     out_patch_mask = torch.ones_like(out_patch)
 

@@ -35,9 +35,10 @@
 # ================================================================================
 
 # Default configuration
-DEFAULT_CONFIG="options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike_local.json"
+DEFAULT_CONFIG="options/vrt/gopro_rgb_local.json"
 DEFAULT_GOPRO_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large"
 DEFAULT_SPIKE_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large_spike_seq"
+DEFAULT_GPU_COUNT=3
 
 # Parse arguments
 GPU_COUNT=""
@@ -48,6 +49,7 @@ FORCE_PREPARE=false
 DATASET_ROOT=""
 OVERRIDE_GOPRO_ROOT=""
 OVERRIDE_SPIKE_ROOT=""
+GPU_LIST=""
 
 # Parse all arguments
 for arg in "$@"; do
@@ -76,6 +78,10 @@ for arg in "$@"; do
             OVERRIDE_SPIKE_ROOT="${arg#*=}"
             shift
             ;;
+        --gpus=*)
+            GPU_LIST="${arg#*=}"
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [GPU_COUNT] [CONFIG_PATH] [OPTIONS]"
             echo ""
@@ -90,6 +96,7 @@ for arg in "$@"; do
             echo "  --dataset-root=/path/to/gopro_spike           Root where zip was extracted"
             echo "  --gopro-root=/path/to/GOPRO_Large             Override GoPro root"
             echo "  --spike-root=/path/to/GOPRO_Large_spike_seq   Override Spike root"
+            echo "  --gpus=0,1,2     Comma-separated GPU ids for single-node DDP (default: 0,1,2)"
             echo "  --help, -h       Show this help message"
             echo ""
             echo "Examples:"
@@ -108,9 +115,36 @@ for arg in "$@"; do
     esac
 done
 
-# Set defaults if not provided
-GPU_COUNT=${GPU_COUNT:-1}
+# Set defaults if not provided (single-node 3-GPU by default)
+GPU_COUNT=${GPU_COUNT:-$DEFAULT_GPU_COUNT}
 CONFIG_PATH=${CONFIG_PATH:-$DEFAULT_CONFIG}
+if [[ -z "$GPU_LIST" ]]; then
+    if [[ "$GPU_COUNT" -le 1 ]]; then
+        GPU_LIST="0"
+    else
+        # Generate comma-separated list 0,1,...,GPU_COUNT-1
+        GPU_LIST=$(seq -s, 0 $((GPU_COUNT - 1)))
+    fi
+fi
+
+# Normalize GPU list (remove spaces) and derive effective GPU count
+GPU_LIST=$(echo "$GPU_LIST" | tr -d '[:space:]')
+IFS=',' read -r -a GPU_ID_ARRAY <<< "$GPU_LIST"
+GPU_COUNT_FROM_LIST=${#GPU_ID_ARRAY[@]}
+if [[ "$GPU_COUNT_FROM_LIST" -eq 0 ]]; then
+    echo "Invalid GPU list specified via --gpus (value: '$GPU_LIST')."
+    exit 1
+fi
+
+if [[ "$GPU_COUNT" -ne "$GPU_COUNT_FROM_LIST" ]]; then
+    echo "Info: GPU_COUNT ($GPU_COUNT) and GPU list size ($GPU_COUNT_FROM_LIST) differ."
+    echo "      Using GPU list size for torchrun."
+    GPU_COUNT=$GPU_COUNT_FROM_LIST
+fi
+
+if [[ -z "${MASTER_PORT:-}" ]]; then
+    export MASTER_PORT=12355
+fi
 
 # Resolve effective dataset roots
 EFFECTIVE_GOPRO_ROOT="$DEFAULT_GOPRO_ROOT"
@@ -172,6 +206,7 @@ echo "VRT Training Launch Script"
 echo "=========================================="
 echo "Config: $CONFIG_PATH"
 echo "Requested GPUs: $GPU_COUNT"
+echo "GPU List: $GPU_LIST"
 echo "Prepare Data: $PREPARE_DATA"
 echo "Generate LMDB: $GENERATE_LMDB"
 echo "Dataset Root: ${DATASET_ROOT:-<none>}"
@@ -312,10 +347,12 @@ else
         # Multi-GPU: use torchrun
         echo "Multi-GPU training with torchrun"
         echo "  GPUs: $GPU_COUNT"
+        echo "  CUDA_VISIBLE_DEVICES: $GPU_LIST"
         echo ""
         echo "Running: torchrun --nproc_per_node=$GPU_COUNT main_train_vrt.py --opt $RUNTIME_CONFIG"
         echo "=========================================="
         
+        CUDA_VISIBLE_DEVICES="$GPU_LIST" \
         torchrun \
             --nproc_per_node="$GPU_COUNT" \
             --standalone \
@@ -323,11 +360,13 @@ else
     else
         # Single GPU: plain python
         echo "Single GPU training"
+        SINGLE_GPU_ID="${GPU_ID_ARRAY[0]}"
+        echo "  CUDA_VISIBLE_DEVICES: $SINGLE_GPU_ID"
         echo ""
         echo "Running: python main_train_vrt.py --opt $RUNTIME_CONFIG"
         echo "=========================================="
         
-        python main_train_vrt.py --opt "$RUNTIME_CONFIG"
+        CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" python main_train_vrt.py --opt "$RUNTIME_CONFIG"
     fi
 fi
 

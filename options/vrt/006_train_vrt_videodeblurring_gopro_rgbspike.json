@@ -76,6 +76,9 @@
       , "cache_data": false
       , "io_backend": {"type": "disk"}
       , "num_frame": -1
+      , "dataloader_shuffle": false
+      , "dataloader_num_workers": 8
+      , "dataloader_batch_size": 1
     }
   }
 

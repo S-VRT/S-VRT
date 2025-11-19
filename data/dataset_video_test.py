@@ -1,12 +1,15 @@
 import glob
 import os
+import numpy as np
 import torch
 from os import path as osp
 import torch.utils.data as data
 from torchvision import transforms
 from PIL import Image
+import cv2
 
 import utils.utils_video as utils_video
+from utils.spike_loader import SpikeStreamSimple, voxelize_spikes
 
 
 class VideoRecurrentTestDataset(data.Dataset):
@@ -129,6 +132,145 @@ class VideoRecurrentTestDataset(data.Dataset):
 
     def __len__(self):
         return len(self.folders)
+
+
+class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
+    """Video test dataset that concatenates RGB frames with Spike data channels."""
+
+    def __init__(self, opt):
+        super(VideoRecurrentTestDatasetRGBSpike, self).__init__()
+        self.opt = opt
+        self.cache_data = opt['cache_data']
+        self.gt_root, self.lq_root = opt['dataroot_gt'], opt['dataroot_lq']
+        self.data_info = {'lq_path': [], 'gt_path': [], 'folder': [], 'idx': [], 'border': []}
+
+        # Spike-specific configuration
+        self.spike_root = opt['dataroot_spike']
+        self.spike_h = opt.get('spike_h', 250)
+        self.spike_w = opt.get('spike_w', 400)
+        self.spike_channels = opt.get('spike_channels', 1)
+        self.spike_flipud = opt.get('spike_flipud', True)
+        self.spike_folder = opt.get('spike_folder_name', 'spike')
+        self.spike_ext = opt.get('spike_filename_ext', 'dat')
+
+        self.imgs_lq, self.imgs_gt = {}, {}
+        self.spike_paths = {}
+        self.spike_cache = {}
+
+        if 'meta_info_file' in opt:
+            with open(opt['meta_info_file'], 'r') as fin:
+                subfolders = [line.split(' ')[0] for line in fin]
+                subfolders_lq = [osp.join(self.lq_root, key) for key in subfolders]
+                subfolders_gt = [osp.join(self.gt_root, key) for key in subfolders]
+        else:
+            subfolders_lq = sorted(glob.glob(osp.join(self.lq_root, '*')))
+            subfolders_gt = sorted(glob.glob(osp.join(self.gt_root, '*')))
+
+        for subfolder_lq, subfolder_gt in zip(subfolders_lq, subfolders_gt):
+            subfolder_name = osp.basename(subfolder_lq)
+            img_paths_lq = sorted(list(utils_video.scandir(subfolder_lq, full_path=True)))
+            img_paths_gt = sorted(list(utils_video.scandir(subfolder_gt, full_path=True)))
+
+            max_idx = len(img_paths_lq)
+            assert max_idx == len(img_paths_gt), (f'Different number of images in lq ({max_idx})'
+                                                  f' and gt folders ({len(img_paths_gt)})')
+
+            self.data_info['lq_path'].extend(img_paths_lq)
+            self.data_info['gt_path'].extend(img_paths_gt)
+            self.data_info['folder'].extend([subfolder_name] * max_idx)
+            for i in range(max_idx):
+                self.data_info['idx'].append(f'{i}/{max_idx}')
+            border_l = [0] * max_idx
+            for i in range(self.opt['num_frame'] // 2):
+                border_l[i] = 1
+                border_l[max_idx - i - 1] = 1
+            self.data_info['border'].extend(border_l)
+
+            spike_folder = osp.join(self.spike_root, subfolder_name, self.spike_folder)
+            spike_paths = []
+            for img_path in img_paths_lq:
+                base = osp.splitext(osp.basename(img_path))[0]
+                spike_paths.append(osp.join(spike_folder, f'{base}.{self.spike_ext}'))
+            self.spike_paths[subfolder_name] = spike_paths
+
+            if self.cache_data:
+                print(f'Cache {subfolder_name} for VideoTestDatasetRGBSpike...')
+                self.imgs_lq[subfolder_name] = utils_video.read_img_seq(img_paths_lq)
+                self.imgs_gt[subfolder_name] = utils_video.read_img_seq(img_paths_gt)
+            else:
+                self.imgs_lq[subfolder_name] = img_paths_lq
+                self.imgs_gt[subfolder_name] = img_paths_gt
+
+        self.folders = sorted(list(set(self.data_info['folder'])))
+
+    def __len__(self):
+        return len(self.folders)
+
+    def __getitem__(self, index):
+        folder = self.folders[index]
+
+        if self.cache_data:
+            imgs_lq = self.imgs_lq[folder]
+            imgs_gt = self.imgs_gt[folder]
+        else:
+            imgs_lq = utils_video.read_img_seq(self.imgs_lq[folder])
+            imgs_gt = utils_video.read_img_seq(self.imgs_gt[folder])
+
+        t, _, h, w = imgs_lq.shape
+        spike_seq = self._get_spike_sequence(folder, h, w, t)
+        imgs_lq = torch.cat([imgs_lq, spike_seq], dim=1)
+
+        return {
+            'L': imgs_lq,
+            'H': imgs_gt,
+            'folder': folder,
+            'lq_path': self.imgs_lq[folder],
+        }
+
+    def _get_spike_sequence(self, folder, target_h, target_w, expected_len):
+        if folder in self.spike_cache:
+            return self.spike_cache[folder]
+
+        spike_tensors = []
+        spike_paths = self.spike_paths.get(folder, [])
+        if spike_paths and len(spike_paths) != expected_len:
+            raise ValueError(f'Spike sequence length mismatch for {folder}: '
+                             f'{len(spike_paths)} vs {expected_len}')
+
+        for spike_path in spike_paths:
+            spike_voxel = self._load_spike_voxel(spike_path)
+            spike_voxel = self._resize_spike_voxel(spike_voxel, target_h, target_w)
+            spike_tensors.append(torch.from_numpy(spike_voxel).float())
+
+        spike_seq = torch.stack(spike_tensors, dim=0)
+        self.spike_cache[folder] = spike_seq
+        return spike_seq
+
+    def _load_spike_voxel(self, spike_path):
+        if os.path.exists(spike_path):
+            try:
+                spike_stream = SpikeStreamSimple(
+                    spike_path,
+                    spike_h=self.spike_h,
+                    spike_w=self.spike_w,
+                    print_dat_detail=False
+                )
+                spike_matrix = spike_stream.get_spike_matrix(flipud=self.spike_flipud)
+                spike_voxel = voxelize_spikes(spike_matrix, num_channels=self.spike_channels)
+            except Exception as err:
+                print(f'Failed to load spike data {spike_path}: {err}. Using zeros.')
+                spike_voxel = np.zeros((self.spike_channels, self.spike_h, self.spike_w), dtype=np.float32)
+        else:
+            spike_voxel = np.zeros((self.spike_channels, self.spike_h, self.spike_w), dtype=np.float32)
+        return spike_voxel.astype(np.float32)
+
+    def _resize_spike_voxel(self, spike_voxel, target_h, target_w):
+        resized_channels = []
+        for ch in range(self.spike_channels):
+            resized_channels.append(
+                cv2.resize(spike_voxel[ch], (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+            )
+        return np.stack(resized_channels, axis=0)
 
 
 class SingleVideoRecurrentTestDataset(data.Dataset):

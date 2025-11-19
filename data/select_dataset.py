@@ -27,6 +27,8 @@ def define_Dataset(dataset_opt):
         from data.dataset_video_train_rgbspike import VideoRecurrentTrainDatasetRGBSpike as D
     elif dataset_type in ['videorecurrenttestdataset']:
         from data.dataset_video_test import VideoRecurrentTestDataset as D
+    elif dataset_type in ['videorecurrenttestdatasetrgbspike']:
+        from data.dataset_video_test import VideoRecurrentTestDatasetRGBSpike as D
     elif dataset_type in ['singlevideorecurrenttestdataset']:
         from data.dataset_video_test import SingleVideoRecurrentTestDataset as D
     elif dataset_type in ['videotestvimeo90kdataset']:

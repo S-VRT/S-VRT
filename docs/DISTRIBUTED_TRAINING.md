@@ -12,8 +12,11 @@
 - ✅ 支持 PyTorch 原生 `env://` 初始化方式
 - ✅ 兼容 SLURM 集群环境
 - ✅ 正确的设备分配（基于 `LOCAL_RANK`）
-- ✅ 自动数据分片（DistributedSampler）
+- ✅ 自动数据分片（DistributedSampler，训练和验证）
+- ✅ 训练和验证的批次大小、工作进程数自动按 GPU 数量分配
+- ✅ 验证/测试时自动聚合所有 GPU 的指标（all_reduce）
 - ✅ 仅在主进程保存模型和日志
+- ✅ 模型保存使用原子写入，确保文件完整性
 
 ---
 
@@ -191,34 +194,70 @@ export NCCL_IB_DISABLE=1
 
 ### 数据加载
 
-在分布式模式下，使用 `DistributedSampler` 自动分片数据：
+#### 训练数据加载
+
+在分布式模式下，使用 `DistributedSampler` 自动分片训练数据：
 
 ```python
 from torch.utils.data.distributed import DistributedSampler
 
-# 创建 sampler
-sampler = DistributedSampler(
-    dataset,
-    num_replicas=world_size,
-    rank=rank,
-    shuffle=True
+# 创建训练 sampler
+train_sampler = DistributedSampler(
+    train_dataset,
+    shuffle=True,
+    drop_last=True,
+    seed=seed
 )
 
-# 创建 DataLoader
-dataloader = DataLoader(
-    dataset,
-    batch_size=batch_size,
-    sampler=sampler,
-    num_workers=num_workers
+# 创建训练 DataLoader
+# 批次大小和工作进程数会自动按 GPU 数量分配
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=batch_size // num_gpu,  # 每卡批次大小
+    shuffle=False,  # 分布式时由 sampler 控制
+    num_workers=num_workers // num_gpu,  # 每卡工作进程数
+    drop_last=True,
+    pin_memory=True,
+    sampler=train_sampler
 )
 
 # 每个 epoch 开始时设置 epoch（确保数据随机性）
 for epoch in range(num_epochs):
-    sampler.set_epoch(epoch)
-    for batch in dataloader:
+    train_sampler.set_epoch(epoch)
+    for batch in train_loader:
         # 训练代码
         ...
 ```
+
+#### 验证/测试数据加载
+
+验证和测试时同样使用 `DistributedSampler` 进行数据分片：
+
+```python
+# 创建测试 sampler
+test_sampler = DistributedSampler(
+    test_dataset,
+    shuffle=False,  # 验证时通常不打乱
+    drop_last=False,  # 保留所有数据
+    seed=seed
+)
+
+# 创建测试 DataLoader
+test_loader = DataLoader(
+    test_dataset,
+    batch_size=max(1, test_batch_size // num_gpu),  # 每卡批次大小
+    shuffle=False,
+    num_workers=max(1, test_num_workers // num_gpu),  # 每卡工作进程数
+    drop_last=False,
+    pin_memory=True,
+    sampler=test_sampler
+)
+```
+
+**重要说明**：
+- 训练和验证的批次大小、工作进程数都会自动按 GPU 数量分配
+- 训练时每个 epoch 需要调用 `sampler.set_epoch(epoch)` 确保数据随机性
+- 验证时通常不需要设置 epoch（因为 `shuffle=False`）
 
 ### 模型封装
 
@@ -247,12 +286,63 @@ model = DistributedDataParallel(
 代码示例：
 
 ```python
-from utils.utils_dist import is_main_process
+from utils.utils_dist import is_main_process, barrier_safe
 
-if is_main_process():
+# 打印日志（仅主进程）
+if opt['rank'] == 0:
     logger.info(f"Epoch {epoch}, Loss: {loss:.4f}")
-    torch.save(model.state_dict(), 'checkpoint.pth')
+
+# 保存模型（仅主进程）
+if current_step % checkpoint_save == 0 and opt['rank'] == 0:
+    logger.info('Saving the model.')
+    model.save(current_step)  # 内部已使用 is_main_process() 检查
+
+# 分布式训练时，等待 rank 0 完成保存
+if current_step % checkpoint_save == 0 and opt['dist']:
+    barrier_safe()  # 同步所有进程
 ```
+
+**模型保存实现细节**：
+- 模型保存方法内部使用 `is_main_process()` 检查，确保只在主进程保存
+- 使用临时文件实现原子写入，避免保存过程中文件损坏
+- 保存后使用 `barrier_safe()` 同步所有进程，确保状态一致
+
+### 验证/测试时的指标聚合
+
+在分布式验证/测试时，每个进程处理不同的数据子集，需要聚合所有进程的指标：
+
+```python
+import torch.distributed as dist
+
+# 每个进程计算本地指标
+local_psnr_sum = sum(test_results['psnr'])
+local_psnr_count = len(test_results['psnr'])
+
+# 创建张量用于聚合
+metrics_tensor = torch.tensor(
+    [local_psnr_sum, local_psnr_count],
+    dtype=torch.float64,
+    device=device
+)
+
+# 使用 all_reduce 聚合所有进程的指标
+if opt['dist']:
+    dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+
+# 计算全局平均值
+global_psnr_sum, global_psnr_count = metrics_tensor.tolist()
+ave_psnr = global_psnr_sum / global_psnr_count
+
+# 只在主进程打印结果
+if is_main_process():
+    logger.info(f'Average PSNR: {ave_psnr:.2f} dB')
+```
+
+**关键点**：
+- 使用 `dist.all_reduce()` 聚合所有 GPU 的指标（sum 操作）
+- 聚合后计算全局平均值（sum / count）
+- 只在主进程打印和记录最终结果
+- 验证前使用 `barrier_safe()` 确保所有进程同步
 
 ---
 
@@ -298,12 +388,14 @@ Master: localhost:29500
 
 **解决方案**：
 
-- 分布式训练时，每张卡的批次大小 = 配置中的 `dataloader_batch_size`
-- 总批次大小 = `dataloader_batch_size × 卡数`
+- **训练时**：每张卡的批次大小 = 配置中的 `dataloader_batch_size // num_gpu`
+- **验证时**：每张卡的批次大小 = `max(1, dataloader_batch_size // num_gpu)`
+- **总批次大小** = 每卡批次大小 × 卡数
 
-例如：
-- 单卡训练：`batch_size = 8`
-- 4 卡训练：每卡 `batch_size = 2`（总批次 = 2 × 4 = 8）
+例如（4 卡训练）：
+- 配置中 `dataloader_batch_size = 8`
+- 训练时：每卡 `batch_size = 8 // 4 = 2`（总批次 = 2 × 4 = 8）
+- 验证时：每卡 `batch_size = max(1, 1 // 4) = 1`（总批次 = 1 × 4 = 4）
 
 在配置文件中调整：
 
@@ -311,11 +403,22 @@ Master: localhost:29500
 {
   "datasets": {
     "train": {
-      "dataloader_batch_size": 2  // 减小每卡批次大小
+      "dataloader_batch_size": 2,  // 每卡批次大小（会自动除以 GPU 数）
+      "dataloader_num_workers": 8  // 每卡工作进程数（会自动除以 GPU 数）
+    },
+    "test": {
+      "dataloader_batch_size": 1,  // 每卡批次大小（会自动除以 GPU 数）
+      "dataloader_num_workers": 8, // 每卡工作进程数（会自动除以 GPU 数）
+      "dataloader_shuffle": false
     }
   }
 }
 ```
+
+> **重要提示**：
+> - 训练和验证的 `dataloader_batch_size` 和 `dataloader_num_workers` 都会**自动按 GPU 数量分配**
+> - 配置文件中填写的是**总批次大小**，程序会自动计算每卡的批次大小
+> - 验证时使用 `max(1, ...)` 确保每卡至少处理 1 个样本
 
 ### 4. NCCL 初始化超时
 
@@ -349,13 +452,27 @@ export NCCL_SOCKET_IFNAME=eth0
 - ✅ 梯度会在反向传播时自动同步
 - ✅ 模型参数在所有 GPU 上保持一致
 
-如需同步指标用于日志记录，使用：
+如需同步指标用于日志记录，可以使用：
 
 ```python
 from utils.utils_dist import all_reduce_mean
 
 # 计算所有进程的平均损失
 avg_loss = all_reduce_mean(loss_tensor)
+```
+
+或者在验证时直接使用 `dist.all_reduce()`：
+
+```python
+import torch.distributed as dist
+
+# 聚合所有进程的指标
+metrics_tensor = torch.tensor([local_sum, local_count], device=device)
+if opt['dist']:
+    dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+
+# 计算全局平均值
+global_avg = metrics_tensor[0] / metrics_tensor[1]
 ```
 
 ### 6. 训练速度没有线性提升
@@ -604,10 +721,13 @@ print(f"Rank {rank} passed checkpoint")
 - ✅ 完全重写分布式训练支持
 - ✅ 支持 `env://` 初始化方式
 - ✅ 自动检测平台 DDP 和本地训练
-- ✅ 添加 `DistributedSampler` 支持
+- ✅ 添加 `DistributedSampler` 支持（训练和验证）
 - ✅ 修复 `LOCAL_RANK` 设备分配问题
 - ✅ 兼容 SLURM 集群环境
 - ✅ 添加实用工具函数（`is_main_process()`, `barrier()` 等）
+- ✅ 验证/测试时自动聚合所有 GPU 的指标
+- ✅ 训练和验证的批次大小、工作进程数自动按 GPU 数量分配
+- ✅ 模型保存使用原子写入和主进程检查
 
 ### v1.0 (Legacy)
 

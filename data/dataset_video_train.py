@@ -101,11 +101,21 @@ class VideoRecurrentTrainDataset(data.Dataset):
         self.is_lmdb = False
         if self.io_backend_opt['type'] == 'lmdb':
             self.is_lmdb = True
+            # Auto-add .lmdb suffix if not present
+            lq_path = str(self.lq_root)
+            gt_path = str(self.gt_root)
+            if not lq_path.endswith('.lmdb'):
+                lq_path = lq_path + '.lmdb'
+            if not gt_path.endswith('.lmdb'):
+                gt_path = gt_path + '.lmdb'
             if hasattr(self, 'flow_root') and self.flow_root is not None:
-                self.io_backend_opt['db_paths'] = [self.lq_root, self.gt_root, self.flow_root]
+                flow_path = str(self.flow_root)
+                if not flow_path.endswith('.lmdb'):
+                    flow_path = flow_path + '.lmdb'
+                self.io_backend_opt['db_paths'] = [lq_path, gt_path, flow_path]
                 self.io_backend_opt['client_keys'] = ['lq', 'gt', 'flow']
             else:
-                self.io_backend_opt['db_paths'] = [self.lq_root, self.gt_root]
+                self.io_backend_opt['db_paths'] = [lq_path, gt_path]
                 self.io_backend_opt['client_keys'] = ['lq', 'gt']
 
         # temporal augmentation configs
@@ -314,7 +324,14 @@ class VideoRecurrentTrainVimeoDataset(data.Dataset):
         self.is_lmdb = False
         if self.io_backend_opt['type'] == 'lmdb':
             self.is_lmdb = True
-            self.io_backend_opt['db_paths'] = [self.lq_root, self.gt_root]
+            # Auto-add .lmdb suffix if not present
+            lq_path = str(self.lq_root)
+            gt_path = str(self.gt_root)
+            if not lq_path.endswith('.lmdb'):
+                lq_path = lq_path + '.lmdb'
+            if not gt_path.endswith('.lmdb'):
+                gt_path = gt_path + '.lmdb'
+            self.io_backend_opt['db_paths'] = [lq_path, gt_path]
             self.io_backend_opt['client_keys'] = ['lq', 'gt']
 
         # indices of input images

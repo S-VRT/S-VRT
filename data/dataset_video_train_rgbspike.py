@@ -119,7 +119,14 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         self.is_lmdb = False
         if self.io_backend_opt['type'] == 'lmdb':
             self.is_lmdb = True
-            self.io_backend_opt['db_paths'] = [self.lq_root, self.gt_root]
+            # Auto-add .lmdb suffix if not present
+            lq_path = str(self.lq_root)
+            gt_path = str(self.gt_root)
+            if not lq_path.endswith('.lmdb'):
+                lq_path = lq_path + '.lmdb'
+            if not gt_path.endswith('.lmdb'):
+                gt_path = gt_path + '.lmdb'
+            self.io_backend_opt['db_paths'] = [lq_path, gt_path]
             self.io_backend_opt['client_keys'] = ['lq', 'gt']
 
         # temporal augmentation configs

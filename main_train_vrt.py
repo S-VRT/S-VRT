@@ -14,6 +14,7 @@ import numpy as np  # 数值计算库
 from collections import OrderedDict  # 有序字典，用于保持测试结果的顺序
 import logging  # 日志记录
 import torch  # PyTorch 深度学习框架
+import torch.distributed as dist
 from torch.utils.data import DataLoader  # 数据加载器
 from torch.utils.data.distributed import DistributedSampler  # 分布式训练的数据采样器
 
@@ -199,6 +200,7 @@ def main(json_path='options/vrt/006_train_vrt_videodeblurring_gopro.json'):
     # 2) 为训练集和测试集创建数据加载器
     # ----------------------------------------
     # 遍历配置中的所有数据集（通常包括 'train' 和 'test'）
+    test_loader = None
     for phase, dataset_opt in opt['datasets'].items():
         if phase == 'train':
             # 创建训练数据集
@@ -232,12 +234,32 @@ def main(json_path='options/vrt/006_train_vrt_videodeblurring_gopro.json'):
                                           pin_memory=True)
 
         elif phase == 'test':
-            # 创建测试数据集
+            # 创建测试/验证数据集
             test_set = define_Dataset(dataset_opt)
-            # 测试时通常使用批次大小为 1，不进行数据打乱
-            test_loader = DataLoader(test_set, batch_size=1,
-                                     shuffle=False, num_workers=1,
-                                     drop_last=False, pin_memory=True)  # 测试时不丢弃最后一个批次
+            # 允许通过配置指定 DataLoader 的各项参数
+            test_batch_size = dataset_opt.get('dataloader_batch_size', 1)
+            test_num_workers = dataset_opt.get('dataloader_num_workers', 1)
+            test_shuffle = dataset_opt.get('dataloader_shuffle', False)
+
+            if opt['dist']:
+                # 分布式验证 / 测试
+                test_sampler = DistributedSampler(test_set, shuffle=test_shuffle,
+                                                  drop_last=False, seed=seed)
+                test_loader = DataLoader(test_set,
+                                         batch_size=max(1, test_batch_size // opt['num_gpu']),
+                                         shuffle=False,
+                                         num_workers=max(1, test_num_workers // opt['num_gpu']),
+                                         drop_last=False,
+                                         pin_memory=True,
+                                         sampler=test_sampler)
+            else:
+                # 单卡验证 / 测试
+                test_loader = DataLoader(test_set,
+                                         batch_size=test_batch_size,
+                                         shuffle=test_shuffle,
+                                         num_workers=test_num_workers,
+                                         drop_last=False,
+                                         pin_memory=True)
         else:
             raise NotImplementedError("Phase [%s] is not recognized." % phase)
 
@@ -312,15 +334,10 @@ def main(json_path='options/vrt/006_train_vrt_videodeblurring_gopro.json'):
                 # 记录到 TensorBoard 和 WANDB（用于可视化）
                 if tb_logger is not None:
                     # 分离训练指标和耗时指标，分别记录到不同命名空间
-                    train_logs = {}
-                    time_logs = {}
-                    for key, value in logs.items():
-                        if key.startswith('time_'):
-                            # 去掉 time_ 前缀，便于在 WANDB/TensorBoard 中单独分组展示
-                            time_logs[key[5:]] = value
-                        else:
-                            train_logs[key] = value
+                    train_logs = {k: v for k, v in logs.items() if not k.startswith('time_')}
                     train_logs['learning_rate'] = model.current_learning_rate()
+                    # 耗时指标去掉time_前缀，记录到time命名空间
+                    time_logs = {k.replace('time_', ''): v for k, v in logs.items() if k.startswith('time_')}
                     
                     if train_logs:
                         tb_logger.log_scalars(current_step, train_logs, tag_prefix='train')
@@ -359,7 +376,11 @@ def main(json_path='options/vrt/006_train_vrt_videodeblurring_gopro.json'):
             # 6) 模型测试和评估
             # -------------------------------
             # 每隔一定步数在测试集上评估模型性能
-            if current_step % opt['train']['checkpoint_test'] == 0 and opt['rank'] == 0:
+            if current_step % opt['train']['checkpoint_test'] == 0:
+
+                is_master_process = opt['rank'] == 0
+                if opt['dist']:
+                    barrier_safe()
 
                 # 初始化测试结果字典，用于存储所有测试序列的指标
                 test_results = OrderedDict()
@@ -452,36 +473,70 @@ def main(json_path='options/vrt/006_train_vrt_videodeblurring_gopro.json'):
                         psnr_y = sum(test_results_folder['psnr_y']) / len(test_results_folder['psnr_y'])
                         ssim_y = sum(test_results_folder['ssim_y']) / len(test_results_folder['ssim_y'])
 
-                        logger.info('Testing {:20s} ({:2d}/{}) - PSNR: {:.2f} dB; SSIM: {:.4f}; '
-                                    'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
-                                    format(folder[0], idx, len(test_loader), psnr, ssim, psnr_y, ssim_y))
+                        if is_master_process:
+                            logger.info('Testing {:20s} ({:2d}/{}) - PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                                        'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                                        format(folder[0], idx, len(test_loader), psnr, ssim, psnr_y, ssim_y))
                         test_results['psnr'].append(psnr)
                         test_results['ssim'].append(ssim)
                         test_results['psnr_y'].append(psnr_y)
                         test_results['ssim_y'].append(ssim_y)
                     else:
                         # 没有真实标签时，只记录测试序列名称
-                        logger.info('Testing {:20s}  ({:2d}/{})'.format(folder[0], idx, len(test_loader)))
+                        if is_master_process:
+                            logger.info('Testing {:20s}  ({:2d}/{})'.format(folder[0], idx, len(test_loader)))
 
-                # 汇总所有测试序列的 PSNR/SSIM 平均值
-                if len(test_results['psnr']) > 0:
-                    ave_psnr = sum(test_results['psnr']) / len(test_results['psnr'])
-                    ave_ssim = sum(test_results['ssim']) / len(test_results['ssim'])
-                    ave_psnr_y = sum(test_results['psnr_y']) / len(test_results['psnr_y'])
-                    ave_ssim_y = sum(test_results['ssim_y']) / len(test_results['ssim_y'])
-                    logger.info('<epoch:{:3d}, iter:{:8,d} Average PSNR: {:.2f} dB; SSIM: {:.4f}; '
-                                'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
-                        epoch, current_step, ave_psnr, ave_ssim, ave_psnr_y, ave_ssim_y))
-                    
-                    # 将测试指标记录到 TensorBoard 和 WANDB
-                    if tb_logger is not None:
-                        test_metrics = {
-                            'psnr': ave_psnr,
-                            'ssim': ave_ssim,
-                            'psnr_y': ave_psnr_y,
-                            'ssim_y': ave_ssim_y
-                        }
-                        tb_logger.log_scalars(current_step, test_metrics, tag_prefix='test')
+                local_psnr_sum = sum(test_results['psnr'])
+                local_ssim_sum = sum(test_results['ssim'])
+                local_psnr_y_sum = sum(test_results['psnr_y'])
+                local_ssim_y_sum = sum(test_results['ssim_y'])
+
+                local_psnr_count = len(test_results['psnr'])
+                local_ssim_count = len(test_results['ssim'])
+                local_psnr_y_count = len(test_results['psnr_y'])
+                local_ssim_y_count = len(test_results['ssim_y'])
+
+                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                metrics_tensor = torch.tensor(
+                    [local_psnr_sum, local_ssim_sum, local_psnr_y_sum, local_ssim_y_sum,
+                     local_psnr_count, local_ssim_count, local_psnr_y_count, local_ssim_y_count],
+                    dtype=torch.float64, device=device)
+
+                if opt['dist']:
+                    dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+
+                (global_psnr_sum, global_ssim_sum, global_psnr_y_sum, global_ssim_y_sum,
+                 global_psnr_count, global_ssim_count, global_psnr_y_count,
+                 global_ssim_y_count) = metrics_tensor.tolist()
+
+                global_psnr_count = int(round(global_psnr_count))
+                global_ssim_count = int(round(global_ssim_count))
+                global_psnr_y_count = int(round(global_psnr_y_count))
+                global_ssim_y_count = int(round(global_ssim_y_count))
+
+                if global_psnr_count > 0:
+                    ave_psnr = global_psnr_sum / global_psnr_count
+                    ave_ssim = global_ssim_sum / max(global_ssim_count, 1)
+                    ave_psnr_y = global_psnr_y_sum / max(global_psnr_y_count, 1)
+                    ave_ssim_y = global_ssim_y_sum / max(global_ssim_y_count, 1)
+
+                    if is_master_process:
+                        logger.info('<epoch:{:3d}, iter:{:8,d} Average PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                                    'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                            epoch, current_step, ave_psnr, ave_ssim, ave_psnr_y, ave_ssim_y))
+                        
+                        # 将测试指标记录到 TensorBoard 和 WANDB
+                        if tb_logger is not None:
+                            test_metrics = {
+                                'psnr': ave_psnr,
+                                'ssim': ave_ssim,
+                                'psnr_y': ave_psnr_y,
+                                'ssim_y': ave_ssim_y
+                            }
+                            tb_logger.log_scalars(current_step, test_metrics, tag_prefix='test')
+
+                if opt['dist']:
+                    barrier_safe()
 
             # 检查是否达到总迭代次数，如果达到则结束训练
             if current_step > opt['train']['total_iter']:

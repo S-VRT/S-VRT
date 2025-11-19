@@ -3,7 +3,7 @@
   // 基础配置
   // ========================================
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
-  "task": "gopro_rgbspike_channel_concat"
+  "task": "gopro_rgb_local"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
   , "model": "vrt"
   
@@ -44,7 +44,7 @@
   // 图像缩放因子：1 表示不进行缩放（保持原始分辨率）
   ,"scale": 1
   // 输出图像通道数：3 表示输出 RGB 三通道图像（GT 图像的通道数）
-  // 注意：实际输入通道数由 netG.in_chans 控制（这里是 4：RGB+Spike），输出通道数由 netG.out_chans 控制
+  // 注意：实际输入通道数由 netG.in_chans 控制（这里是 3：RGB），输出通道数由 netG.out_chans 控制
   // 代码会自动处理输入输出通道数不匹配的情况（残差连接时只使用前 out_chans 个通道）
   , "n_channels": 3
 
@@ -74,30 +74,12 @@
     "train": {
       // 数据集名称：用于标识数据集
       "name": "train_dataset"
-      // 数据集类型：VideoRecurrentTrainDatasetRGBSpike 表示支持 RGB 和 Spike 数据的视频循环训练数据集
-      , "dataset_type": "VideoRecurrentTrainDatasetRGBSpike"
+      // 数据集类型：VideoRecurrentTrainDataset 表示支持 RGB 数据的视频循环训练数据集
+      , "dataset_type": "VideoRecurrentTrainDataset"
       // 真实标签（Ground Truth）数据路径：清晰视频帧的存储路径
       , "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/train_GT"
       // 低质量（Low Quality）数据路径：模糊视频帧的存储路径
       , "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/train_GT_blurred"
-      // Spike 数据路径：Spike 序列数据的存储路径
-      , "dataroot_spike": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large_spike_seq/train"
-      // Spike 数据高度：Spike 图像的高度（像素）
-      , "spike_h": 250
-      // Spike 数据宽度：Spike 图像的宽度（像素）
-      , "spike_w": 400
-      // Spike 配置文件：记录 Spike 相机配置与标注信息
-      , "spike_config": {
-        "path": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large_spike_seq/config.yaml",
-        "spike_h": 250,
-        "spike_w": 400,
-        "is_labeled": false,
-        "labeled_data_type": [0]
-      }
-      // Spike 数据通道数：1 表示单通道（灰度）Spike 数据
-      , "spike_channels": 1
-      // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
-      , "spike_flipud": true
       // 元信息文件路径：包含数据集元信息的文本文件路径
       , "meta_info_file": "data/meta_info/meta_info_GoPro_train_GT.txt"
       // 文件名模板：用于匹配文件名的格式，"06d" 表示 6 位数字（如 000001.png）
@@ -140,25 +122,11 @@
       // 数据集名称：用于标识测试数据集
       "name": "test_dataset"
       // 数据集类型：VideoRecurrentTestDataset 表示视频循环测试数据集
-      , "dataset_type": "VideoRecurrentTestDatasetRGBSpike"
+      , "dataset_type": "VideoRecurrentTestDataset"
       // 真实标签数据路径：测试集的清晰视频帧路径
       , "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/test_GT"
       // 低质量数据路径：测试集的模糊视频帧路径
       , "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/test_GT_blurred"
-      // Spike 数据路径：测试集的 Spike 序列数据路径
-      , "dataroot_spike": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large_spike_seq/test"
-      // Spike 数据高度：Spike 图像的高度（像素）
-      , "spike_h": 250
-      // Spike 数据宽度：Spike 图像的宽度（像素）
-      , "spike_w": 400
-      // Spike 数据通道数：1 表示单通道（灰度）Spike 数据
-      , "spike_channels": 1
-      // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
-      , "spike_flipud": true
-      // Spike 数据文件夹名称
-      , "spike_folder_name": "spike"
-      // Spike 数据文件扩展名
-      , "spike_filename_ext": "dat"
       // 是否缓存数据：false 表示不缓存，每次从磁盘读取
       , "cache_data": false
       // IO 后端配置：指定数据读取方式
@@ -180,10 +148,10 @@
   , "netG": {
     // 网络类型：指定为 "vrt" (Video Restoration Transformer)
     "net_type": "vrt"
-    // 输入通道数：4 表示 RGB (3) + Spike (1) 通道拼接
-    // 注意：当 pa_frames>0 时，经过对齐后实际输入 conv_first 的通道数为 in_chans*(1+2*4)=36
-    // 这是因为 nearest4 模式的对齐操作会将每个通道扩展为 4 倍（原始 + 后向对齐 + 前向对齐）
-    , "in_chans": 4
+    // 输入通道数：3 表示 RGB 三通道
+    // 注意：当 pa_frames>0 时，经过对齐后实际输入 conv_first 的通道数为 in_chans*(1+2*4)=27
+    // 这是因为 nearest4 模式的对齐操作会将每个通道扩展为 9 倍（原始 + 后向对齐 + 前向对齐）
+    , "in_chans": 3
     // 上采样倍数：1 表示不进行上采样（保持原始分辨率）
     , "upscale": 1
     // 图像尺寸：[时间, 高度, 宽度]，[4,192,192] 表示 4 帧，每帧 192x192
@@ -209,7 +177,6 @@
     , "spynet_path": "model_zoo/vrt/spynet_sintel_final-3d2a1287.pth"
     // 并行对齐帧数：用于对齐的并行帧数量（支持 2、4、6）
     // 当 pa_frames=2 时，使用 get_flow_2frames 计算相邻帧之间的光流
-    // 注意：光流计算时只使用 RGB 通道（前 3 个通道），即使输入包含 Spike 通道
     , "pa_frames": 2
     // 可变形卷积组数：可变形对齐模块的组数
     , "deformable_groups": 16
@@ -341,7 +308,7 @@
     // W&B 实体（用户名或团队名）：null 表示使用默认实体
     , "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
-    , "wandb_name": "gopro_rgbspike_channel_concat"
+    , "wandb_name": "gopro_rgb_local"
   }
 
 }
