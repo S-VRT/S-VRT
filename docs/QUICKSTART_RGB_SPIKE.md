@@ -6,6 +6,7 @@
 ```bash
 conda activate vrtspike
 cd /home/mallm/henry/KAIR
+pip install -r requirement.txt
 ```
 
 ## 一键启动训练
@@ -17,12 +18,8 @@ python main_train_vrt.py --opt options/vrt/006_train_vrt_videodeblurring_gopro_r
 
 ### 多卡训练 (推荐 - 3 GPUs)
 ```bash
-python -m torch.distributed.launch \
-    --nproc_per_node=3 \
-    --master_port=4321 \
-    main_train_vrt.py \
-    --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json \
-    --launcher pytorch
+torchrun --nproc_per_node=3 --master_port=4321 main_train_vrt.py \
+    --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
 ```
 
 ## 快速测试

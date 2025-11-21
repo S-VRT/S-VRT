@@ -83,7 +83,7 @@ python scripts/data_preparation/prepare_gopro_spike_dataset.py \
 ./launch_train.sh 4
 
 # 指定配置文件
-./launch_train.sh 4 options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike_local.json
+./launch_train.sh 4 options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
 
 # 训练前自动准备数据
 ./launch_train.sh 1 --prepare-data
@@ -94,7 +94,7 @@ python scripts/data_preparation/prepare_gopro_spike_dataset.py \
 #### 单GPU训练
 
 ```bash
-python main_train_vrt.py --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike_local.json
+python main_train_vrt.py --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
 ```
 
 #### 多GPU分布式训练
@@ -102,18 +102,18 @@ python main_train_vrt.py --opt options/vrt/006_train_vrt_videodeblurring_gopro_r
 ```bash
 # 使用torchrun
 torchrun --nproc_per_node=4 main_train_vrt.py \
-    --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike_local.json
+    --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
 
 # 或使用环境变量（平台DDP）
 python -u main_train_vrt.py \
-    --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike_local.json
+    --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
 ```
 
 ### 配置文件说明
 
 主要配置文件位于 `options/vrt/` 目录下：
 
-- `006_train_vrt_videodeblurring_gopro_rgbspike_local.json` - GoPro + Spike视频去模糊训练配置
+- `006_train_vrt_videodeblurring_gopro_rgbspike.json` - GoPro + Spike视频去模糊训练配置
 
 关键配置项：
 
@@ -140,13 +140,56 @@ python -u main_train_vrt.py \
 
 ## 测试
 
-### 视频去模糊测试
+### 快速使用 `launch_test.sh`
+
+`launch_test.sh` 与 `launch_train.sh` 共用同一份 JSON 配置（默认 `options/vrt/gopro_rgbspike_local.json`），
+脚本会读取其中的 `datasets.test`、`val` 等字段并生成一份运行期配置，然后调用
+`python main_test_vrt.py --opt <runtime_config>`。测试所需的任务名、分块策略、保存开关等都应在 JSON 中配置。
+如果你的数据根目录与 JSON 中不同，可继续使用 `--dataset-root`、`--gopro-root` 等参数覆盖，
+脚本会在生成的运行期配置里注入新的路径，整个流程仍只需要维护一份 JSON。
+
+```bash
+# 查看所有选项
+./launch_test.sh --help
+
+# 使用默认 JSON 配置运行测试（单 GPU）
+./launch_test.sh 1
+
+# 指定另一份 JSON 配置
+./launch_test.sh 1 options/vrt/gopro_rgbspike_ablation.json
+
+# 指定另一份 JSON 并覆盖数据根目录
+./launch_test.sh 1 options/vrt/gopro_rgbspike_ablation.json \
+    --dataset-root /data/gopro_spike_custom
+```
+
+常用参数说明：
+- `CONFIG_PATH`：可选位置参数，指向训练/测试 JSON；缺省为 `options/vrt/gopro_rgbspike_local.json`
+- `GPU_COUNT / --gpus`: 指定使用的 GPU 数量或编号（当前脚本仅启动单进程推理）
+- `--dataset-root` / `--gopro-root` / `--spike-root`: 快速覆盖数据根目录，脚本会在临时 JSON 中重写 `datasets.*.dataroot_*`
+- `--prepare-data`, `--generate-lmdb`, `--force-prepare`: 复用训练脚本的数据准备能力
+
+> 📌 需要修改任务名、分块大小、是否保存结果等行为时，请直接编辑 JSON
+（例如 `task`/`val.task_name`、`val.num_frame_testing`、`val.size_patch_testing`,
+`val.save_img` 等字段），脚本会自动读取这些配置并传递给 `main_test_vrt.py`。
+
+### 直接调用 `main_test_vrt.py`
+
+推荐方式是与训练一致，直接传入 JSON：
+
+```bash
+python main_test_vrt.py --opt options/vrt/gopro_rgbspike_local.json
+```
+
+若需要快速实验，也可以沿用旧的 CLI 方式手动指定参数：
 
 ```bash
 python main_test_vrt.py \
     --task 006_VRT_videodeblurring_GoPro \
     --folder_lq testsets/GoPro/test_GT_blurred \
     --folder_gt testsets/GoPro/test_GT \
+    --tile 40 192 192 \
+    --tile_overlap 2 20 20 \
     --save_result
 ```
 

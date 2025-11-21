@@ -152,8 +152,8 @@ cd /home/mallm/henry/KAIR
 python main_train_vrt.py --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
 
 # 多 GPU 分布式训练 (推荐)
-python -m torch.distributed.launch --nproc_per_node=3 --master_port=4321 \
-    main_train_vrt.py --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json --launcher pytorch
+torchrun --nproc_per_node=3 --master_port=4321 main_train_vrt.py \
+    --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
 ```
 
 ### 测试 Dataloader
@@ -176,8 +176,8 @@ print(f"GT shape: {sample['H'].shape}")  # (6, 3, 224, 224)
 
 ```
 1. 读取 RGB 帧 (从目录)
-   ├─ LQ: train_GT_blurred/GOPR0384_11_02/001301.png  (720x1280x3)
-   └─ GT: train_GT/GOPR0384_11_02/001301.png          (720x1280x3)
+   ├─ LQ: train_GT_blurred/GOPR0384_11_02/001301.png  (720x1280x3, BGR) → 转为 RGB
+   └─ GT: train_GT/GOPR0384_11_02/001301.png          (720x1280x3, BGR) → 转为 RGB
 
 2. 读取对应 Spike 数据
    └─ spike/001301.dat → (202, 250, 400) → 体素化 → (1, 250, 400)

@@ -29,12 +29,9 @@ from data.select_dataset import define_Dataset  # 数据集工厂函数
 from models.select_model import define_Model  # 模型工厂函数
 
 
-def main(json_path='options/vrt/006_train_vrt_videodeblurring_gopro.json'):
+def main():
     """
-    主训练函数
-    
-    参数:
-        json_path: 配置文件路径，包含所有训练超参数、数据路径、模型配置等
+    主训练函数，接收命令行参数指定的配置文件路径
     """
     
     '''
@@ -45,7 +42,7 @@ def main(json_path='options/vrt/006_train_vrt_videodeblurring_gopro.json'):
     
     # 创建命令行参数解析器
     parser = argparse.ArgumentParser()
-    parser.add_argument('--opt', type=str, default=json_path, help='配置文件 JSON 文件路径')
+    parser.add_argument('--opt', type=str, required=True, help='配置文件 JSON 文件路径')
     # 以下参数为向后兼容保留，但会被自动检测忽略
     parser.add_argument('--launcher', default='pytorch', help='任务启动器（已忽略，自动检测）')
     parser.add_argument('--local_rank', type=int, default=0, help='本地进程排名（已忽略，使用环境变量）')

@@ -5,8 +5,8 @@
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
   "task": "gopro_rgb_local"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
-  , "model": "vrt"
-  
+  ,
+  "model": "vrt"
   // ========================================
   // 分布式训练配置
   // ========================================
@@ -31,285 +31,434 @@
   // 或使用提供的启动脚本：
   //   ./launch_train.sh N THIS_CONFIG.json
   // ========================================
-  
   // GPU 设备 ID 列表：指定使用的 GPU（分布式模式下会被忽略）
-  , "gpu_ids": [0,1,2]
+  ,
+  "gpu_ids": [
+    0,
+    1,
+    2
+  ]
   // 是否启用分布式训练：true 表示启用，会自动检测环境变量
-  , "dist": true
+  ,
+  "dist": true
   // 是否查找未使用的参数：false 表示不查找，可以提高训练速度
-  , "find_unused_parameters": false
+  ,
+  "find_unused_parameters": false
   // 是否使用静态图：true 表示使用静态图优化，可以提高训练效率
-  , "use_static_graph": true
-
+  ,
+  "use_static_graph": true
   // 图像缩放因子：1 表示不进行缩放（保持原始分辨率）
-  ,"scale": 1
+  ,
+  "scale": 1
   // 输出图像通道数：3 表示输出 RGB 三通道图像（GT 图像的通道数）
   // 注意：实际输入通道数由 netG.in_chans 控制（这里是 3：RGB），输出通道数由 netG.out_chans 控制
   // 代码会自动处理输入输出通道数不匹配的情况（残差连接时只使用前 out_chans 个通道）
-  , "n_channels": 3
-
+  ,
+  "n_channels": 3
   // ========================================
   // 路径配置
   // ========================================
-  , "path": {
+  ,
+  "path": {
     // 实验根目录：所有输出文件（模型、日志、图像等）的保存路径
     "root": "experiments"
     // 预训练的生成器（Generator）模型路径，支持三种模式：
     //   - null：从头开始训练，不自动查找检查点
     //   - "auto"：自动查找 models 目录中的最新检查点（用于恢复训练）
     //   - "path/to/model.pth"：使用指定的预训练模型路径
-    , "pretrained_netG": null
+    ,
+    "pretrained_netG": null
     // 预训练的编码器（Encoder）模型路径，支持三种模式：
     //   - null：不使用预训练编码器，不自动查找检查点
     //   - "auto"：自动查找 models 目录中的最新检查点（用于恢复训练）
     //   - "path/to/model.pth"：使用指定的预训练模型路径
-    , "pretrained_netE": null
+    ,
+    "pretrained_netE": null
   }
-
   // ========================================
   // 数据集配置
   // ========================================
-  , "datasets": {
+  ,
+  "datasets": {
     // 训练数据集配置
     "train": {
       // 数据集名称：用于标识数据集
       "name": "train_dataset"
       // 数据集类型：VideoRecurrentTrainDataset 表示支持 RGB 数据的视频循环训练数据集
-      , "dataset_type": "VideoRecurrentTrainDataset"
+      ,
+      "dataset_type": "VideoRecurrentTrainDataset"
       // 真实标签（Ground Truth）数据路径：清晰视频帧的存储路径
-      , "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/train_GT"
+      ,
+      "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/train_GT"
       // 低质量（Low Quality）数据路径：模糊视频帧的存储路径
-      , "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/train_GT_blurred"
+      ,
+      "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/train_GT_blurred"
       // 元信息文件路径：包含数据集元信息的文本文件路径
-      , "meta_info_file": "data/meta_info/meta_info_GoPro_train_GT.txt"
+      ,
+      "meta_info_file": "data/meta_info/meta_info_GoPro_train_GT.txt"
       // 文件名模板：用于匹配文件名的格式，"06d" 表示 6 位数字（如 000001.png）
-      , "filename_tmpl": "06d"
+      ,
+      "filename_tmpl": "06d"
       // 文件扩展名：图像文件的扩展名
-      , "filename_ext": "png"
+      ,
+      "filename_ext": "png"
       // 是否为测试模式：false 表示训练模式
-      , "test_mode": false
+      ,
+      "test_mode": false
       // IO 后端配置：指定数据读取方式，"disk" 表示从磁盘读取
-      , "io_backend": {"type": "lmdb"}
+      ,
+      "io_backend": {
+        "type": "lmdb"
+      }
       // 缩放因子：1 表示不进行缩放
-      , "scale": 1
+      ,
+      "scale": 1
       // 输入帧数：每个训练样本使用的视频帧数量
-      , "num_frame": 4
+      ,
+      "num_frame": 4
       // 真实标签图像尺寸：训练时裁剪的真实标签图像大小（像素）
-      , "gt_size": 192
+      ,
+      "gt_size": 192
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
-      , "interval_list": [1]
+      ,
+      "interval_list": [
+        1
+      ]
       // 是否随机反转视频序列：false 表示不反转
-      , "random_reverse": false
+      ,
+      "random_reverse": false
       // 是否使用水平翻转数据增强：true 表示使用
-      , "use_hflip": true
+      ,
+      "use_hflip": true
       // 是否使用旋转数据增强：true 表示使用
-      , "use_rot": true
-
+      ,
+      "use_rot": true
       // 数据加载器配置
       // 是否打乱数据顺序：true 表示每个 epoch 随机打乱数据
-      , "dataloader_shuffle": true
+      ,
+      "dataloader_shuffle": true
       // 数据加载器工作进程数：用于并行加载数据的进程数
-      , "dataloader_num_workers": 120
+      ,
+      "dataloader_num_workers": 120
       // 批次大小：每个批次包含的样本数量
-      , "dataloader_batch_size": 6
+      ,
+      "dataloader_batch_size": 6
       // 预取因子：每个工作进程预取的批次数量
-      , "dataloader_prefetch_factor": 2
+      ,
+      "dataloader_prefetch_factor": 2
       // 是否保持工作进程持久化：true 表示工作进程在 epoch 之间保持活跃，提高效率
-      , "dataloader_persistent_workers": true
+      ,
+      "dataloader_persistent_workers": true
     }
     // 测试数据集配置
-    , "test": {
+    ,
+    "test": {
       // 数据集名称：用于标识测试数据集
       "name": "test_dataset"
       // 数据集类型：VideoRecurrentTestDataset 表示视频循环测试数据集
-      , "dataset_type": "VideoRecurrentTestDataset"
+      ,
+      "dataset_type": "VideoRecurrentTestDataset"
       // 真实标签数据路径：测试集的清晰视频帧路径
-      , "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/test_GT"
+      ,
+      "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/test_GT"
       // 低质量数据路径：测试集的模糊视频帧路径
-      , "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/test_GT_blurred"
+      ,
+      "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/test_GT_blurred"
       // 是否缓存数据：false 表示不缓存，每次从磁盘读取
-      , "cache_data": false
+      ,
+      "cache_data": false
       // IO 后端配置：指定数据读取方式
-      , "io_backend": {"type": "disk"}
+      ,
+      "io_backend": {
+        "type": "disk"
+      }
       // 输入帧数：-1 表示使用所有可用帧
-      , "num_frame": -1
+      ,
+      "num_frame": -1
       // 数据加载器是否打乱：测试/验证通常不打乱
-      , "dataloader_shuffle": false
+      ,
+      "dataloader_shuffle": false
       // 数据加载器工作进程数：可根据本地机器调整
-      , "dataloader_num_workers": 120
+      ,
+      "dataloader_num_workers": 120
       // 测试/验证批次大小：可根据显存调整
-      , "dataloader_batch_size": 6
+      ,
+      "dataloader_batch_size": 6
     }
   }
-
   // ========================================
   // 生成器网络（Generator）配置
   // ========================================
-  , "netG": {
+  ,
+  "netG": {
     // 网络类型：指定为 "vrt" (Video Restoration Transformer)
     "net_type": "vrt"
     // 输入通道数：3 表示 RGB 三通道
     // 注意：当 pa_frames>0 时，经过对齐后实际输入 conv_first 的通道数为 in_chans*(1+2*4)=27
     // 这是因为 nearest4 模式的对齐操作会将每个通道扩展为 9 倍（原始 + 后向对齐 + 前向对齐）
-    , "in_chans": 3
+    ,
+    "in_chans": 3
     // 上采样倍数：1 表示不进行上采样（保持原始分辨率）
-    , "upscale": 1
+    ,
+    "upscale": 1
     // 图像尺寸：[时间, 高度, 宽度]，[4,192,192] 表示 4 帧，每帧 192x192
-    , "img_size": [4,192,192]
+    ,
+    "img_size": [
+      4,
+      192,
+      192
+    ]
     // 窗口大小：[时间, 高度, 宽度]，[4,8,8] 表示 4 帧时间窗口，8x8 空间窗口
-    , "window_size": [4,8,8]
+    ,
+    "window_size": [
+      4,
+      8,
+      8
+    ]
     // 各层深度：每个 Transformer 块的层数，共 11 个块
     // 前 7 个元素对应 stage1-7（每个深度为 8），后 4 个元素对应 stage8 中的 4 个 RTMSA 块（每个深度为 4）
     // 注意：stage8 还有一个初始的 Linear 层（不计入 depths）
-    , "depths": [8,8,8,8,8,8,8, 4,4, 4,4]
+    ,
+    "depths": [
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      4,
+      4,
+      4,
+      4
+    ]
     // 独立重建层索引：指定 depths 数组中哪些索引对应的层进行独立重建（不依赖其他帧）
     // [9,10] 对应 depths[9] 和 depths[10]，即 stage8 中的第 3、4 个 RTMSA 块
     // 这些层使用窗口大小 [1, window_size[1], window_size[2]] 而不是 [window_size[0], window_size[1], window_size[2]]
-    , "indep_reconsts": [9,10]
+    ,
+    "indep_reconsts": [
+      9,
+      10
+    ]
     // 嵌入维度：每个 Transformer 块的嵌入维度
     // 前 7 个元素对应 stage1-7（每个为 96），后 4 个元素对应 stage8 中的 4 个 RTMSA 块（每个为 120）
     // 注意：stage8 的初始 Linear 层从 embed_dims[6] (96) 映射到 embed_dims[7] (120)
-    , "embed_dims": [96,96,96,96,96,96,96, 120,120, 120,120]
+    ,
+    "embed_dims": [
+      96,
+      96,
+      96,
+      96,
+      96,
+      96,
+      96,
+      120,
+      120,
+      120,
+      120
+    ]
     // 注意力头数：每个 Transformer 块的注意力头数
-    , "num_heads": [6,6,6,6,6,6,6, 6,6, 6,6]
+    ,
+    "num_heads": [
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6
+    ]
     // SPyNet 光流网络路径：null 表示自动下载预训练的 SpyNet 模型
     // 如果指定路径但文件不存在，会自动从 GitHub 下载
-    , "spynet_path": "model_zoo/vrt/spynet_sintel_final-3d2a1287.pth"
+    ,
+    "spynet_path": "model_zoo/vrt/spynet_sintel_final-3d2a1287.pth"
     // 并行对齐帧数：用于对齐的并行帧数量（支持 2、4、6）
     // 当 pa_frames=2 时，使用 get_flow_2frames 计算相邻帧之间的光流
-    , "pa_frames": 2
+    ,
+    "pa_frames": 2
     // 可变形卷积组数：可变形对齐模块的组数
-    , "deformable_groups": 16
+    ,
+    "deformable_groups": 16
     // 是否为非盲去噪：false 表示盲去模糊（不知道模糊核）
-    , "nonblind_denoising": false
-
+    ,
+    "nonblind_denoising": false
     // 梯度检查点配置（用于节省显存）
     // 是否对注意力层使用梯度检查点：true 表示使用，可以节省显存但增加计算时间
     // 使用 torch.checkpoint 来减少显存占用，但会增加约 20% 的计算时间
-    , "use_checkpoint_attn": true
+    ,
+    "use_checkpoint_attn": true
     // 是否对前馈网络使用梯度检查点：true 表示使用
-    , "use_checkpoint_ffn": true
+    ,
+    "use_checkpoint_ffn": true
     // 不使用梯度检查点的注意力块索引：这些 depths 索引对应的块不使用梯度检查点
     // [2,3,4] 对应 stage3、stage4、stage5 的注意力层
-    , "no_checkpoint_attn_blocks": [2,3,4]
+    ,
+    "no_checkpoint_attn_blocks": [
+      2,
+      3,
+      4
+    ]
     // 不使用梯度检查点的前馈网络块索引：这些 depths 索引对应的块不使用梯度检查点
     // [1,2,3,4,5,9] 对应 stage2-6 和 stage8 中第 3 个 RTMSA 块的前馈网络
-    , "no_checkpoint_ffn_blocks": [1,2,3,4,5,9]
-
+    ,
+    "no_checkpoint_ffn_blocks": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      9
+    ]
     // 初始化类型：网络参数的初始化方式，"default" 表示使用默认初始化
-    , "init_type": "default"
+    ,
+    "init_type": "default"
   }
-
-
   // ========================================
   // 训练配置
   // ========================================
-  , "train": {
+  ,
+  "train": {
     // 损失函数配置
     // 生成器损失函数类型："charbonnier" 表示使用 Charbonnier 损失（L1 损失的平滑版本）
     "G_lossfn_type": "charbonnier"
     // 生成器损失函数权重：损失函数的权重系数
-    , "G_lossfn_weight": 1.0
+    ,
+    "G_lossfn_weight": 1.0
     // Charbonnier 损失的 epsilon 参数：用于平滑 L1 损失的小常数
-    , "G_charbonnier_eps": 1e-9
+    ,
+    "G_charbonnier_eps": 1e-9
     // 随机种子：用于保证实验的可重复性
-    , "manual_seed": 19931005
-
+    ,
+    "manual_seed": 19931005
     // EMA（指数移动平均）配置
     // EMA 衰减率：用于更新指数移动平均模型的衰减系数（0.999 表示保留 99.9% 的旧值）
-    , "E_decay": 0.999
-
+    ,
+    "E_decay": 0.999
     // 优化器配置
     // 生成器优化器类型："adam" 表示使用 Adam 优化器
-    , "G_optimizer_type": "adam"
+    ,
+    "G_optimizer_type": "adam"
     // 生成器学习率：初始学习率
-    , "G_optimizer_lr": 4e-4
+    ,
+    "G_optimizer_lr": 4e-5
     // Adam 优化器的 beta 参数：[beta1, beta2]，用于计算梯度的一阶和二阶矩估计
-    , "G_optimizer_betas": [0.9,0.99]
+    ,
+    "G_optimizer_betas": [
+      0.9,
+      0.99
+    ]
     // 权重衰减（L2 正则化）系数：0 表示不使用权重衰减
-    , "G_optimizer_wd": 0
+    ,
+    "G_optimizer_wd": 0
     // 梯度裁剪阈值：null 表示不进行梯度裁剪
-    , "G_optimizer_clipgrad": null
+    ,
+    "G_optimizer_clipgrad": null
     // 是否重用优化器状态：true 表示在恢复训练时重用优化器状态
-    , "G_optimizer_reuse": true
-
+    ,
+    "G_optimizer_reuse": true
     // 固定参数配置（用于分阶段训练）
     // 固定参数的迭代次数：在前 fix_iter 次迭代中，fix_keys 指定的参数保持固定
-    , "fix_iter": 20000
+    ,
+    "fix_iter": 20000
     // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
-    , "fix_lr_mul": 0.125
+    ,
+    "fix_lr_mul": 0.125
     // 需要固定的参数键：["spynet", "deform"] 表示固定光流网络（SpyNet）和可变形对齐模块（DCNv2PackFlowGuided）
     // 在前 fix_iter 次迭代中，这些模块的参数不会被更新，学习率会被乘以 fix_lr_mul
-    , "fix_keys": ["spynet", "deform"]
-
+    ,
+    "fix_keys": [
+      "spynet",
+      "deform"
+    ]
     // 学习率调度器配置
     // 总迭代次数：训练的总迭代步数
-    , "total_iter": 30000
+    ,
+    "total_iter": 30000
     // 生成器学习率调度器类型："CosineAnnealingWarmRestarts" 表示带重启的余弦退火调度器
-    , "G_scheduler_type": "CosineAnnealingWarmRestarts"
+    ,
+    "G_scheduler_type": "CosineAnnealingWarmRestarts"
     // 调度器周期：余弦退火的周期长度（迭代次数）
-    , "G_scheduler_periods": 30000
+    ,
+    "G_scheduler_periods": 30000
     // 最小学习率：学习率的下限
-    , "G_scheduler_eta_min": 1e-7
-
+    ,
+    "G_scheduler_eta_min": 1e-7
     // 正则化配置
     // 正交正则化步数：null 表示不使用正交正则化
-    , "G_regularizer_orthstep": null
+    ,
+    "G_regularizer_orthstep": null
     // 裁剪正则化步数：null 表示不使用裁剪正则化
-    , "G_regularizer_clipstep": null
-
+    ,
+    "G_regularizer_clipstep": null
     // 参数严格匹配配置
     // 生成器参数严格匹配：true 表示加载预训练模型时严格匹配参数名称
-    , "G_param_strict": true
+    ,
+    "G_param_strict": true
     // 编码器参数严格匹配：true 表示加载预训练模型时严格匹配参数名称
-    , "E_param_strict": true
-
+    ,
+    "E_param_strict": true
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
-    , "checkpoint_test": 2000
+    ,
+    "checkpoint_test": 2000
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
-    , "checkpoint_save": 1000
+    ,
+    "checkpoint_save": 1000
     // 打印检查点间隔：每训练多少迭代打印一次训练信息
-    , "checkpoint_print": 100
+    ,
+    "checkpoint_print": 100
   }
-
   // ========================================
   // 验证（测试）配置
   // ========================================
-  , "val": {
+  ,
+  "val": {
     // 是否保存测试图像：false 表示不保存测试结果图像
     "save_img": true
     // 是否对序列进行填充：false 表示不填充
-    , "pad_seq": false
+    ,
+    "pad_seq": false
     // 是否对序列进行翻转测试：false 表示不进行翻转测试（TTA - Test Time Augmentation）
-    , "flip_seq": false
+    ,
+    "flip_seq": false
     // 是否只评估中心帧：false 表示评估所有帧
-    , "center_frame_only": false
+    ,
+    "center_frame_only": false
     // 测试时使用的帧数：18 表示测试时处理 18 帧视频
-    , "num_frame_testing": 18
+    ,
+    "num_frame_testing": 18
     // 测试时的重叠帧数：2 表示相邻测试窗口之间有 2 帧重叠（用于滑动窗口测试）
-    , "num_frame_overlapping": 2
+    ,
+    "num_frame_overlapping": 2
     // 测试时的补丁大小：192 表示将大图像分割成 192x192 的补丁进行测试
-    , "size_patch_testing": 192
+    ,
+    "size_patch_testing": 192
   }
-
   // ========================================
   // 日志记录配置
   // ========================================
-  , "logging": {
+  ,
+  "logging": {
     // 是否使用 TensorBoard：true 表示启用 TensorBoard 日志记录
     "use_tensorboard": true
     // 是否使用 Weights & Biases (W&B)：true 表示启用 W&B 日志记录
-    , "use_wandb": true
+    ,
+    "use_wandb": true
     // W&B API 密钥：用于身份验证的 API 密钥（注意：实际使用时建议使用环境变量）
-    ,"wandb_api_key": "ae83599fc8904d8986df7ba9e6f3328e042dcfb2"
+    ,
+    "wandb_api_key": "ae83599fc8904d8986df7ba9e6f3328e042dcfb2"
     // W&B 项目名称：实验所属的 W&B 项目名称
-    , "wandb_project": "Deblur"
+    ,
+    "wandb_project": "Deblur"
     // W&B 实体（用户名或团队名）：null 表示使用默认实体
-    , "wandb_entity": null
+    ,
+    "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
-    , "wandb_name": "gopro_rgb_local"
+    ,
+    "wandb_name": "gopro_rgb_local"
   }
-
 }
-

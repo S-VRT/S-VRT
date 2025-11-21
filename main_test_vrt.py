@@ -5,6 +5,7 @@
 
 
 import argparse
+import json
 import cv2
 import glob
 import os
@@ -14,6 +15,7 @@ import numpy as np
 from os import path as osp
 from collections import OrderedDict
 from torch.utils.data import DataLoader
+from pathlib import Path
 
 from models.network_vrt import VRT as net
 from utils import utils_image as util
@@ -21,21 +23,146 @@ from data.dataset_video_test import VideoRecurrentTestDataset, VideoTestVimeo90K
     SingleVideoRecurrentTestDataset, VFI_DAVIS, VFI_UCF101, VFI_Vid4
 
 
+def _strip_json_comments(text: str) -> str:
+    result = []
+    i = 0
+    in_string = False
+    string_char = ''
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            result.append(ch)
+            if ch == '\\' and i + 1 < len(text):
+                result.append(text[i + 1])
+                i += 2
+                continue
+            if ch == string_char:
+                in_string = False
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            in_string = True
+            string_char = ch
+            result.append(ch)
+            i += 1
+            continue
+        if ch == '/' and i + 1 < len(text):
+            nxt = text[i + 1]
+            if nxt == '/':
+                i += 2
+                while i < len(text) and text[i] not in '\n\r':
+                    i += 1
+                continue
+            if nxt == '*':
+                i += 2
+                while i + 1 < len(text) and not (text[i] == '*' and text[i + 1] == '/'):
+                    i += 1
+                i += 2
+                continue
+        result.append(ch)
+        i += 1
+    return ''.join(result)
+
+
+def _load_inference_config(opt_path: str) -> dict:
+    cfg_path = Path(opt_path)
+    text = cfg_path.read_text(encoding='utf-8')
+    return json.loads(_strip_json_comments(text))
+
+
+def _normalize_triplet(values, arg_name):
+    if values is None:
+        raise ValueError(f'{arg_name} must be provided via CLI or JSON config.')
+    if len(values) != 3:
+        raise ValueError(f'Expected three values, got {values}')
+    return [int(v) for v in values]
+
+
+def _merge_config_into_args(args, cfg):
+    datasets = cfg.get('datasets', {}) or {}
+    test_cfg = datasets.get('test', {}) or {}
+    val_cfg = cfg.get('val', {}) or {}
+
+    args.task = args.task or val_cfg.get('task_name') or cfg.get('task')
+    args.folder_lq = args.folder_lq or test_cfg.get('dataroot_lq')
+    args.folder_gt = args.folder_gt or test_cfg.get('dataroot_gt')
+
+    if args.sigma is None:
+        cfg_sigma = test_cfg.get('sigma')
+        if cfg_sigma is None:
+            cfg_sigma = val_cfg.get('sigma')
+        args.sigma = cfg_sigma
+
+    if args.num_workers is None:
+        args.num_workers = test_cfg.get('dataloader_num_workers')
+
+    if args.tile is None:
+        tile_temporal = val_cfg.get('num_frame_testing')
+        tile_height = val_cfg.get('size_patch_testing')
+        tile_width = val_cfg.get('size_patch_testing_w', tile_height)
+        if tile_temporal is not None and tile_height is not None and tile_width is not None:
+            args.tile = [tile_temporal, tile_height, tile_width]
+
+    if args.tile_overlap is None:
+        overlap_temporal = val_cfg.get('num_frame_overlapping')
+        overlap_height = val_cfg.get('size_patch_overlapping', val_cfg.get('size_patch_overlap'))
+        overlap_width = val_cfg.get('size_patch_overlapping_w', overlap_height)
+        if overlap_temporal is not None and overlap_height is not None and overlap_width is not None:
+            args.tile_overlap = [overlap_temporal, overlap_height, overlap_width]
+
+    if val_cfg.get('save_img') and not args.save_result:
+        args.save_result = True
+
+
+def _finalize_inference_args(args):
+    missing = []
+    if not args.task:
+        missing.append('--task or config val.task_name/task')
+    if not args.folder_lq:
+        missing.append('--folder_lq or datasets.test.dataroot_lq')
+    if args.num_workers is None:
+        missing.append('--num_workers or datasets.test.dataloader_num_workers')
+    if args.tile is None:
+        missing.append('val.num_frame_testing/size_patch_testing (--tile)')
+    if args.tile_overlap is None:
+        missing.append('val.num_frame_overlapping/size_patch_overlapping (--tile_overlap)')
+
+    if missing:
+        raise ValueError('Missing required testing parameters: ' + ', '.join(missing))
+
+    args.tile = _normalize_triplet(args.tile, 'tile')
+    args.tile_overlap = _normalize_triplet(args.tile_overlap, 'tile_overlap')
+
+    if args.folder_lq:
+        args.folder_lq = osp.expanduser(args.folder_lq)
+    if args.folder_gt:
+        args.folder_gt = osp.expanduser(args.folder_gt)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task', type=str, default='001_VRT_videosr_bi_REDS_6frames', help='tasks: 001 to 008')
-    parser.add_argument('--sigma', type=int, default=0, help='noise level for denoising: 10, 20, 30, 40, 50')
-    parser.add_argument('--folder_lq', type=str, default='testsets/REDS4/sharp_bicubic',
+    parser.add_argument('--opt', type=str, default=None,
+                        help='Path to config JSON (same as training); overrides CLI defaults.')
+    parser.add_argument('--task', type=str, default=None, help='tasks: 001 to 008')
+    parser.add_argument('--sigma', type=int, default=None, help='noise level for denoising: 10, 20, 30, 40, 50')
+    parser.add_argument('--folder_lq', type=str, default=None,
                         help='input low-quality test video folder')
     parser.add_argument('--folder_gt', type=str, default=None,
                         help='input ground-truth test video folder')
-    parser.add_argument('--tile', type=int, nargs='+', default=[40,128,128],
+    parser.add_argument('--tile', type=int, nargs=3, metavar=('T', 'H', 'W'), default=None,
                         help='Tile size, [0,0,0] for no tile during testing (testing as a whole)')
-    parser.add_argument('--tile_overlap', type=int, nargs='+', default=[2,20,20],
+    parser.add_argument('--tile_overlap', type=int, nargs=3, metavar=('T', 'H', 'W'), default=None,
                         help='Overlapping of different tiles')
-    parser.add_argument('--num_workers', type=int, default=16, help='number of workers in data loading')
+    parser.add_argument('--num_workers', type=int, default=None, help='number of workers in data loading')
     parser.add_argument('--save_result', action='store_true', help='save resulting image')
     args = parser.parse_args()
+
+    cfg = None
+    if args.opt:
+        cfg = _load_inference_config(args.opt)
+        _merge_config_into_args(args, cfg)
+
+    _finalize_inference_args(args)
 
     # define model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

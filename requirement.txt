@@ -10,3 +10,4 @@ timm
 einops
 tensorboard
 wandb
+matplotlib

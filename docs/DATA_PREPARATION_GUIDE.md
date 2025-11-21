@@ -40,23 +40,32 @@ You need two datasets:
 
 ### 2. Raw Dataset Structure (After Extraction)
 
-```
-GOPRO_Large/
-├── train/                     # 22 sequences
-│   ├── GOPR0374_11_00/
-│   │   ├── blur/              # Blurred frames (100-150 frames per sequence)
-│   │   └── sharp/             # Sharp GT frames
-│   └── ...
-└── test/                      # 11 sequences
-    └── ...
+After extracting the dataset (e.g., `gopro_small.zip`), you should see the following structure:
 
-gopro_spike/GOPRO_Large_spike_seq/
-├── train/                     # 22 sequences (matching GoPro)
-│   ├── GOPR0374_11_00/
-│   │   └── spike/             # Spike data (.dat files, 250x400)
+```
+gopro_small/                       # Root directory
+├── GOPRO_Large/
+│   ├── train/                     # Raw training sequences
+│   │   ├── GOPR0372_07_00/
+│   │   │   ├── blur/              # Blurred frames
+│   │   │   ├── sharp/             # Sharp GT frames
+│   │   │   └── blur_gamma/        # (Optional) Gamma corrected blurred frames
+│   │   └── ...
+│   ├── test/                      # Raw test sequences
+│   │   └── ...
+│   │
+│   ├── train_GT/                  # (Optional) Pre-processed sharp frames
+│   ├── train_GT_blurred/          # (Optional) Pre-processed blurred frames
+│   ├── train_GT.lmdb/             # (Optional) Pre-generated LMDB
 │   └── ...
-├── test/                      # 11 sequences
-└── config.yaml                # spike_h: 250, spike_w: 400
+│
+└── GOPRO_Large_spike_seq/
+    ├── train/                     # Spike training sequences
+    │   ├── GOPR0372_07_00/
+    │   │   └── spike/             # Spike data (.dat files)
+    │   └── ...
+    ├── test/                      # Spike test sequences
+    └── config.yaml                # Spike camera configuration
 ```
 
 ### 3. Run Data Preparation
@@ -120,6 +129,25 @@ KAIR/data/meta_info/
 3. **Verifies** GoPro and Spike datasets have matching sequences
 4. **Generates** meta info files listing all sequences and frame counts
 5. **Creates** LMDB databases (optional, for faster data loading)
+
+### Meta Info File Format
+
+The generated meta info files (e.g., `data/meta_info/meta_info_GoPro_train_GT.txt`) follow this format:
+
+```
+FolderName FrameCount (Height,Width,Channels) StartFrame
+```
+
+Example:
+```
+GOPR0372_07_00 100 (720,1280,3) 000047
+GOPR0372_07_01 75 (720,1280,3) 000601
+```
+
+- `FolderName`: Name of the sequence folder
+- `FrameCount`: Number of frames in the sequence
+- `(Height,Width,Channels)`: Image dimensions
+- `StartFrame`: Filename of the first frame (without extension)
 
 ## Configuration
 

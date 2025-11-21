@@ -177,11 +177,13 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
             # get LQ
             img_bytes = self.file_client.get(img_lq_path, 'lq')
             img_lq = utils_video.imfrombytes(img_bytes, float32=True)
+            img_lq = cv2.cvtColor(img_lq, cv2.COLOR_BGR2RGB) # Convert BGR to RGB
             img_lqs.append(img_lq)
 
             # get GT
             img_bytes = self.file_client.get(img_gt_path, 'gt')
             img_gt = utils_video.imfrombytes(img_bytes, float32=True)
+            img_gt = cv2.cvtColor(img_gt, cv2.COLOR_BGR2RGB) # Convert BGR to RGB
             img_gts.append(img_gt)
 
             # get Spike data
@@ -231,7 +233,7 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         img_lqs_with_spike.extend(img_gts)
         img_results = utils_video.augment(img_lqs_with_spike, self.opt['use_hflip'], self.opt['use_rot'])
 
-        img_results = utils_video.img2tensor(img_results)
+        img_results = utils_video.img2tensor(img_results, bgr2rgb=False)
         img_gts = torch.stack(img_results[len(img_lqs_with_spike) // 2:], dim=0)
         img_lqs = torch.stack(img_results[:len(img_lqs_with_spike) // 2], dim=0)
 
