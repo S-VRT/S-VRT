@@ -6,7 +6,7 @@ import torch.utils.data as data
 import cv2
 
 import utils.utils_video as utils_video
-from utils.spike_loader import SpikeStreamSimple, voxelize_spikes
+from utils.spike_loader import SpikeStreamSimple, voxelize_spikes_tfp
 
 
 class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
@@ -56,6 +56,8 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
             spike_w (int): Spike camera width. Default: 400.
             spike_channels (int): Number of spike channels after voxelization. Default: 1.
             spike_flipud (bool): Whether to flip spike data vertically. Default: True.
+            tfp_half_win_length (int): Half window length fed into TFP. Default: 20.
+            tfp_device (str): Torch device string for TFP reconstruction. Default: 'cpu'.
     """
 
     def __init__(self, opt):
@@ -74,6 +76,12 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         self.spike_w = opt.get('spike_w', 400)
         self.spike_channels = opt.get('spike_channels', 1)
         self.spike_flipud = opt.get('spike_flipud', True)
+        self.tfp_half_win_length = opt.get('tfp_half_win_length', 20)
+        requested_tfp_device = str(opt.get('tfp_device', 'cpu'))
+        if requested_tfp_device.startswith('cuda') and not torch.cuda.is_available():
+            print("Requested CUDA device for TFP but CUDA is unavailable. Falling back to CPU.")
+            requested_tfp_device = 'cpu'
+        self.tfp_device = requested_tfp_device
 
         keys = []
         total_num_frames = [] # some clips may not have 100 frames
@@ -196,7 +204,12 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
                     print_dat_detail=False
                 )
                 spike_matrix = spike_stream.get_spike_matrix(flipud=self.spike_flipud)  # (T, H, W)
-                spike_voxel = voxelize_spikes(spike_matrix, num_channels=self.spike_channels)  # (S, H, W)
+                spike_voxel = voxelize_spikes_tfp(
+                    spike_matrix,
+                    num_channels=self.spike_channels,
+                    device=self.tfp_device,
+                    half_win_length=self.tfp_half_win_length,
+                )  # (S, H, W)
                 spike_voxels.append(spike_voxel)
             else:
                 # If spike file doesn't exist, create zeros

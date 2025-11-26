@@ -2,13 +2,12 @@
 
 from genericpath import isdir
 from glob import glob
-import os, sys
+import os
 import warnings
 
 import ctypes
 
-sys.path.append('../device/spikevision/m1k40')
-from sdk import spikelinkapi as link
+from ..device.spikevision.m1k40.sdk import spikelinkapi as link
 
 import numpy as np
 import torch
@@ -18,8 +17,7 @@ import glob
 
 from .sps_parser import SPSParser
 
-sys.path.append("..")
-from utils import path
+from ..utils import path
 import time
 import threading
 

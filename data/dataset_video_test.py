@@ -9,7 +9,7 @@ from PIL import Image
 import cv2
 
 import utils.utils_video as utils_video
-from utils.spike_loader import SpikeStreamSimple, voxelize_spikes
+from utils.spike_loader import SpikeStreamSimple, voxelize_spikes_tfp
 
 
 class VideoRecurrentTestDataset(data.Dataset):
@@ -152,6 +152,12 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
         self.spike_flipud = opt.get('spike_flipud', True)
         self.spike_folder = opt.get('spike_folder_name', 'spike')
         self.spike_ext = opt.get('spike_filename_ext', 'dat')
+        self.tfp_half_win_length = opt.get('tfp_half_win_length', 20)
+        requested_tfp_device = str(opt.get('tfp_device', 'cpu'))
+        if requested_tfp_device.startswith('cuda') and not torch.cuda.is_available():
+            print("Requested CUDA device for TFP but CUDA is unavailable. Falling back to CPU.")
+            requested_tfp_device = 'cpu'
+        self.tfp_device = requested_tfp_device
 
         self.imgs_lq, self.imgs_gt = {}, {}
         self.spike_paths = {}
@@ -202,6 +208,16 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
                 self.imgs_gt[subfolder_name] = img_paths_gt
 
         self.folders = sorted(list(set(self.data_info['folder'])))
+        
+        # 诊断：打印数据集初始化时找到的文件夹
+        print(f'\n{"="*80}')
+        print(f'[Dataset Initialization - VideoRecurrentTestDatasetRGBSpike]')
+        print(f'  Found {len(self.folders)} folders: {self.folders}')
+        print(f'  Total samples (frames): {len(self.data_info["folder"])}')
+        print(f'  LQ root: {self.lq_root}')
+        print(f'  GT root: {self.gt_root}')
+        print(f'  Spike root: {self.spike_root}')
+        print(f'{"="*80}\n')
 
     def __len__(self):
         return len(self.folders)
@@ -256,7 +272,12 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
                     print_dat_detail=False
                 )
                 spike_matrix = spike_stream.get_spike_matrix(flipud=self.spike_flipud)
-                spike_voxel = voxelize_spikes(spike_matrix, num_channels=self.spike_channels)
+                spike_voxel = voxelize_spikes_tfp(
+                    spike_matrix,
+                    num_channels=self.spike_channels,
+                    device=self.tfp_device,
+                    half_win_length=self.tfp_half_win_length,
+                )
             except Exception as err:
                 print(f'Failed to load spike data {spike_path}: {err}. Using zeros.')
                 spike_voxel = np.zeros((self.spike_channels, self.spike_h, self.spike_w), dtype=np.float32)

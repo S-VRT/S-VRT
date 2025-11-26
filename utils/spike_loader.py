@@ -13,8 +13,10 @@ Spike .dat format:
 """
 
 import numpy as np
-import struct
 from pathlib import Path
+
+from SpikeCV.SpikeCV.spkProc.reconstruction.tfp import TFP
+from SpikeCV.SpikeCV.spkData.load_dat import SpikeStream
 
 
 def load_spike_dat(dat_file_path, spike_h=250, spike_w=400):
@@ -134,103 +136,87 @@ def load_spike_dat_alternative(dat_file_path, spike_h=250, spike_w=400, num_bins
         return np.zeros((num_bins, spike_h, spike_w), dtype=np.uint8)
 
 
-def voxelize_spikes(spike_matrix, num_channels=1):
-    """Voxelize spike stream into fixed number of channels.
+def voxelize_spikes_tfp(spike_matrix, num_channels=1, device='cpu', half_win_length=20):
+    """Voxelize spike stream using SpikeCV's TFP reconstruction.
     
     Args:
-        spike_matrix (np.ndarray): Spike data (T, H, W)
-        num_channels (int): Number of output channels (1 or 4)
+        spike_matrix (np.ndarray): Spike data (T, H, W).
+        num_channels (int): Number of output channels (1 or 4).
+        device (str or torch.device): Device for torch tensor ops used by TFP.
+        half_win_length (int): Half window length for the TFP algorithm.
     
     Returns:
-        np.ndarray: Voxelized spikes (num_channels, H, W)
+        np.ndarray: Voxelized spikes (num_channels, H, W) in float32 [0, 1].
     """
+    if spike_matrix.ndim != 3:
+        raise ValueError(f"spike_matrix must be 3D (T, H, W), got shape {spike_matrix.shape}")
+    
     T, H, W = spike_matrix.shape
+    if T <= 2 * half_win_length:
+        raise ValueError(
+            f"Need more time steps ({T}) than twice the half window ({2 * half_win_length}) for TFP."
+        )
+    
+    tfp = TFP(H, W, device)
+    
+    def _clamp_center(center_idx):
+        return max(half_win_length, min(center_idx, T - half_win_length))
     
     if num_channels == 1:
-        # Simple accumulation: sum all time steps and normalize
-        spike_voxel = np.sum(spike_matrix, axis=0, keepdims=True).astype(np.float32)
-        # Normalize to [0, 1]
-        max_val = spike_voxel.max()
-        if max_val > 0:
-            spike_voxel = spike_voxel / max_val
-        return spike_voxel
-    
+        centers = [_clamp_center(T // 2)]
     elif num_channels == 4:
-        # Divide time into 4 equal bins
-        spike_voxel = np.zeros((4, H, W), dtype=np.float32)
-        bin_size = T // 4
-        
-        for i in range(4):
-            start_t = i * bin_size
-            end_t = (i + 1) * bin_size if i < 3 else T
-            spike_voxel[i] = np.sum(spike_matrix[start_t:end_t], axis=0)
-        
-        # Normalize each channel
-        for i in range(4):
-            max_val = spike_voxel[i].max()
-            if max_val > 0:
-                spike_voxel[i] = spike_voxel[i] / max_val
-        
-        return spike_voxel
-    
+        segment_edges = np.linspace(0, T, num_channels + 1, dtype=int)
+        centers = []
+        for start, end in zip(segment_edges[:-1], segment_edges[1:]):
+            centers.append(_clamp_center((start + end) // 2))
     else:
         raise ValueError(f"Unsupported num_channels: {num_channels}. Must be 1 or 4.")
+    
+    frames = []
+    for center in centers:
+        frame = tfp.spikes2frame(spike_matrix, key_ts=int(center), half_win_length=half_win_length)
+        frames.append(frame.astype(np.float32) / 255.0)
+    
+    return np.stack(frames, axis=0).astype(np.float32)
 
 
 class SpikeStreamSimple:
-    """简化的 Spike 数据流加载器。
-    
-    用于从 .dat 文件加载 spike 数据，不依赖 SpikeCV 库。
-    """
+    """轻量封装 SpikeCV 官方 `SpikeStream`，用于离线 .dat 加载。"""
     
     def __init__(self, filepath, spike_h=250, spike_w=400, print_dat_detail=False):
-        """初始化 Spike 加载器。
-        
-        Args:
-            filepath (str): .dat 文件路径
-            spike_h (int): Spike 相机高度
-            spike_w (int): Spike 相机宽度
-            print_dat_detail (bool): 是否打印详细信息
-        """
         self.filepath = Path(filepath)
         self.spike_h = spike_h
         self.spike_w = spike_w
         self.print_dat_detail = print_dat_detail
         
-        # 加载数据
-        self._spike_matrix = load_spike_dat(str(self.filepath), spike_h, spike_w)
-        
-        if self.print_dat_detail:
-            print(f"Loaded spike data: {self._spike_matrix.shape}")
-            print(f"  Value range: [{self._spike_matrix.min()}, {self._spike_matrix.max()}]")
+        # 复用 SpikeCV 的 SpikeStream 实现，避免重复造轮子
+        self._spike_stream = SpikeStream(
+            offline=True,
+            filepath=str(self.filepath),
+            spike_h=self.spike_h,
+            spike_w=self.spike_w,
+            print_dat_detail=self.print_dat_detail,
+        )
+        self._spike_matrix = None  # 惰性缓存
+    
+    def _ensure_spike_matrix(self):
+        if self._spike_matrix is None:
+            matrix = self._spike_stream.get_spike_matrix(flipud=False)
+            # SpikeStream 返回 bool，我们保持下游期望的 uint8 格式
+            self._spike_matrix = np.array(matrix, dtype=np.uint8, copy=True)
+            if self.print_dat_detail:
+                print(f"Loaded spike data via SpikeStream: {self._spike_matrix.shape}")
+                print(f"  Value range: [{self._spike_matrix.min()}, {self._spike_matrix.max()}]")
     
     def get_spike_matrix(self, flipud=True):
-        """获取完整的 spike 矩阵。
-        
-        Args:
-            flipud (bool): 是否上下翻转（用于坐标系对齐）
-        
-        Returns:
-            np.ndarray: Spike 矩阵，形状 (T, H, W)
-        """
-        spike_matrix = self._spike_matrix.copy()
-        
+        self._ensure_spike_matrix()
+        spike_matrix = self._spike_matrix
         if flipud:
-            # 上下翻转每一帧
             spike_matrix = np.flip(spike_matrix, axis=1)
-        
-        return spike_matrix
+        return spike_matrix.copy()
     
     def get_block_spikes(self, begin_idx, block_len):
-        """获取指定时间范围的 spike 数据。
-        
-        Args:
-            begin_idx (int): 起始时间索引
-            block_len (int): 时间块长度
-        
-        Returns:
-            np.ndarray: Spike 矩阵块，形状 (block_len, H, W)
-        """
+        self._ensure_spike_matrix()
         end_idx = min(begin_idx + block_len, self._spike_matrix.shape[0])
         return self._spike_matrix[begin_idx:end_idx].copy()
 
@@ -257,10 +243,10 @@ if __name__ == '__main__':
         print(f"Value range: [{spike_matrix.min()}, {spike_matrix.max()}]")
         
         # Test voxelization
-        spike_voxel_1ch = voxelize_spikes(spike_matrix, num_channels=1)
+        spike_voxel_1ch = voxelize_spikes_tfp(spike_matrix, num_channels=1)
         print(f"\nVoxelized (1 channel) shape: {spike_voxel_1ch.shape}")
         
-        spike_voxel_4ch = voxelize_spikes(spike_matrix, num_channels=4)
+        spike_voxel_4ch = voxelize_spikes_tfp(spike_matrix, num_channels=4)
         print(f"Voxelized (4 channels) shape: {spike_voxel_4ch.shape}")
         
     except Exception as e:

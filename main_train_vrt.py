@@ -240,12 +240,30 @@ def main():
 
             if opt['dist']:
                 # 分布式验证 / 测试
-                test_sampler = DistributedSampler(test_set, shuffle=test_shuffle,
-                                                  drop_last=False, seed=seed)
+                # 确保DistributedSampler使用正确的world_size和rank
+                if dist.is_initialized():
+                    test_sampler = DistributedSampler(
+                        test_set, 
+                        num_replicas=dist.get_world_size(),
+                        rank=dist.get_rank(),
+                        shuffle=test_shuffle,
+                        drop_last=False, 
+                        seed=seed
+                    )
+                else:
+                    test_sampler = DistributedSampler(test_set, shuffle=test_shuffle,
+                                                      drop_last=False, seed=seed)
+                per_gpu_batch_size = max(1, test_batch_size // opt['num_gpu'])
+                per_gpu_num_workers = max(1, test_num_workers // opt['num_gpu'])
+                # DistributedSampler会自动将数据集均匀分配给各个rank
+                # 当数据集大小不能被world_size整除时，会尽可能均匀分配
+                # 例如：9个样本，3个GPU -> 每个GPU分配3个样本
+                #      10个样本，3个GPU -> rank0:4个, rank1:3个, rank2:3个
+                # drop_last=False确保所有数据都会被处理，即使分配不完全均匀
                 test_loader = DataLoader(test_set,
-                                         batch_size=max(1, test_batch_size // opt['num_gpu']),
+                                         batch_size=per_gpu_batch_size,
                                          shuffle=False,
-                                         num_workers=max(1, test_num_workers // opt['num_gpu']),
+                                         num_workers=per_gpu_num_workers,
                                          drop_last=False,
                                          pin_memory=True,
                                          sampler=test_sampler)
@@ -401,6 +419,8 @@ def main():
                     output = visuals['E']  # E: 估计/输出图像 (Estimated)
                     gt = visuals['H'] if 'H' in visuals else None  # H: 高质量真实图像 (High-quality)
                     folder = test_data['folder']  # 测试序列的文件夹名称
+                    folder_name = folder[0] if isinstance(folder, (list, tuple)) else folder
+                    total_test_batches = len(test_loader)
 
                     # 初始化当前测试序列的结果字典
                     test_results_folder = OrderedDict()
@@ -410,7 +430,20 @@ def main():
                     test_results_folder['ssim_y'] = []
 
                     # 处理批次中的每一张图像
-                    for i in range(output.shape[0]):
+                    lq_paths = test_data.get('lq_path')
+                    batch_clip_count = output.shape[0]
+                    for i in range(batch_clip_count):
+                        clip_name = f'clip_{i:03d}'
+                        if lq_paths is not None:
+                            clip_source = None
+                            try:
+                                clip_source = lq_paths[i]
+                            except Exception:
+                                clip_source = None
+                            if isinstance(clip_source, (list, tuple)) and clip_source:
+                                clip_source = clip_source[0]
+                            if isinstance(clip_source, str):
+                                clip_name = os.path.splitext(os.path.basename(clip_source))[0]
                         # -----------------------
                         # 保存估计的图像 E
                         # -----------------------
@@ -426,11 +459,9 @@ def main():
                         if opt['val']['save_img']:
                             save_dir = opt['path']['images']
                             util.mkdir(save_dir)
-                            # 从输入路径提取序列名称
-                            seq_ = os.path.basename(test_data['lq_path'][i][0]).split('.')[0]
                             # 创建文件夹并保存图像
-                            os.makedirs(f'{save_dir}/{folder[0]}', exist_ok=True)
-                            cv2.imwrite(f'{save_dir}/{folder[0]}/{seq_}_{current_step:d}.png', img)
+                            os.makedirs(f'{save_dir}/{folder_name}', exist_ok=True)
+                            cv2.imwrite(f'{save_dir}/{folder_name}/{clip_name}_{current_step:d}.png', img)
 
                         # -----------------------
                         # 计算 PSNR 和 SSIM
@@ -446,21 +477,38 @@ def main():
                             img_gt = np.squeeze(img_gt)  # 移除单维度
 
                             # 计算 RGB 通道的 PSNR 和 SSIM
-                            test_results_folder['psnr'].append(util.calculate_psnr(img, img_gt, border=0))
-                            test_results_folder['ssim'].append(util.calculate_ssim(img, img_gt, border=0))
+                            clip_psnr = util.calculate_psnr(img, img_gt, border=0)
+                            clip_ssim = util.calculate_ssim(img, img_gt, border=0)
+                            test_results_folder['psnr'].append(clip_psnr)
+                            test_results_folder['ssim'].append(clip_ssim)
                             
                             # 如果是 RGB 图像，计算 Y 通道（亮度）的指标
                             if img_gt.ndim == 3:  # RGB image
                                 # 转换为 YCbCr 颜色空间，只取 Y 通道（亮度）
-                                img = util.bgr2ycbcr(img.astype(np.float32) / 255.) * 255.
-                                img_gt = util.bgr2ycbcr(img_gt.astype(np.float32) / 255.) * 255.
+                                img_y = util.bgr2ycbcr(img.astype(np.float32) / 255.) * 255.
+                                img_gt_y = util.bgr2ycbcr(img_gt.astype(np.float32) / 255.) * 255.
                                 # 计算 Y 通道的 PSNR 和 SSIM
-                                test_results_folder['psnr_y'].append(util.calculate_psnr(img, img_gt, border=0))
-                                test_results_folder['ssim_y'].append(util.calculate_ssim(img, img_gt, border=0))
+                                clip_psnr_y = util.calculate_psnr(img_y, img_gt_y, border=0)
+                                clip_ssim_y = util.calculate_ssim(img_y, img_gt_y, border=0)
                             else:
                                 # 灰度图像，Y 通道指标等于 RGB 指标
-                                test_results_folder['psnr_y'] = test_results_folder['psnr']
-                                test_results_folder['ssim_y'] = test_results_folder['ssim']
+                                clip_psnr_y = clip_psnr
+                                clip_ssim_y = clip_ssim
+                            test_results_folder['psnr_y'].append(clip_psnr_y)
+                            test_results_folder['ssim_y'].append(clip_ssim_y)
+
+                            if is_master_process:
+                                logger.info(
+                                    'Testing {:20s} batch {:2d}/{:2d} clip {:2d}/{:2d} ({}) - '
+                                    'PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                                        folder_name, idx + 1, total_test_batches, i + 1, batch_clip_count, clip_name,
+                                        clip_psnr, clip_ssim, clip_psnr_y, clip_ssim_y))
+                        else:
+                            if is_master_process:
+                                logger.info(
+                                    'Testing {:20s} batch {:2d}/{:2d} clip {:2d}/{:2d} ({}) - '
+                                    'No GT available, skipped metrics.'.format(
+                                        folder_name, idx + 1, total_test_batches, i + 1, batch_clip_count, clip_name))
 
                     # 如果有计算的指标，记录并保存结果
                     if len(test_results_folder['psnr']) > 0:
@@ -471,9 +519,9 @@ def main():
                         ssim_y = sum(test_results_folder['ssim_y']) / len(test_results_folder['ssim_y'])
 
                         if is_master_process:
-                            logger.info('Testing {:20s} ({:2d}/{}) - PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                            logger.info('Testing {:20s} summary ({:2d}/{:2d}) - PSNR: {:.2f} dB; SSIM: {:.4f}; '
                                         'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
-                                        format(folder[0], idx, len(test_loader), psnr, ssim, psnr_y, ssim_y))
+                                        format(folder_name, idx + 1, total_test_batches, psnr, ssim, psnr_y, ssim_y))
                         test_results['psnr'].append(psnr)
                         test_results['ssim'].append(ssim)
                         test_results['psnr_y'].append(psnr_y)
@@ -481,7 +529,8 @@ def main():
                     else:
                         # 没有真实标签时，只记录测试序列名称
                         if is_master_process:
-                            logger.info('Testing {:20s}  ({:2d}/{})'.format(folder[0], idx, len(test_loader)))
+                            logger.info('Testing {:20s} ({:2d}/{:2d}) - No ground truth provided for averaging.'
+                                        .format(folder_name, idx + 1, total_test_batches))
 
                 local_psnr_sum = sum(test_results['psnr'])
                 local_ssim_sum = sum(test_results['ssim'])

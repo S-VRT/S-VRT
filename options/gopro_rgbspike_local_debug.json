@@ -89,13 +89,13 @@
       "dataset_type": "VideoRecurrentTrainDatasetRGBSpike"
       // 真实标签（Ground Truth）数据路径：清晰视频帧的存储路径
       ,
-      "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/train_GT"
+      "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_medium/GOPRO_Large/train_GT"
       // 低质量（Low Quality）数据路径：模糊视频帧的存储路径
       ,
-      "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/train_GT_blurred"
+      "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_medium/GOPRO_Large/train_GT_blurred"
       // Spike 数据路径：Spike 序列数据的存储路径
       ,
-      "dataroot_spike": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large_spike_seq/train"
+      "dataroot_spike": "/media/mallm/hd4t/modelrepostore/datasets/gopro_medium/GOPRO_Large_spike_seq/train"
       // Spike 数据高度：Spike 图像的高度（像素）
       ,
       "spike_h": 250
@@ -105,7 +105,7 @@
       // Spike 配置文件：记录 Spike 相机配置与标注信息
       ,
       "spike_config": {
-        "path": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large_spike_seq/config.yaml",
+        "path": "/media/mallm/hd4t/modelrepostore/datasets/gopro_medium/GOPRO_Large_spike_seq/config.yaml",
         "spike_h": 250,
         "spike_w": 400,
         "is_labeled": false,
@@ -144,7 +144,7 @@
       "num_frame": 4
       // 真实标签图像尺寸：训练时裁剪的真实标签图像大小（像素）
       ,
-      "gt_size": 192
+      "gt_size": 160
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -168,7 +168,7 @@
       "dataloader_num_workers": 120
       // 批次大小：每个批次包含的样本数量
       ,
-      "dataloader_batch_size": 6
+      "dataloader_batch_size": 9
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -186,13 +186,13 @@
       "dataset_type": "VideoRecurrentTestDatasetRGBSpike"
       // 真实标签数据路径：测试集的清晰视频帧路径
       ,
-      "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/test_GT"
+      "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_medium/GOPRO_Large/test_GT"
       // 低质量数据路径：测试集的模糊视频帧路径
       ,
-      "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/test_GT_blurred"
+      "dataroot_lq": "/media/mallm/hd4t/modelrepostore/datasets/gopro_medium/GOPRO_Large/test_GT_blurred"
       // Spike 数据路径：测试集的 Spike 序列数据路径
       ,
-      "dataroot_spike": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large_spike_seq/test"
+      "dataroot_spike": "/media/mallm/hd4t/modelrepostore/datasets/gopro_medium/GOPRO_Large_spike_seq/test"
       // Spike 数据高度：Spike 图像的高度（像素）
       ,
       "spike_h": 250
@@ -230,7 +230,7 @@
       "dataloader_num_workers": 120
       // 测试/验证批次大小：可根据显存调整
       ,
-      "dataloader_batch_size": 6
+      "dataloader_batch_size": 9
     }
   }
   // ========================================
@@ -248,12 +248,12 @@
     // 上采样倍数：1 表示不进行上采样（保持原始分辨率）
     ,
     "upscale": 1
-    // 图像尺寸：[时间, 高度, 宽度]，[4,192,192] 表示 4 帧，每帧 192x192
+    // 图像尺寸：[时间, 高度, 宽度]，[4,160,160] 表示 4 帧，每帧 160x160
     ,
     "img_size": [
       4,
-      192,
-      192
+      160,
+      160
     ]
     // 窗口大小：[时间, 高度, 宽度]，[4,8,8] 表示 4 帧时间窗口，8x8 空间窗口
     ,
@@ -452,13 +452,13 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 2000
+    "checkpoint_test": 1
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 1000
     // 打印检查点间隔：每训练多少迭代打印一次训练信息
     ,
-    "checkpoint_print": 100
+    "checkpoint_print": 1
   }
   // ========================================
   // 验证（测试）配置
@@ -482,9 +482,9 @@
     // 测试时的重叠帧数：2 表示相邻测试窗口之间有 2 帧重叠（用于滑动窗口测试）
     ,
     "num_frame_overlapping": 2
-    // 测试时的补丁大小：192 表示将大图像分割成 192x192 的补丁进行测试
+    // 测试时的补丁大小：160 表示将大图像分割成 160x160 的补丁进行测试
     ,
-    "size_patch_testing": 192
+    "size_patch_testing": 160
   }
   // ========================================
   // 日志记录配置
@@ -492,10 +492,10 @@
   ,
   "logging": {
     // 是否使用 TensorBoard：true 表示启用 TensorBoard 日志记录
-    "use_tensorboard": true
+    "use_tensorboard": false
     // 是否使用 Weights & Biases (W&B)：true 表示启用 W&B 日志记录
     ,
-    "use_wandb": true
+    "use_wandb": false
     // W&B API 密钥：用于身份验证的 API 密钥（注意：实际使用时建议使用环境变量）
     ,
     "wandb_api_key": "ae83599fc8904d8986df7ba9e6f3328e042dcfb2"
@@ -507,6 +507,6 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_rgbspike_channel_concat"
+    "wandb_name": "gopro_rgbspike_concat"
   }
 }

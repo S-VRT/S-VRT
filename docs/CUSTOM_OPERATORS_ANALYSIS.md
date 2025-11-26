@@ -38,9 +38,9 @@
 ### 3.1 建议一：Learnable Spike Accumulator (可学习脉冲累积器)
 
 **现状与痛点**：
-目前 Spike 数据的预处理（`voxelize_spikes`）主要在 CPU 上进行，采用简单的求和或分段累积。这种方式：
-1.  **丢失时序信息**：简单的求和无法区分脉冲到达的先后顺序。
-2.  **CPU 瓶颈**：在大规模训练时，CPU 数据加载可能慢于 GPU 计算。
+目前 Spike 数据的预处理通过 `voxelize_spikes_tfp`（调用 SpikeCV 的 TFP 算法）在 CPU/GPU 上完成，虽然已经能够保留更多的时序纹理信息，但：
+1.  **仍为固定策略**：TFP 输出是固定窗口的平均重构，无法自适应区分脉冲到达的先后顺序。
+2.  **CPU 瓶颈**：尽管可选 GPU 设备，数据加载阶段仍常在 CPU 端完成，可能慢于 GPU 计算。
 
 **自定义算子方案**：
 编写一个 CUDA Kernel 实现 **Leaky Integrate-and-Fire (LIF)** 或 **Learnable Decay** 机制。

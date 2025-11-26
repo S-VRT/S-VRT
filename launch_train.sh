@@ -35,9 +35,9 @@
 # ================================================================================
 
 # Default configuration
-DEFAULT_CONFIG="options/vrt/gopro_rgbspike_local.json"
-DEFAULT_GOPRO_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large"
-DEFAULT_SPIKE_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large_spike_seq"
+DEFAULT_CONFIG="options/gopro_rgbspike_local.json"
+DEFAULT_GOPRO_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large"
+DEFAULT_SPIKE_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large_spike_seq"
 DEFAULT_GPU_COUNT=3
 
 # Parse arguments
