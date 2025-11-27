@@ -1,0 +1,4 @@
+cd henry/S-VRT/
+conda activate vrtspike
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+source launch_train.sh

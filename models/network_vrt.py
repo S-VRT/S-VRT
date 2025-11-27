@@ -743,6 +743,10 @@ class TMSA(nn.Module):
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm.
         use_checkpoint_attn (bool): If True, use torch.checkpoint for attention modules. Default: False.
         use_checkpoint_ffn (bool): If True, use torch.checkpoint for feed-forward modules. Default: False.
+        use_sgp (bool): If True, use SGP instead of self-attention. Default: False.
+        sgp_w (int): Kernel size for SGP window-level branch. Default: 3.
+        sgp_k (int): Multiplier for SGP large kernel. Default: 3.
+        sgp_reduction (int): Reduction ratio for SGP instant-level branch. Default: 4.
     """
 
     def __init__(self,
@@ -759,7 +763,11 @@ class TMSA(nn.Module):
                  act_layer=nn.GELU,
                  norm_layer=nn.LayerNorm,
                  use_checkpoint_attn=False,
-                 use_checkpoint_ffn=False
+                 use_checkpoint_ffn=False,
+                 use_sgp=False,
+                 sgp_w=3,
+                 sgp_k=3,
+                 sgp_reduction=4
                  ):
         super().__init__()
         self.dim = dim
@@ -769,15 +777,24 @@ class TMSA(nn.Module):
         self.shift_size = shift_size
         self.use_checkpoint_attn = use_checkpoint_attn
         self.use_checkpoint_ffn = use_checkpoint_ffn
+        self.use_sgp = use_sgp
 
         assert 0 <= self.shift_size[0] < self.window_size[0], "shift_size must in 0-window_size"
         assert 0 <= self.shift_size[1] < self.window_size[1], "shift_size must in 0-window_size"
         assert 0 <= self.shift_size[2] < self.window_size[2], "shift_size must in 0-window_size"
 
         self.norm1 = norm_layer(dim)
-        self.attn = WindowAttention(dim, window_size=self.window_size, num_heads=num_heads, qkv_bias=qkv_bias,
-                                    qk_scale=qk_scale, mut_attn=mut_attn)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        if self.use_sgp and not mut_attn:
+            # Use SGP instead of self-attention when use_sgp=True and only self-attention is used
+            from .sgp_vrt import SGPBlock
+            self.attn = SGPBlock(dim=dim, norm_layer=norm_layer, drop_path=drop_path,
+                                sgp_w=sgp_w, sgp_k=sgp_k, sgp_reduction=sgp_reduction)
+            # When using SGP, we don't need the separate DropPath since SGPBlock includes it
+            self.drop_path = nn.Identity()
+        else:
+            self.attn = WindowAttention(dim, window_size=self.window_size, num_heads=num_heads, qkv_bias=qkv_bias,
+                                        qk_scale=qk_scale, mut_attn=mut_attn)
+            self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         self.mlp = Mlp_GEGLU(in_features=dim, hidden_features=int(dim * mlp_ratio), act_layer=act_layer)
 
@@ -785,7 +802,9 @@ class TMSA(nn.Module):
         B, D, H, W, C = x.shape
         window_size, shift_size = get_window_size((D, H, W), self.window_size, self.shift_size)
 
-        x = self.norm1(x)
+        # For SGP, norm1 is handled inside SGPBlock, so we skip it here
+        if not (self.use_sgp and not hasattr(self.attn, 'mut_attn')):
+            x = self.norm1(x)
 
         # pad feature maps to multiples of window size
         pad_l = pad_t = pad_d0 = 0
@@ -806,8 +825,13 @@ class TMSA(nn.Module):
         # partition windows
         x_windows = window_partition(shifted_x, window_size)  # B*nW, Wd*Wh*Ww, C
 
-        # attention / shifted attention
-        attn_windows = self.attn(x_windows, mask=attn_mask)  # B*nW, Wd*Wh*Ww, C
+        # attention / SGP
+        if hasattr(self.attn, 'mut_attn'):
+            # WindowAttention case - needs mask parameter
+            attn_windows = self.attn(x_windows, mask=attn_mask)  # B*nW, Wd*Wh*Ww, C
+        else:
+            # SGPBlock case - doesn't need mask parameter
+            attn_windows = self.attn(x_windows)  # B*nW, Wd*Wh*Ww, C
 
         # merge windows
         attn_windows = attn_windows.view(-1, *(window_size + (C,)))
@@ -822,7 +846,9 @@ class TMSA(nn.Module):
         if pad_d1 > 0 or pad_r > 0 or pad_b > 0:
             x = x[:, :D, :H, :W, :]
 
-        x = self.drop_path(x)
+        # For SGP, DropPath is already handled inside SGPBlock
+        if not (self.use_sgp and not hasattr(self.attn, 'mut_attn')):
+            x = self.drop_path(x)
 
         return x
 
@@ -870,6 +896,10 @@ class TMSAG(nn.Module):
         norm_layer (nn.Module, optional): Normalization layer. Default: nn.LayerNorm
         use_checkpoint_attn (bool): If True, use torch.checkpoint for attention modules. Default: False.
         use_checkpoint_ffn (bool): If True, use torch.checkpoint for feed-forward modules. Default: False.
+        use_sgp (bool): If True, use SGP instead of self-attention. Default: False.
+        sgp_w (int): Kernel size for SGP window-level branch. Default: 3.
+        sgp_k (int): Multiplier for SGP large kernel. Default: 3.
+        sgp_reduction (int): Reduction ratio for SGP instant-level branch. Default: 4.
     """
 
     def __init__(self,
@@ -886,7 +916,11 @@ class TMSAG(nn.Module):
                  drop_path=0.,
                  norm_layer=nn.LayerNorm,
                  use_checkpoint_attn=False,
-                 use_checkpoint_ffn=False
+                 use_checkpoint_ffn=False,
+                 use_sgp=False,
+                 sgp_w=3,
+                 sgp_k=3,
+                 sgp_reduction=4
                  ):
         super().__init__()
         self.input_resolution = input_resolution
@@ -908,7 +942,11 @@ class TMSAG(nn.Module):
                 drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
                 norm_layer=norm_layer,
                 use_checkpoint_attn=use_checkpoint_attn,
-                use_checkpoint_ffn=use_checkpoint_ffn
+                use_checkpoint_ffn=use_checkpoint_ffn,
+                use_sgp=use_sgp,
+                sgp_w=sgp_w,
+                sgp_k=sgp_k,
+                sgp_reduction=sgp_reduction
             )
             for i in range(depth)])
 
@@ -952,6 +990,10 @@ class RTMSA(nn.Module):
         norm_layer (nn.Module, optional): Normalization layer. Default: nn.LayerNorm.
         use_checkpoint_attn (bool): If True, use torch.checkpoint for attention modules. Default: False.
         use_checkpoint_ffn (bool): If True, use torch.checkpoint for feed-forward modules. Default: False.
+        use_sgp (bool): If True, use SGP instead of self-attention. Default: False.
+        sgp_w (int): Kernel size for SGP window-level branch. Default: 3.
+        sgp_k (int): Multiplier for SGP large kernel. Default: 3.
+        sgp_reduction (int): Reduction ratio for SGP instant-level branch. Default: 4.
     """
 
     def __init__(self,
@@ -966,7 +1008,11 @@ class RTMSA(nn.Module):
                  drop_path=0.,
                  norm_layer=nn.LayerNorm,
                  use_checkpoint_attn=False,
-                 use_checkpoint_ffn=None
+                 use_checkpoint_ffn=None,
+                 use_sgp=False,
+                 sgp_w=3,
+                 sgp_k=3,
+                 sgp_reduction=4
                  ):
         super(RTMSA, self).__init__()
         self.dim = dim
@@ -983,7 +1029,11 @@ class RTMSA(nn.Module):
                                     drop_path=drop_path,
                                     norm_layer=norm_layer,
                                     use_checkpoint_attn=use_checkpoint_attn,
-                                    use_checkpoint_ffn=use_checkpoint_ffn
+                                    use_checkpoint_ffn=use_checkpoint_ffn,
+                                    use_sgp=use_sgp,
+                                    sgp_w=sgp_w,
+                                    sgp_k=sgp_k,
+                                    sgp_reduction=sgp_reduction
                                     )
 
         self.linear = nn.Linear(dim, dim)
@@ -1014,6 +1064,10 @@ class Stage(nn.Module):
         max_residue_magnitude (float): Maximum magnitude of the residual of optical flow.
         use_checkpoint_attn (bool): If True, use torch.checkpoint for attention modules. Default: False.
         use_checkpoint_ffn (bool): If True, use torch.checkpoint for feed-forward modules. Default: False.
+        use_sgp (bool): If True, use SGP instead of self-attention. Default: False.
+        sgp_w (int): Kernel size for SGP window-level branch. Default: 3.
+        sgp_k (int): Multiplier for SGP large kernel. Default: 3.
+        sgp_reduction (int): Reduction ratio for SGP instant-level branch. Default: 4.
     """
 
     def __init__(self,
@@ -1034,7 +1088,11 @@ class Stage(nn.Module):
                  reshape=None,
                  max_residue_magnitude=10,
                  use_checkpoint_attn=False,
-                 use_checkpoint_ffn=False
+                 use_checkpoint_ffn=False,
+                 use_sgp=False,
+                 sgp_w=3,
+                 sgp_k=3,
+                 sgp_reduction=4
                  ):
         super(Stage, self).__init__()
         self.pa_frames = pa_frames
@@ -1066,7 +1124,11 @@ class Stage(nn.Module):
                                      drop_path=drop_path,
                                      norm_layer=norm_layer,
                                      use_checkpoint_attn=use_checkpoint_attn,
-                                     use_checkpoint_ffn=use_checkpoint_ffn
+                                     use_checkpoint_ffn=use_checkpoint_ffn,
+                                     use_sgp=False,  # Mutual attention branch always uses WindowAttention
+                                     sgp_w=sgp_w,
+                                     sgp_k=sgp_k,
+                                     sgp_reduction=sgp_reduction
                                      )
         self.linear1 = nn.Linear(dim, dim)
 
@@ -1082,7 +1144,11 @@ class Stage(nn.Module):
                                      drop_path=drop_path,
                                      norm_layer=norm_layer,
                                      use_checkpoint_attn=True,
-                                     use_checkpoint_ffn=use_checkpoint_ffn
+                                     use_checkpoint_ffn=use_checkpoint_ffn,
+                                     use_sgp=use_sgp,  # Pure self-attention branch uses SGP when enabled
+                                     sgp_w=sgp_w,
+                                     sgp_k=sgp_k,
+                                     sgp_reduction=sgp_reduction
                                      )
         self.linear2 = nn.Linear(dim, dim)
 
@@ -1258,6 +1324,10 @@ class VRT(nn.Module):
         use_checkpoint_ffn (bool): If True, use torch.checkpoint for feed-forward modules. Default: False.
         no_checkpoint_attn_blocks (list[int]): Layers without torch.checkpoint for attention modules.
         no_checkpoint_ffn_blocks (list[int]): Layers without torch.checkpoint for feed-forward modules.
+        use_sgp (bool): If True, use SGP instead of self-attention. Default: False.
+        sgp_w (int): Kernel size for SGP window-level branch. Default: 3.
+        sgp_k (int): Multiplier for SGP large kernel. Default: 3.
+        sgp_reduction (int): Reduction ratio for SGP instant-level branch. Default: 4.
     """
 
     def __init__(self,
@@ -1285,6 +1355,10 @@ class VRT(nn.Module):
                  use_checkpoint_ffn=False,
                  no_checkpoint_attn_blocks=[],
                  no_checkpoint_ffn_blocks=[],
+                 use_sgp=False,
+                 sgp_w=3,
+                 sgp_k=3,
+                 sgp_reduction=4,
                  ):
         super().__init__()
         self.in_chans = in_chans
@@ -1293,6 +1367,7 @@ class VRT(nn.Module):
         self.pa_frames = pa_frames
         self.recal_all_flows = recal_all_flows
         self.nonblind_denoising = nonblind_denoising
+        self.use_sgp = use_sgp
 
         # conv_first
         if self.pa_frames:
@@ -1337,6 +1412,10 @@ class VRT(nn.Module):
                         max_residue_magnitude=10 / scales[i],
                         use_checkpoint_attn=use_checkpoint_attns[i],
                         use_checkpoint_ffn=use_checkpoint_ffns[i],
+                        use_sgp=use_sgp,
+                        sgp_w=sgp_w,
+                        sgp_k=sgp_k,
+                        sgp_reduction=sgp_reduction,
                         )
                     )
 
@@ -1361,7 +1440,11 @@ class VRT(nn.Module):
                       drop_path=dpr[sum(depths[:i]):sum(depths[:i + 1])],
                       norm_layer=norm_layer,
                       use_checkpoint_attn=use_checkpoint_attns[i],
-                      use_checkpoint_ffn=use_checkpoint_ffns[i]
+                      use_checkpoint_ffn=use_checkpoint_ffns[i],
+                      use_sgp=use_sgp,
+                      sgp_w=sgp_w,
+                      sgp_k=sgp_k,
+                      sgp_reduction=sgp_reduction
                       )
             )
 

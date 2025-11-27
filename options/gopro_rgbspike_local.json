@@ -159,6 +159,10 @@
       // 是否使用旋转数据增强：true 表示使用
       ,
       "use_rot": true
+      // 是否启用数据集的全内存缓存：true 会在 Dataset 初始化时把所有原始 RGB+Spike 帧载入内存
+      // 建议在显存/内存允许时配合较小的 dataloader_num_workers 使用
+      ,
+      "in_memory_cache": false
       // 数据加载器配置
       // 是否打乱数据顺序：true 表示每个 epoch 随机打乱数据
       ,
@@ -205,6 +209,17 @@
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
+      // Spike TFP 重建窗口的半宽度：越大越平滑但越耗时
+      ,
+      "tfp_half_win_length": 20
+      // Spike TFP 重建设备：可以是 "cpu"、"cuda:0"、"auto"（自动匹配当前进程 GPU）
+      // 当同时配置 tfp_devices 时，这个字段将被忽略
+      ,
+      "tfp_device": "cpu"
+      // Spike TFP 多 GPU 设备列表：可选，配置后 DataLoader worker 会按 worker_id/LOCAL_RANK 轮询使用
+      // 例如 ["cuda:0","cuda:1","cuda:2"]；为空数组表示禁用多 GPU TFP
+      ,
+      "tfp_devices": ["cuda:0","cuda:1","cuda:2"]
       // Spike 数据文件夹名称
       ,
       "spike_folder_name": "spike"
@@ -360,7 +375,20 @@
       4,
       5,
       9
-    ]
+    ],
+    // SGP (Scalable Granularity Perception) 配置：TriDet 风格的可选注意力替代
+    // 当 use_sgp=true 时，纯 self-attention 分支将使用 SGP 而不是标准注意力
+    "use_sgp": false
+    // SGP 窗口分支的主卷积核大小：默认 3
+    ,
+    "sgp_w": 3
+    // SGP 窗口分支的大卷积核倍数因子：实际核大小 = w * k，默认 3*3=9
+    ,
+    "sgp_k": 3
+    // SGP 瞬时分支的通道缩减比例：默认 4
+    ,
+    "sgp_reduction": 4
+    
     // 初始化类型：网络参数的初始化方式，"default" 表示使用默认初始化
     ,
     "init_type": "default"
@@ -507,6 +535,6 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_rgbspike_concat"
+    "wandb_name": "gopro_rgbspike_concat_nosgp"
   }
 }

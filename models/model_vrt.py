@@ -73,6 +73,10 @@ class ModelVRT(ModelPlain):
             elif current_step == self.fix_iter:
                 print(f'Train all the parameters from {self.fix_iter} iters.')
                 self.netG.requires_grad_(True)
+                # Re-wrap DDP if using static graph to capture new graph structure
+                if self.opt.get('dist', False) and self.opt.get('use_static_graph', False):
+                    print('Re-wrapping DDP for static graph change...')
+                    self.netG = self.model_to_device(self.get_bare_model(self.netG))
 
         super(ModelVRT, self).optimize_parameters(current_step)
 

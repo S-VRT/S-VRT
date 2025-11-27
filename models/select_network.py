@@ -37,7 +37,11 @@ def define_G(opt):
                    use_checkpoint_attn=opt_net['use_checkpoint_attn'],
                    use_checkpoint_ffn=opt_net['use_checkpoint_ffn'],
                    no_checkpoint_attn_blocks=opt_net['no_checkpoint_attn_blocks'],
-                   no_checkpoint_ffn_blocks=opt_net['no_checkpoint_ffn_blocks'])
+                   no_checkpoint_ffn_blocks=opt_net['no_checkpoint_ffn_blocks'],
+                   use_sgp=opt_net.get('use_sgp', False),
+                   sgp_w=opt_net.get('sgp_w', 3),
+                   sgp_k=opt_net.get('sgp_k', 3),
+                   sgp_reduction=opt_net.get('sgp_reduction', 4))
 
         # ----------------------------------------
         # RVRT

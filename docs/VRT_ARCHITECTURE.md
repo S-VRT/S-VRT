@@ -217,6 +217,35 @@ DropPath
 - `shift_size`: 窗口滑动偏移
 - `mut_attn`: 是否使用互注意力
 
+#### 3.4.3 SGP（Scalable Granularity Perception）替换分支
+
+- **位置**: `models/sgp_vrt.py` 定义 `SGP`/`SGPBlock`，`network_vrt.py` 中的 `TMSA`、`TMSAG`、`Stage`、`RTMSA` 通过 `use_sgp` 相关参数引用。
+- **触发条件**: 当 `use_sgp=True` 且该层的 `mut_attn=False` 时，原先的 `WindowAttention` 被 `SGPBlock` 完全替换；含互注意力的层仍保留标准注意力。
+- **整合点**:
+  - 每个 Stage 中第二个 `residual_group`（纯 self-attention 的 25% 层）可切换到 SGP，用卷积多尺度建模代替 self-attention。
+  - Stage 8 的 `RTMSA` 也可通过 `use_sgp` 开关切换到 SGP，从而在最终精炼阶段沿用相同的卷积注意力。
+- **模块结构** (`SGPBlock`):
+  1. `LayerNorm` 对窗口 token 归一化。
+  2. `SGP` 核心由两条分支组成：  
+     - 瞬时分支：通道 SE 风格的 MLP (`reduction` 控制压缩比) 生成 `φ(x)`，与 `FC(x)` 相乘。  
+     - 窗口分支：两个深度可分离 1D 卷积 (`sgp_w` 与 `sgp_w * sgp_k`) 叠加后再乘以门控 `ψ(x)`。
+  3. `DropPath` + 残差，加法接口保持与 Transformer block 相同，方便热插拔。
+- **替换收益**: 避免 QKV 与 Softmax 的 O(N²) 代价，用多尺度卷积提供局部/大核上下文，显存和算力负担更友好，特别适合纯自注意力分支。
+- **主要超参**（可在 `options/*.json` 设置）:
+  - `use_sgp`: 是否启用 SGP。
+  - `sgp_w`: 窗口分支主卷积核大小（默认 3）。
+  - `sgp_k`: 大核倍率，实际核大小 `sgp_w * sgp_k`（默认 9）。
+  - `sgp_reduction`: 瞬时分支 SE 的通道压缩比（默认 4）。
+- **启用示例**:
+  ```json
+  // options/gopro_rgbspike_local_debug.json
+  "use_sgp": true,
+  "sgp_w": 3,
+  "sgp_k": 3,
+  "sgp_reduction": 4
+  ```
+  该设置会让 Stage 1-7 中的纯 self-attention 层与 Stage 8 的 RTMSA 走 SGP 路径，其余带互注意力的层仍使用 `WindowAttention`。
+
 ### 3.5 TMSAG (时序互自注意力组)
 
 **位置**: `network_vrt.py` 第 855-936 行

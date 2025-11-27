@@ -372,20 +372,20 @@ def main():
 
             # 特殊处理：当使用静态计算图时，在改变计算图之前提前保存模型
             # 这是因为在分布式训练中使用 use_checkpoint=True 时存在 bug
-            if opt['use_static_graph'] and (current_step == opt['train']['fix_iter'] - 1):
-                current_step += 1
-                model.update_learning_rate(current_step)
-                if opt['rank'] == 0:
-                    model.save(current_step)  # 提前保存模型
-                # 等待 rank 0 完成保存
-                if opt['dist']:
-                    barrier_safe()
-                current_step -= 1  # 恢复步数
-                if opt['rank'] == 0:
-                    logger.info('Saving models ahead of time when changing the computation graph with use_static_graph=True'
-                                ' (we need it due to a bug with use_checkpoint=True in distributed training). The training '
-                                'will be terminated by PyTorch in the next iteration. Just resume training with the same '
-                                '.json config file.')
+            # if opt['use_static_graph'] and (current_step == opt['train']['fix_iter'] - 1):
+            #     current_step += 1
+            #     model.update_learning_rate(current_step)
+            #     if opt['rank'] == 0:
+            #         model.save(current_step)  # 提前保存模型
+            #     # 等待 rank 0 完成保存
+            #     if opt['dist']:
+            #         barrier_safe()
+            #     current_step -= 1  # 恢复步数
+            #     if opt['rank'] == 0:
+            #         logger.info('Saving models ahead of time when changing the computation graph with use_static_graph=True'
+            #                     ' (we need it due to a bug with use_checkpoint=True in distributed training). The training '
+            #                     'will be terminated by PyTorch in the next iteration. Just resume training with the same '
+            #                     '.json config file.')
 
             # -------------------------------
             # 6) 模型测试和评估
@@ -497,18 +497,7 @@ def main():
                             test_results_folder['psnr_y'].append(clip_psnr_y)
                             test_results_folder['ssim_y'].append(clip_ssim_y)
 
-                            if is_master_process:
-                                logger.info(
-                                    'Testing {:20s} batch {:2d}/{:2d} clip {:2d}/{:2d} ({}) - '
-                                    'PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
-                                        folder_name, idx + 1, total_test_batches, i + 1, batch_clip_count, clip_name,
-                                        clip_psnr, clip_ssim, clip_psnr_y, clip_ssim_y))
-                        else:
-                            if is_master_process:
-                                logger.info(
-                                    'Testing {:20s} batch {:2d}/{:2d} clip {:2d}/{:2d} ({}) - '
-                                    'No GT available, skipped metrics.'.format(
-                                        folder_name, idx + 1, total_test_batches, i + 1, batch_clip_count, clip_name))
+
 
                     # 如果有计算的指标，记录并保存结果
                     if len(test_results_folder['psnr']) > 0:
@@ -518,19 +507,15 @@ def main():
                         psnr_y = sum(test_results_folder['psnr_y']) / len(test_results_folder['psnr_y'])
                         ssim_y = sum(test_results_folder['ssim_y']) / len(test_results_folder['ssim_y'])
 
-                        if is_master_process:
-                            logger.info('Testing {:20s} summary ({:2d}/{:2d}) - PSNR: {:.2f} dB; SSIM: {:.4f}; '
-                                        'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
-                                        format(folder_name, idx + 1, total_test_batches, psnr, ssim, psnr_y, ssim_y))
+
                         test_results['psnr'].append(psnr)
                         test_results['ssim'].append(ssim)
                         test_results['psnr_y'].append(psnr_y)
                         test_results['ssim_y'].append(ssim_y)
                     else:
                         # 没有真实标签时，只记录测试序列名称
-                        if is_master_process:
-                            logger.info('Testing {:20s} ({:2d}/{:2d}) - No ground truth provided for averaging.'
-                                        .format(folder_name, idx + 1, total_test_batches))
+                        pass
+
 
                 local_psnr_sum = sum(test_results['psnr'])
                 local_ssim_sum = sum(test_results['ssim'])

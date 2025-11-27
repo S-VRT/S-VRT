@@ -133,6 +133,10 @@
       // 是否使用旋转数据增强：true 表示使用
       ,
       "use_rot": true
+      // 是否启用数据集的全内存缓存（仅部分 Dataset 支持）：true 时会在初始化阶段将所有原始帧载入内存
+      // 对 RGB-only 数据集保持 false，可根据未来需要开启
+      ,
+      "in_memory_cache": false
       // 数据加载器配置
       // 是否打乱数据顺序：true 表示每个 epoch 随机打乱数据
       ,
