@@ -1371,10 +1371,12 @@ class VRT(nn.Module):
 
         # conv_first
         if self.pa_frames:
+            # SGP fixed logic: 9x expansion (1 current + 4 backward + 4 forward) regardless of pa_frames value
+            # This ensures consistent behavior even if in_chans changes (e.g., 3->7)
             if self.nonblind_denoising:
-                conv_first_in_chans = in_chans*(1+2*4)+1
+                conv_first_in_chans = in_chans * 9 + 1
             else:
-                conv_first_in_chans = in_chans*(1+2*4)
+                conv_first_in_chans = in_chans * 9
         else:
             conv_first_in_chans = in_chans
         self.conv_first = nn.Conv3d(conv_first_in_chans, embed_dims[0], kernel_size=(1, 3, 3), padding=(0, 1, 1))
@@ -1537,6 +1539,18 @@ class VRT(nn.Module):
             if self.nonblind_denoising:
                 x = torch.cat([x, noise_level_map], 2)
 
+            # Assertion Check for Channel Consistency
+            if x.size(2) != self.conv_first.in_channels:
+                raise ValueError(
+                    f"Channel Mismatch Error! \n"
+                    f"Current x shape: {x.shape} (Channels: {x.size(2)}) \n"
+                    f"Expected conv_first in_channels: {self.conv_first.in_channels} \n"
+                    f"Configured in_chans: {self.in_chans} \n"
+                    f"Mode: {'Train' if self.training else 'Test/Val'} \n"
+                    f"Hint: Check if your input tensor includes all expected channels (e.g. RGB+Spike=7) "
+                    f"and that SGP alignment produced the expected 9x expansion."
+                )
+
             if self.upscale == 1:
                 # video deblurring, etc.
                 if timer is not None:
@@ -1621,11 +1635,8 @@ class VRT(nn.Module):
         '''Get flow between frames t and t+1 from x.'''
 
         b, n, c, h, w = x.size()
-        # 对于RGB+Spike输入（c=4），只使用RGB通道（前3个）进行光流估计，SpyNet预训练于RGB
-        if c > 3:
-            x_flow = x[:, :, :3, :, :]
-        else:
-            x_flow = x
+        # SpyNet is pretrained on RGB only; strip any auxiliary channels (e.g., Spike) before flow.
+        x_flow = self.extract_rgb(x)
         c_flow = x_flow.size(2)
 
         x_1 = x_flow[:, :-1, :, :, :].reshape(-1, c_flow, h, w)
@@ -1713,7 +1724,16 @@ class VRT(nn.Module):
             flow = flows_forward[:, i, ...]
             x_forward.append(flow_warp(x_i, flow.permute(0, 2, 3, 1), 'nearest4')) # frame i-1 aligned towards i
 
-        return [torch.stack(x_backward, 1), torch.stack(x_forward, 1)]
+        x_backward = torch.stack(x_backward, 1)
+        x_forward = torch.stack(x_forward, 1)
+        expected_channels = self.in_chans * 4
+        if x_backward.size(2) != expected_channels or x_forward.size(2) != expected_channels:
+            raise ValueError(
+                f"SGP alignment produced mismatched channels (expected 4×{self.in_chans}="
+                f"{expected_channels}). x_backward: {x_backward.shape}, x_forward: {x_forward.shape}."
+            )
+
+        return [x_backward, x_forward]
 
     def forward_features(self, x, flows_backward, flows_forward):
         '''Main network for feature extraction.'''

@@ -118,6 +118,8 @@ class ModelVRT(ModelPlain):
     def _test_video(self, lq):
         '''test the video as a whole or as clips (divided temporally). '''
 
+        self._assert_lq_channels(lq, 'Test Video Input')
+
         num_frame_testing = self.opt['val'].get('num_frame_testing', 0)
 
         if num_frame_testing:
@@ -166,6 +168,8 @@ class ModelVRT(ModelPlain):
 
     def _test_clip(self, lq):
         ''' test the clip as a whole or as patches. '''
+
+        self._assert_lq_channels(lq, 'Test Clip Input')
 
         sf = self.opt['scale']
         window_size = self.opt['netG'].get('window_size', [6,8,8])

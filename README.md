@@ -120,7 +120,7 @@ python -u main_train_vrt.py \
 ```json
 {
   "netG": {
-    "in_chans": 4,  // 输入通道数：3 (RGB) + 1 (Spike)
+    "in_chans": 7,  // 输入通道数：3 (RGB) + 4 (Spike TFP)
     "img_size": [6, 224, 224],
     "window_size": [6, 8, 8]
   },
@@ -132,7 +132,7 @@ python -u main_train_vrt.py \
       "dataroot_spike": "path/to/spike/train",
       "spike_h": 250,
       "spike_w": 400,
-      "spike_channels": 1
+      "spike_channels": 4
     }
   }
 }

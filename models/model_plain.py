@@ -27,6 +27,20 @@ class ModelPlain(ModelBase):
         if self.opt_train['E_decay'] > 0:
             self.netE = define_G(opt).to(self.device).eval()
 
+    def _assert_lq_channels(self, tensor, tensor_name):
+        """Validate that the incoming temporal tensor matches configured in_chans."""
+        expected_in_chans = self.opt['netG'].get('in_chans', 3)
+        actual_in_chans = tensor.size(2)
+        if actual_in_chans != expected_in_chans:
+            raise ValueError(
+                f"{tensor_name} Channel Mismatch!\n"
+                f"Tensor shape: {tensor.shape} (Channels: {actual_in_chans})\n"
+                f"Expected netG.in_chans: {expected_in_chans}\n"
+                f"Mode: {'Train' if self.netG.training else 'Test/Val'}\n"
+                f"Hint: Ensure your dataset returns all expected channels "
+                f"(e.g., RGB 3 + Spike 4 = 7) before feeding them to netG."
+            )
+
     """
     # ----------------------------------------
     # Preparation before training with data
@@ -155,6 +169,8 @@ class ModelPlain(ModelBase):
     def feed_data(self, data, need_H=True):
         with self.timer.timer('data_load'):
             self.L = data['L'].to(self.device)
+            self._assert_lq_channels(self.L, 'Training Feed Data')
+
             if need_H:
                 self.H = data['H'].to(self.device)
 

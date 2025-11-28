@@ -216,7 +216,7 @@ lq = torch.cat([lq_rgb, lq_spike], dim=1)  # 按通道拼
     "net_type": "vrt",
     "task": "videodeblurring",
     "scale": 1,
-    "in_chans": 4,           // 3+1，自己改
+    "in_chans": 7,           // 3+4（RGB+Spike TFP）
     "img_size": [6, 256, 256],
     "window_size": [6, 8, 8],
     "depths": [8, 8, 8, 8, 6, 6, 6, 6],     // 按你现在的 network_vrt.py 来填

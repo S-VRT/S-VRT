@@ -113,12 +113,20 @@
           0
         ]
       }
-      // Spike 数据通道数：1 表示单通道（灰度）Spike 数据
+      // Spike 数据通道数：4 表示 TFP 体素 (4通道)
       ,
-      "spike_channels": 1
+      "spike_channels": 4
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
+      // 归一化设置：RGB 使用 ImageNet 均值方差，Spike 通道目前保持恒等缩放
+      ,
+      "rgb_normalize": "imagenet"
+      ,
+      "spike_normalize": {
+        "mean": [0.0, 0.0, 0.0, 0.0],
+        "std": [1.0, 1.0, 1.0, 1.0]
+      }
       // 元信息文件路径：包含数据集元信息的文本文件路径
       ,
       "meta_info_file": "data/meta_info/meta_info_GoPro_train_GT.txt"
@@ -203,12 +211,20 @@
       // Spike 数据宽度：Spike 图像的宽度（像素）
       ,
       "spike_w": 400
-      // Spike 数据通道数：1 表示单通道（灰度）Spike 数据
+      // Spike 数据通道数：4 表示 TFP 体素 (4通道)
       ,
-      "spike_channels": 1
+      "spike_channels": 4
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
+      // 归一化设置（与训练保持一致）
+      ,
+      "rgb_normalize": "imagenet"
+      ,
+      "spike_normalize": {
+        "mean": [0.0, 0.0, 0.0, 0.0],
+        "std": [1.0, 1.0, 1.0, 1.0]
+      }
       // Spike TFP 重建窗口的半宽度：越大越平滑但越耗时
       ,
       "tfp_half_win_length": 20
@@ -255,11 +271,11 @@
   "netG": {
     // 网络类型：指定为 "vrt" (Video Restoration Transformer)
     "net_type": "vrt"
-    // 输入通道数：4 表示 RGB (3) + Spike (1) 通道拼接
-    // 注意：当 pa_frames>0 时，经过对齐后实际输入 conv_first 的通道数为 in_chans*(1+2*4)=36
-    // 这是因为 nearest4 模式的对齐操作会将每个通道扩展为 4 倍（原始 + 后向对齐 + 前向对齐）
+    // 输入通道数：7 表示 RGB (3) + Spike TFP (4) 通道拼接
+    // 注意：当 pa_frames>0 时，经过对齐后实际输入 conv_first 的通道数为 in_chans * 9 = 63
+    // 2 (frames) * 4 (expansion) + 1 (current) = 9 倍
     ,
-    "in_chans": 4
+    "in_chans": 7
     // 上采样倍数：1 表示不进行上采样（保持原始分辨率）
     ,
     "upscale": 1
@@ -535,6 +551,6 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_rgbspike_concat_nosgp"
+    "wandb_name": "gopro_nosgp"
   }
 }

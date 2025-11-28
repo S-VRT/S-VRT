@@ -164,7 +164,7 @@ Key dataset settings:
   "dataroot_spike": "/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large_spike_seq/train",
   "spike_h": 250,
   "spike_w": 400,
-  "spike_channels": 1,
+  "spike_channels": 4,
   "spike_flipud": true
 }
 ```

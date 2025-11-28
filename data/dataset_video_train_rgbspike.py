@@ -93,7 +93,7 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         # Spike configuration
         self.spike_h = opt.get('spike_h', 250)
         self.spike_w = opt.get('spike_w', 400)
-        self.spike_channels = opt.get('spike_channels', 1)
+        self.spike_channels = opt.get('spike_channels', 4) # Default updated to 4 for TFP
         self.spike_flipud = opt.get('spike_flipud', True)
         self.tfp_half_win_length = opt.get('tfp_half_win_length', 20)
         self._tfp_device_pool = self._normalize_tfp_device_pool(opt.get('tfp_devices', None))
@@ -101,6 +101,9 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         if self._tfp_device_pool:
             # Multi-device mode takes precedence over single-device mode.
             self.tfp_device = None
+        self.rgb_norm_stats = self._build_norm_stats(opt.get('rgb_normalize', None), num_channels=3, preset='imagenet')
+        self.spike_norm_stats = self._build_norm_stats(opt.get('spike_normalize', None), num_channels=self.spike_channels)
+        self.expected_lq_channels = 3 + self.spike_channels
 
         keys = []
         total_num_frames = [] # some clips may not have 100 frames
@@ -228,6 +231,10 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
             spike_voxels_resized.append(spike_voxel_resized)
 
         # Concatenate RGB and Spike channels
+        # Channel Order: 
+        #   0~2: RGB (0-1 float)
+        #   3~6: Spike TFP Voxels (0-1 float, 4 channels)
+        # Total: 7 channels
         img_lqs_with_spike = []
         for img_lq, spike_voxel in zip(img_lqs, spike_voxels_resized):
             # img_lq: (H, W, 3), spike_voxel: (S, H, W)
@@ -244,6 +251,13 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         img_results = utils_video.img2tensor(img_results, bgr2rgb=False)
         img_gts = torch.stack(img_results[len(img_lqs_with_spike) // 2:], dim=0)
         img_lqs = torch.stack(img_results[:len(img_lqs_with_spike) // 2], dim=0)
+        if img_lqs.size(1) != self.expected_lq_channels:
+            raise ValueError(
+                f"[VideoRecurrentTrainDatasetRGBSpike] Expected {self.expected_lq_channels} channels "
+                f"but received {img_lqs.size(1)} (tensor shape: {img_lqs.shape}). "
+                "Double-check spike voxel stacking and augmentation."
+            )
+        img_lqs = self._apply_channel_normalization(img_lqs)
 
         # img_lqs: (t, c, h, w) where c = 3 + spike_channels
         # img_gts: (t, c, h, w) where c = 3
@@ -447,4 +461,42 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
 
         # Default to the first configured device.
         return self._tfp_device_pool[0]
+
+    def _build_norm_stats(self, cfg_value, num_channels, preset=None):
+        """Return per-channel mean/std tensors when optional normalization is requested."""
+        if cfg_value in (None, False) or num_channels == 0:
+            return None
+
+        if isinstance(cfg_value, str):
+            key = cfg_value.lower()
+            if key == 'imagenet' and preset == 'imagenet' and num_channels == 3:
+                mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)
+                std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)
+            else:
+                raise ValueError(f'Unsupported normalization preset: {cfg_value}')
+            mean = mean.view(1, num_channels, 1, 1)
+            std = std.view(1, num_channels, 1, 1)
+        elif isinstance(cfg_value, dict):
+            mean = self._to_channel_tensor(cfg_value.get('mean', 0.0), num_channels, 'mean')
+            std = self._to_channel_tensor(cfg_value.get('std', 1.0), num_channels, 'std')
+        else:
+            raise ValueError(f'Unsupported normalization config type: {type(cfg_value)}')
+
+        return {'mean': mean, 'std': std}
+
+    def _to_channel_tensor(self, value, num_channels, label):
+        tensor = torch.tensor(value, dtype=torch.float32)
+        if tensor.numel() == 1:
+            tensor = tensor.repeat(num_channels)
+        if tensor.numel() != num_channels:
+            raise ValueError(f'Normalization {label} expected {num_channels} values, got {tensor.numel()}')
+        return tensor.view(1, num_channels, 1, 1)
+
+    def _apply_channel_normalization(self, tensor):
+        """Apply RGB ImageNet-style normalization and optional spike scaling."""
+        if self.rgb_norm_stats is not None:
+            tensor[:, :3, :, :] = (tensor[:, :3, :, :] - self.rgb_norm_stats['mean']) / self.rgb_norm_stats['std']
+        if self.spike_norm_stats is not None and tensor.size(1) > 3:
+            tensor[:, 3:, :, :] = (tensor[:, 3:, :, :] - self.spike_norm_stats['mean']) / self.spike_norm_stats['std']
+        return tensor
 

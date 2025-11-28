@@ -158,6 +158,9 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
             print("Requested CUDA device for TFP but CUDA is unavailable. Falling back to CPU.")
             requested_tfp_device = 'cpu'
         self.tfp_device = requested_tfp_device
+        self.rgb_norm_stats = self._build_norm_stats(opt.get('rgb_normalize', None), num_channels=3, preset='imagenet')
+        self.spike_norm_stats = self._build_norm_stats(opt.get('spike_normalize', None), num_channels=self.spike_channels)
+        self.expected_lq_channels = 3 + self.spike_channels
 
         self.imgs_lq, self.imgs_gt = {}, {}
         self.spike_paths = {}
@@ -235,6 +238,12 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
         t, _, h, w = imgs_lq.shape
         spike_seq = self._get_spike_sequence(folder, h, w, t)
         imgs_lq = torch.cat([imgs_lq, spike_seq], dim=1)
+        if imgs_lq.size(1) != self.expected_lq_channels:
+            raise ValueError(
+                f"[VideoRecurrentTestDatasetRGBSpike] Expected {self.expected_lq_channels} channels "
+                f"but found {imgs_lq.size(1)} for folder {folder}."
+            )
+        imgs_lq = self._apply_channel_normalization(imgs_lq)
 
         return {
             'L': imgs_lq,
@@ -292,6 +301,42 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
                 cv2.resize(spike_voxel[ch], (target_w, target_h), interpolation=cv2.INTER_LINEAR)
             )
         return np.stack(resized_channels, axis=0)
+
+    def _build_norm_stats(self, cfg_value, num_channels, preset=None):
+        if cfg_value in (None, False) or num_channels == 0:
+            return None
+
+        if isinstance(cfg_value, str):
+            key = cfg_value.lower()
+            if key == 'imagenet' and preset == 'imagenet' and num_channels == 3:
+                mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32)
+                std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32)
+            else:
+                raise ValueError(f'Unsupported normalization preset: {cfg_value}')
+            mean = mean.view(1, num_channels, 1, 1)
+            std = std.view(1, num_channels, 1, 1)
+        elif isinstance(cfg_value, dict):
+            mean = self._to_channel_tensor(cfg_value.get('mean', 0.0), num_channels, 'mean')
+            std = self._to_channel_tensor(cfg_value.get('std', 1.0), num_channels, 'std')
+        else:
+            raise ValueError(f'Unsupported normalization config type: {type(cfg_value)}')
+
+        return {'mean': mean, 'std': std}
+
+    def _to_channel_tensor(self, value, num_channels, label):
+        tensor = torch.tensor(value, dtype=torch.float32)
+        if tensor.numel() == 1:
+            tensor = tensor.repeat(num_channels)
+        if tensor.numel() != num_channels:
+            raise ValueError(f'Normalization {label} expected {num_channels} values, got {tensor.numel()}')
+        return tensor.view(1, num_channels, 1, 1)
+
+    def _apply_channel_normalization(self, tensor):
+        if self.rgb_norm_stats is not None:
+            tensor[:, :3, :, :] = (tensor[:, :3, :, :] - self.rgb_norm_stats['mean']) / self.rgb_norm_stats['std']
+        if self.spike_norm_stats is not None and tensor.size(1) > 3:
+            tensor[:, 3:, :, :] = (tensor[:, 3:, :, :] - self.spike_norm_stats['mean']) / self.spike_norm_stats['std']
+        return tensor
 
 
 class SingleVideoRecurrentTestDataset(data.Dataset):

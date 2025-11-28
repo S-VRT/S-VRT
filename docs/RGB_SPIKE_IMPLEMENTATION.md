@@ -79,7 +79,7 @@ class SpikeStreamSimple:
 
 - 添加 `in_chans` 参数传递给 VRT 网络
 - 默认值为 3（向后兼容）
-- RGB+Spike 配置设置为 4 (3+1)
+- RGB+Spike 配置设置为 7 (3+4)
 
 ```python
 netG = net(
@@ -118,7 +118,7 @@ elif dataset_type in ['videorecurrenttraindatasetrgbspike']:
       "dataroot_spike": "trainsets/gopro_spike/GOPRO_Large_spike_seq/train",
       "spike_h": 250,
       "spike_w": 400,
-      "spike_channels": 1,
+      "spike_channels": 4,
       "spike_flipud": true,
       "io_backend": {"type": "disk"},
       "scale": 1,
@@ -128,7 +128,7 @@ elif dataset_type in ['videorecurrenttraindatasetrgbspike']:
   
   "netG": {
     "net_type": "vrt",
-    "in_chans": 4,  // 3 (RGB) + 1 (Spike)
+    "in_chans": 7,  // 3 (RGB) + 4 (Spike)
     ...
   },
   
@@ -262,6 +262,30 @@ print(f"GT shape: {sample['H'].shape}")  # (6, 3, 224, 224)
    - RGB + Spike (S=1)
    - RGB + Spike (S=4)
 3. **学习率调整**: Spike 通道可能需要不同的学习率
+
+## Sanity Checklist & Minimal Validation Run
+
+1. **配置核对**
+   - `options/gopro_rgbspike_local*.json` / `006_train_vrt_*.json` 中确保 `netG.in_chans=7`、`datasets.*.spike_channels=4`
+   - `datasets.*.rgb_normalize="imagenet"`；`spike_normalize` 保持 `[0,0,0,0]` / `[1,1,1,1]`
+2. **Runtime 断言位置**
+   - `ModelPlain._assert_lq_channels`：训练 `feed_data` / `_test_video` / `_test_clip`
+   - `network_vrt.get_aligned_image_2frames`：SGP 对齐 4×in_chans=28 通道检查
+   - `conv_first` 前的 `ValueError`：9×in_chans (=63) 输入不符立即报错
+3. **调试命令（迷你实验）**
+   ```bash
+   # 使用本地 Debug 配置（64px crop，batch=60）跑一次快速验证
+   bash launch_train.sh 1 options/gopro_rgbspike_local_debug.json --prepare-data
+   # 将 val_freq 降到 500 以触发 `_test_video`
+   python main_train_vrt.py --opt options/gopro_rgbspike_local_debug.json --override 'train.checkpoint_test=500'
+   ```
+4. **预期日志**
+   - Dataloader 输出 `L` 形状：`[B, T, 7, H, W]`
+   - `conv_first` 断言未触发；若误用 RGB-only clip，会抛出 “Channel Mismatch” 错误而不是静默失败
+5. **遇到 “63 vs 36” 报错时排查顺序**
+   - 检查 JSON 的 `spike_channels` + `in_chans`
+   - 打印 Dataset 样本 `sample['L'].shape`
+   - 若断言来自 `get_aligned_image_2frames`，说明 SpyNet 对齐阶段的数据宽度被截断，重点检查 `flow_warp(..., 'nearest4')` 输出拼接逻辑
 
 ## 问题排查
 
