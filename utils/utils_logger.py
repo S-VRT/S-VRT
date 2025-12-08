@@ -2,8 +2,9 @@ import sys
 import datetime
 import logging
 import os
+import numpy as np
 
-# Optional dependencies for TensorBoard and WANDB
+# Optional dependencies for TensorBoard, WANDB and SwanLab
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_AVAILABLE = True
@@ -15,6 +16,12 @@ try:
     WANDB_AVAILABLE = True
 except ImportError:
     WANDB_AVAILABLE = False
+
+try:
+    import swanlab
+    SWANLAB_AVAILABLE = True
+except ImportError:
+    SWANLAB_AVAILABLE = False
 
 
 '''
@@ -125,11 +132,20 @@ class Logger(object):
         self.logger = logger
         self.tb_writer = None
         self.wandb_run = None
+        self.swanlab_run = None
         
         # Get logging configuration
         logging_config = opt.get('logging', {})
         self.use_tensorboard = logging_config.get('use_tensorboard', False)
         self.use_wandb = logging_config.get('use_wandb', False)
+        self.use_swanlab = logging_config.get('use_swanlab', False)
+        self.swanlab_auto_resume = logging_config.get('swanlab_auto_resume', True)
+        self.swanlab_resume_strategy = logging_config.get('swanlab_resume_strategy', 'allow')
+        self.swanlab_manual_run_id = logging_config.get('swanlab_run_id', None)
+        self.swanlab_run_id_file = self._init_swanlab_run_id_file(
+            logging_config.get('swanlab_run_id_file', None),
+            opt
+        )
         
         # Initialize TensorBoard
         if self.use_tensorboard:
@@ -199,6 +215,85 @@ class Logger(object):
                     else:
                         print(f'Warning: Failed to initialize WANDB: {e}')
                     self.use_wandb = False
+
+        # Initialize SwanLab
+        if self.use_swanlab:
+            if not SWANLAB_AVAILABLE:
+                if self.logger:
+                    self.logger.warning('SwanLab is not available. Please install swanlab: pip install swanlab')
+                else:
+                    print('Warning: SwanLab is not available. Please install swanlab: pip install swanlab')
+                self.use_swanlab = False
+            else:
+                swanlab_api_key = logging_config.get('swanlab_api_key', None)
+                if swanlab_api_key:
+                    os.environ['SWANLAB_API_KEY'] = swanlab_api_key
+                    if self.logger:
+                        self.logger.info('SwanLab API key set from configuration (non-interactive mode)')
+                    else:
+                        print('SwanLab API key set from configuration (non-interactive mode)')
+                elif 'SWANLAB_API_KEY' not in os.environ:
+                    warning_msg = ('SwanLab API key not found in config or environment. '
+                                   'Please set swanlab_api_key in config or run: swanlab login')
+                    if self.logger:
+                        self.logger.warning(warning_msg)
+                    else:
+                        print(f'Warning: {warning_msg}')
+
+                swanlab_project = logging_config.get('swanlab_project', opt.get('task', 'experiment'))
+                swanlab_workspace = logging_config.get('swanlab_workspace', None)
+                swanlab_name = logging_config.get('swanlab_name', opt.get('task', 'experiment'))
+                swanlab_description = logging_config.get('swanlab_description', None)
+                swanlab_mode = logging_config.get('swanlab_mode', None)
+
+                if not swanlab_mode:
+                    swanlab_mode = 'cloud' if (swanlab_api_key or 'SWANLAB_API_KEY' in os.environ) else 'offline'
+
+                swanlab_kwargs = {'config': opt}
+                if swanlab_project:
+                    swanlab_kwargs['project'] = swanlab_project
+                if swanlab_workspace:
+                    swanlab_kwargs['workspace'] = swanlab_workspace
+                if swanlab_name:
+                    swanlab_kwargs['experiment_name'] = swanlab_name
+                if swanlab_description:
+                    swanlab_kwargs['description'] = swanlab_description
+                if swanlab_mode:
+                    swanlab_kwargs['mode'] = swanlab_mode
+
+                swanlab_resume_id = self.swanlab_manual_run_id
+                if swanlab_mode == 'cloud' and swanlab_resume_id is None and self.swanlab_auto_resume:
+                    swanlab_resume_id = self._load_swanlab_run_id()
+
+                resume_strategy = self.swanlab_resume_strategy if swanlab_mode == 'cloud' else None
+                if resume_strategy:
+                    swanlab_kwargs['resume'] = resume_strategy
+
+                if swanlab_mode == 'cloud' and swanlab_resume_id:
+                    swanlab_kwargs['id'] = swanlab_resume_id
+                    if self.logger:
+                        self.logger.info(f'Resuming SwanLab run with id={swanlab_resume_id}')
+                    else:
+                        print(f'Resuming SwanLab run with id={swanlab_resume_id}')
+
+                try:
+                    self.swanlab_run = swanlab.init(**swanlab_kwargs)
+                    if self.logger:
+                        self.logger.info(
+                            f'SwanLab logging enabled. Project: {swanlab_project}, '
+                            f'Name: {swanlab_name}, Mode: {swanlab_mode}'
+                        )
+                    else:
+                        print(f'SwanLab logging enabled. Project: {swanlab_project}, '
+                              f'Name: {swanlab_name}, Mode: {swanlab_mode}')
+                    if self.swanlab_auto_resume:
+                        self._persist_swanlab_run_id(getattr(self.swanlab_run, 'id', None))
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f'Failed to initialize SwanLab: {e}')
+                    else:
+                        print(f'Warning: Failed to initialize SwanLab: {e}')
+                    self.use_swanlab = False
     
     def log_scalars(self, step, scalar_dict, tag_prefix=''):
         """
@@ -227,6 +322,19 @@ class Logger(object):
             wandb_dict = {f'{tag_prefix}{key}': value for key, value in scalar_dict.items() if value is not None}
             wandb_dict['step'] = step
             self.wandb_run.log(wandb_dict, step=step)
+
+        # Log to SwanLab
+        if self.use_swanlab and self.swanlab_run is not None:
+            swanlab_dict = {f'{tag_prefix}{key}': value for key, value in scalar_dict.items() if value is not None}
+            if swanlab_dict:
+                try:
+                    self.swanlab_run.log(swanlab_dict, step=step)
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f'Failed to log scalars to SwanLab: {e}')
+                    else:
+                        print(f'Warning: Failed to log scalars to SwanLab: {e}')
+                    self.use_swanlab = False
     
     def log_images(self, step, image_dict, tag_prefix=''):
         """
@@ -263,6 +371,25 @@ class Logger(object):
             if wandb_dict:
                 wandb_dict['step'] = step
                 self.wandb_run.log(wandb_dict, step=step)
+
+        # Log to SwanLab
+        if self.use_swanlab and self.swanlab_run is not None:
+            swanlab_dict = {}
+            for key, image in image_dict.items():
+                if image is None:
+                    continue
+                swanlab_image = self._to_swanlab_image(image)
+                if swanlab_image is not None:
+                    swanlab_dict[f'{tag_prefix}{key}'] = swanlab_image
+            if swanlab_dict:
+                try:
+                    self.swanlab_run.log(swanlab_dict, step=step)
+                except Exception as e:
+                    if self.logger:
+                        self.logger.warning(f'Failed to log images to SwanLab: {e}')
+                    else:
+                        print(f'Warning: Failed to log images to SwanLab: {e}')
+                    self.use_swanlab = False
     
     def log_config(self, config_dict):
         """
@@ -273,6 +400,15 @@ class Logger(object):
         """
         if self.use_wandb and self.wandb_run is not None:
             self.wandb_run.config.update(config_dict, allow_val_change=True)
+
+        if self.use_swanlab and self.swanlab_run is not None:
+            try:
+                self.swanlab_run.config.update(config_dict)
+            except Exception as e:
+                if self.logger:
+                    self.logger.warning(f'Failed to update SwanLab config: {e}')
+                else:
+                    print(f'Warning: Failed to update SwanLab config: {e}')
     
     def close(self):
         """
@@ -287,3 +423,105 @@ class Logger(object):
             self.wandb_run.finish()
             if self.logger:
                 self.logger.info('WANDB run finished.')
+
+        if self.swanlab_run is not None:
+            self.swanlab_run.finish()
+            if self.logger:
+                self.logger.info('SwanLab run finished.')
+
+    def _init_swanlab_run_id_file(self, configured_path, opt):
+        """
+        Compute the path used to persist SwanLab run IDs for auto-resume.
+        """
+        if not self.swanlab_auto_resume:
+            return None
+
+        base_log_dir = opt['path'].get('log', opt['path'].get('task', '.'))
+        run_id_path = configured_path if configured_path is not None else os.path.join(base_log_dir, 'swanlab_run.id')
+
+        if not os.path.isabs(run_id_path):
+            run_id_path = os.path.join(base_log_dir, run_id_path)
+
+        os.makedirs(os.path.dirname(run_id_path), exist_ok=True)
+        return run_id_path
+
+    def _load_swanlab_run_id(self):
+        """
+        Load the cached SwanLab run ID if available.
+        """
+        if not self.swanlab_run_id_file or not os.path.isfile(self.swanlab_run_id_file):
+            return None
+        try:
+            with open(self.swanlab_run_id_file, 'r') as fp:
+                run_id = fp.read().strip()
+                return run_id or None
+        except OSError as e:
+            if self.logger:
+                self.logger.warning(f'Failed to read SwanLab run id file: {e}')
+            else:
+                print(f'Warning: Failed to read SwanLab run id file: {e}')
+            return None
+
+    def _persist_swanlab_run_id(self, run_id):
+        """
+        Persist the SwanLab run ID for future auto-resume attempts.
+        """
+        if not self.swanlab_run_id_file or not run_id:
+            return
+        try:
+            with open(self.swanlab_run_id_file, 'w') as fp:
+                fp.write(run_id)
+        except OSError as e:
+            if self.logger:
+                self.logger.warning(f'Failed to write SwanLab run id file: {e}')
+            else:
+                print(f'Warning: Failed to write SwanLab run id file: {e}')
+
+    def _to_swanlab_image(self, image):
+        """
+        Prepare numpy image data for SwanLab logging.
+        """
+        if not SWANLAB_AVAILABLE:
+            return None
+
+        np_image = self._to_numpy_image(image)
+        if np_image is None:
+            return None
+
+        try:
+            return swanlab.Image(np_image)
+        except Exception as e:
+            if self.logger:
+                self.logger.warning(f'Failed to convert image for SwanLab logging: {e}')
+            else:
+                print(f'Warning: Failed to convert image for SwanLab logging: {e}')
+            return None
+
+    @staticmethod
+    def _to_numpy_image(image):
+        """
+        Convert tensor/array image to HWC numpy format for logging.
+        """
+        if image is None:
+            return None
+        try:
+            if hasattr(image, 'detach'):
+                image = image.detach()
+            if hasattr(image, 'cpu'):
+                image = image.cpu()
+            if hasattr(image, 'numpy'):
+                image = image.numpy()
+        except Exception:
+            pass
+
+        if isinstance(image, np.ndarray):
+            np_image = image
+        else:
+            return None
+
+        if np_image.ndim == 3 and np_image.shape[0] in (1, 3):
+            np_image = np.transpose(np_image, (1, 2, 0))
+        elif np_image.ndim == 2:
+            np_image = np_image[:, :, None]
+
+        return np.clip(np_image, 0.0, 1.0)

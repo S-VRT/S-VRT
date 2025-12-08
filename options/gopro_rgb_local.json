@@ -464,5 +464,26 @@
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
     "wandb_name": "gopro_rgb_local"
+    // 是否使用 SwanLab：true 表示启用 SwanLab 云端/本地日志记录
+    ,
+    "use_swanlab": false
+    // SwanLab API 密钥：用于非交互式登录，也可通过环境变量 SWANLAB_API_KEY 设置
+    ,
+    "swanlab_api_key": null
+    // SwanLab 项目名称：默认与任务名一致
+    ,
+    "swanlab_project": "Deblur"
+    // SwanLab 工作空间：可选，填写你的 SwanLab workspace（团队/用户名）
+    ,
+    "swanlab_workspace": null
+    // SwanLab 运行名称：用于区分不同实验，默认取任务名
+    ,
+    "swanlab_name": "gopro_rgb_local"
+    // SwanLab 实验描述：可选的文本说明
+    ,
+    "swanlab_description": null
+    // SwanLab 运行模式：可设置为 "cloud"、"offline" 等；留空时自动推断
+    ,
+    "swanlab_mode": null
   }
 }

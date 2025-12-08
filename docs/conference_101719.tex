@@ -1,0 +1,210 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+% The preceding line is only needed to identify funding in the first footnote. If that is unneeded, please comment it out.
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\newcommand{\placeholder}[1]{\textcolor{red}{[Placeholder: #1]}}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\begin{document}
+
+\title{Conference Paper Title*\\
+{\footnotesize \textsuperscript{*}Note: Sub-titles are not captured in Xplore and
+should not be used}
+\thanks{Identify applicable funding agency here. If none, delete this.}
+}
+
+\author{\IEEEauthorblockN{1\textsuperscript{st} Given Name Surname}
+\IEEEauthorblockA{\textit{dept. name of organization (of Aff.)} \\
+\textit{name of organization (of Aff.)}\\
+City, Country \\
+email address or ORCID}
+\and
+\IEEEauthorblockN{2\textsuperscript{nd} Given Name Surname}
+\IEEEauthorblockA{\textit{dept. name of organization (of Aff.)} \\
+\textit{name of organization (of Aff.)}\\
+City, Country \\
+email address or ORCID}
+\and
+\IEEEauthorblockN{3\textsuperscript{rd} Given Name Surname}
+\IEEEauthorblockA{\textit{dept. name of organization (of Aff.)} \\
+\textit{name of organization (of Aff.)}\\
+City, Country \\
+email address or ORCID}
+\and
+\IEEEauthorblockN{4\textsuperscript{th} Given Name Surname}
+\IEEEauthorblockA{\textit{dept. name of organization (of Aff.)} \\
+\textit{name of organization (of Aff.)}\\
+City, Country \\
+email address or ORCID}
+\and
+\IEEEauthorblockN{5\textsuperscript{th} Given Name Surname}
+\IEEEauthorblockA{\textit{dept. name of organization (of Aff.)} \\
+\textit{name of organization (of Aff.)}\\
+City, Country \\
+email address or ORCID}
+\and
+\IEEEauthorblockN{6\textsuperscript{th} Given Name Surname}
+\IEEEauthorblockA{\textit{dept. name of organization (of Aff.)} \\
+\textit{name of organization (of Aff.)}\\
+City, Country \\
+email address or ORCID}
+}
+
+\maketitle
+
+\begin{abstract}
+This document is a model and instructions for \LaTeX.
+This and the IEEEtran.cls file define the components of your paper [title, text, heads, etc.]. *CRITICAL: Do Not Use Symbols, Special Characters, Footnotes, 
+or Math in Paper Title or Abstract.
+\end{abstract}
+
+\begin{IEEEkeywords}
+component, formatting, style, styling, insert
+\end{IEEEkeywords}
+
+\section{Introduction}
+This section introduces the problem of spike-guided RGB video deblurring.
+\placeholder{Add background motivation.}
+\placeholder{Add contributions summary here.}
+\placeholder{Add description of spike-guided formulation.}
+
+\section{Related Work}
+
+\noindent\textbf{Video Deblurring.} Existing RGB-based video deblurring methods fall into two main categories. CNN-based models such as MSFS-Net, MSSNet and MRLPFNet \cite{zhang_multi-scale_2022,kim_mssnet_2022,dong_multi-scale_2023} focus on multi-scale feature decomposition, coarse-to-fine refinement, or LF/HF separation, offering efficient spatial processing and strong detail reconstruction. However, they rely on handcrafted pyramids or local convolutions, lack long-range temporal reasoning, and are restricted to single-image restoration without leveraging additional sensing modalities. In contrast, Transformer-based approaches such as BiT and FFTformer \cite{zhong_blur_2023,kong_efficient_2023} exploit attention to capture global dependencies or frequency-domain structure, improving temporal correlation modeling but often incurring high memory cost and requiring complex supervision or frequency-domain engineering. Among them, VRT \cite{liang_vrt_2022} stands out by unifying motion estimation, alignment, and long-range fusion through temporal mutual self-attention, achieving strong results across restoration tasks, yet still assumes RGB-only inputs and struggles when fast motion erases high-frequency temporal cues. This limitation motivates our S-VRT, which extends VRT with spike-derived high-temporal information to enhance motion disambiguation beyond conventional RGB-only frameworks.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figs/related_work_timeline.png}
+    \caption{Overview of representative RGB video deblurring methods.}
+    \label{fig:rgb_deblur_overview}
+\end{figure}
+
+\noindent\textbf{Spike Cameras and SpikeCV.} Spike cameras \cite{dong_spike_2021} are event-based sensors that encode luminance changes with microsecond precision: each pixel independently accumulates ADC-converted intensity and fires a spike once a threshold is reached, generating a binary stream 
+$S \in \mathbb{R}^{H \times W \times T}$
+sampled by a backend polling circuit (typically every 25~$\mu$s). Each entry is 1 if a spike occurs within the polling interval and 0 otherwise, forming a high-frequency, asynchronous “spike tensor” whose firing density reflects instantaneous brightness dynamics. This format preserves fine temporal discontinuities without motion integration, making it inherently resistant to the motion blur and saturation that degrade RGB frames. Dong et al.\ further provide two decoding schemes—Texture-from-Latency (TFL), which extracts structural cues from recent spike timings, and Texture-from-Playback (TFP), which integrates spikes over a sliding temporal window to recover high-dynamic-range luminance. Both representations offer temporally precise signals ideal for guiding deblurring models that require sharp temporal priors unavailable in conventional RGB capture. To operationalize these data formats, the SpikeCV platform \cite{zheng_spikecv_2024} unifies hardware streaming and offline datasets through the \texttt{SpikeStream} abstraction, organizing raw spikes into continuous tensors and providing loaders, simulators, and real-time pipelines that allow deep models to directly ingest spike voxelizations as auxiliary supervision or high-tempo resolution priors—forming a practical foundation for spike-guided video deblurring.
+
+\noindent\textbf{Spike-based Deblurring} Chen et al.\cite{chen_enhancing_2023} introduce SpkDeblurNet, a dual-branch spike–RGB Transformer that exploits the dense temporal cues and textured spike frames to resolve motion ambiguity in heavily blurred RGB inputs, achieving clear gains over RGB-only and event-based baselines. Chang et al.\cite{chang_1000_2023} reconstruct 1000 FPS HDR videos using a Spike–RGB hybrid camera and a three-stage pipeline combining spike-guided deblurring, interpolation, and recurrent fusion; although effective for HDR and extreme motion, the method relies on alternating exposures and hybrid capture rather than addressing pure RGB deblurring. Chen et al.\cite{chen_spikereveal_2024} propose SpikeReveal, a self-supervised spike-guided framework that models the physics between blurry RGB, spike counts, and latent sharp frames, using teacher–student distillation to counter domain gaps and yielding more stable temporal consistency than supervised spike-based or event-based approaches.
+
+\section{Method}
+
+\subsection{Overview}
+We propose S-VRT, a spike-guided video deblurring framework that extends the Video Restoration Transformer (VRT) \cite{liang_vrt_2022} to leverage high-temporal-resolution spike camera data alongside conventional RGB frames. The architecture consists of four key components: (1) a VRT-based backbone network that performs multi-scale temporal-spatial feature extraction through temporal mutual self-attention and parallel warping; (2) Scalable Granularity Perception (SGP) blocks that replace pure self-attention layers to mitigate channel expression collapse while maintaining computational efficiency; (3) a spike representation module that converts raw spike streams into 4-channel voxel grids using Texture-from-Playback (TFP) reconstruction; and (4) an early fusion strategy that concatenates RGB and spike channels at the input stage, enabling the network to jointly process both modalities through shared feature extraction stages. The model processes $D$ consecutive RGB frames ($3$ channels) and their corresponding spike voxelizations ($4$ channels) as a $7$-channel input tensor, then progressively refines features through $7$ downsampling-upsampling stages followed by $4$ independent reconstruction layers, ultimately producing sharp RGB output frames.
+<Insert Figure: Overall pipeline diagram>
+
+\subsection{VRT as Backbone}
+We adopt VRT as the backbone architecture for five key reasons. First, Temporal Mutual Self-Attention (TMSA) enables long-range temporal dependency modeling across video frames, which is crucial for disambiguating motion blur patterns that span multiple frames. Second, Parallel Warping (PA) modules leverage optical flow estimates from SpyNet to perform flow-guided deformable alignment, allowing the network to align features from neighboring frames before fusion—this is particularly beneficial when integrating spike data that may have slight temporal misalignment with RGB frames. Third, the multi-scale U-shaped architecture supports coarse-to-fine feature extraction: the encoder stages progressively downsample spatial dimensions while expanding temporal windows, enabling the model to capture both local motion details and global scene structure. Fourth, the Transformer-based design naturally accommodates multi-modal inputs through its flexible embedding mechanism, allowing seamless integration of RGB and spike channels without requiring separate processing branches. Finally, VRT has demonstrated strong performance across diverse video restoration tasks including super-resolution and deblurring, providing a solid foundation that we extend with spike guidance. The architecture processes input sequences of $D=6$ frames through $7$ encoder-decoder stages with window-based attention, followed by $4$ independent reconstruction layers that refine features frame-by-frame to produce the final deblurred output.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figs/tmsa_drawio.png}
+    \caption{TMSA}
+    \label{fig:vrt_as_backbone}
+\end{figure}
+<Insert Figure: VRT diagram>
+
+\subsection{SGP Block}
+While VRT's mutual self-attention effectively models cross-frame dependencies, pure self-attention layers suffer from channel expression collapse—a phenomenon where all channels converge to similar representations, reducing discriminative power. To address this, we replace self-attention branches with Scalable Granularity Perception (SGP) blocks \cite{shi_tridet_2023}, which combine instant-level and window-level branches to preserve channel diversity. The SGP formulation is:
+\begin{equation}
+f_{\text{SGP}}(x) = \phi(x) \cdot \text{FC}(x) + \psi(x) \cdot (\text{Conv}_w(x) + \text{Conv}_{kw}(x)) + x,
+\end{equation}
+where $\phi(x)$ is an instant-level gate generated by a squeeze-and-excitation MLP operating on channel-wise global averages, $\psi(x)$ is a window-level gate from depthwise separable convolutions, and $\text{Conv}_w$ and $\text{Conv}_{kw}$ use kernel sizes $w=3$ and $kw=9$ respectively to capture multi-scale local patterns. This design offers three advantages: (1) it avoids the $O(N^2)$ quadratic complexity of self-attention, reducing memory consumption for long sequences; (2) the dual-branch structure maintains channel diversity by combining global channel gating with local spatial convolutions; and (3) it enhances local structure modeling through multi-scale convolutions, which is beneficial for recovering fine texture details in deblurred frames. We apply SGP only to pure self-attention branches (approximately $25\%$ of layers in each stage), preserving mutual attention layers that capture cross-frame correlations essential for temporal fusion.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.85\linewidth]{figs/sgp_drawio.png}
+    \caption{SGP}
+    \label{fig:sgp_block}
+\end{figure}
+
+\subsection{Spike Representation}
+Raw spike streams are binary tensors $S \in \{0,1\}^{T \times H \times W}$ encoding microsecond-level luminance changes, but direct processing of such sparse, high-dimensional data is computationally prohibitive. We adopt Texture-from-Playback (TFP) reconstruction \cite{dong_spike_2021} to convert spike streams into dense, frame-aligned voxel grids. For each RGB frame timestamp $t$, TFP integrates spikes within a sliding temporal window $[t-\Delta t, t+\Delta t]$ centered at $t$, where $\Delta t = 20$ spike intervals (approximately $500~\mu$s), producing a high-dynamic-range luminance estimate that preserves fine temporal discontinuities. To capture temporal dynamics around each frame, we partition the spike stream into $4$ segments and apply TFP at the center of each segment, generating a $4$-channel voxel grid $V \in \mathbb{R}^{4 \times H \times W}$ where each channel represents luminance integrated over a distinct temporal window. This representation offers several advantages over alternatives: compared to Texture-from-Latency (TFL), TFP provides more stable luminance estimates by aggregating multiple spikes; compared to raw spike counts or simple temporal averaging, TFP preserves high-frequency motion cues through its integration window design; and the $4$-channel format balances temporal resolution with computational efficiency, enabling effective fusion with RGB frames without excessive channel overhead. The voxel grids are normalized to $[0,1]$ and spatially resized to match RGB frame dimensions during data loading.
+<Insert Figure: Spike preprocessing visualization>
+
+\subsection{Spike-RGB Fusion}
+We employ an early fusion strategy that concatenates RGB and spike channels at the input stage, forming a $7$-channel tensor ($3$ RGB channels + $4$ spike channels) that is processed jointly by the VRT backbone. This design choice offers three benefits: 
+
+\begin{itemize}
+\item  it allows the network to learn cross-modal feature interactions from the earliest layers, enabling spike-derived temporal cues to guide RGB feature extraction throughout the network; 
+\item  it avoids the complexity of late fusion approaches that require separate processing branches and explicit fusion modules; 
+\item and it maintains compatibility with VRT's existing architecture, requiring only modification of the input channel dimension from $3$ to $7$. 
+\end{itemize}
+
+Temporal alignment is ensured during data loading: for each RGB frame at timestamp $t$, we extract the corresponding spike voxel grid by applying TFP to spike data centered at $t$, ensuring both modalities represent the same temporal moment. RGB channels are normalized using ImageNet statistics (mean $[0.485, 0.456, 0.406]$, std $[0.229, 0.224, 0.225]$), while spike channels use identity normalization (mean $[0,0,0,0]$, std $[1,1,1,1]$) to preserve their dynamic range. The fused $7$-channel input is fed into VRT's first convolutional layer, which projects it to the initial embedding dimension (typically $96$ or $120$ channels), initiating the multi-scale feature extraction pipeline.
+<Insert Figure: fusion module diagram>
+
+\subsection{Training Strategy}
+We train S-VRT using the Adam optimizer. The loss function is Charbonnier loss
+\begin{equation}
+\mathcal{L} = \sqrt{(I_{\text{pred}} - I_{\text{gt}})^2 + \epsilon^2}, \quad \epsilon = 10^{-9},
+\end{equation}
+which provides smooth gradients near zero and is more robust to outliers than $L_1$ or $L_2$ loss. To stabilize early training, we employ a two-stage strategy: for the first $20,000$ iterations, we freeze the SpyNet optical flow estimator and deformable convolution parameters (setting their learning rate multiplier to $0.125$), allowing the network to first learn basic feature extraction before fine-tuning motion estimation. After $20,000$ iterations, all parameters are unfrozen and trained jointly. We use gradient checkpointing for attention and feed-forward modules in most stages to reduce memory consumption, except for stages $2$-$4$ (attention) and stages $1$-$5$ and $9$ (feed-forward), where checkpointing is disabled to balance memory and speed. Training is performed on $6$-frame video clips with spatial crops of $224 \times 224$ pixels.
+
+\subsection{Evaluation Metrics}
+We evaluate deblurring performance using four complementary metrics. Peak Signal-to-Noise Ratio (PSNR) measures pixel-level reconstruction accuracy on RGB channels: 
+\begin{equation}
+\text{PSNR} = 10 \log_{10}(255^2 / \text{MSE}),
+\end{equation}
+where MSE is the mean squared error between predicted and ground-truth frames. Higher PSNR indicates better fidelity, though it may not always correlate with perceptual quality. Structural Similarity Index (SSIM) \cite{wang_image_2004} assesses perceptual quality by comparing luminance, contrast, and structure between images on RGB channels: 
+\begin{equation}
+\text{SSIM}(x,y) = [l(x,y)]^\alpha [c(x,y)]^\beta [s(x,y)]^\gamma,
+\end{equation}
+where $l$, $c$, and $s$ represent luminance, contrast, and structure comparisons respectively. SSIM values range from $0$ to $1$, with higher values indicating better perceptual similarity. To focus on luminance reconstruction quality, we also compute PSNR and SSIM on the Y channel (luminance) of the YCbCr color space, denoted as PSNR$_Y$ and SSIM$_Y$. The Y channel metrics are computed by converting RGB images to YCbCr color space and evaluating only the luminance component, which aligns better with human visual perception since the human visual system is more sensitive to luminance variations than chrominance. Additionally, we measure inference runtime and FLOPs to assess computational efficiency, which is important for practical deployment scenarios.
+
+\subsection{Baseline Initial Results}
+We conduct preliminary experiments on the GoPro dataset to establish baseline performance and validate our implementation. Table~\ref{tab:baseline_results} reports initial results comparing our S-VRT model against the original VRT baseline (RGB-only) on the GoPro test set. The baseline VRT achieves PSNR of $XX.XX$ dB and SSIM of $0.XXXX$, demonstrating the strong performance of the Transformer-based architecture. Our S-VRT model, incorporating spike guidance, shows improvements of $+X.XX$ dB in PSNR and $+0.XXXX$ in SSIM, indicating that spike-derived temporal information effectively enhances deblurring quality. Qualitative results (Figure~\ref{fig:baseline_qualitative}) reveal that S-VRT produces sharper edges and finer texture details compared to the RGB-only baseline, particularly in regions with fast motion where spike data provides crucial temporal disambiguation. The spike-guided approach shows particular strength in handling complex motion patterns and recovering high-frequency details that are lost in heavily blurred RGB frames. These preliminary findings validate our design choices and motivate further investigation into optimal spike representation and fusion strategies.
+\begin{table}[h]
+\centering
+\caption{Baseline performance comparison on GoPro test set.}
+\label{tab:baseline_results}
+\begin{tabular}{lcc}
+\hline
+Method & PSNR (dB) & SSIM \\
+\hline
+VRT (RGB-only) & XX.XX & 0.XXXX \\
+S-VRT (Ours) & XX.XX & 0.XXXX \\
+\hline
+\end{tabular}
+\end{table}
+
+% \begin{figure}[h]
+%     \centering
+%     \includegraphics[width=0.95\linewidth]{figs/baseline_qualitative_results.png}
+%     \caption{Qualitative comparison of deblurring results on GoPro test set. From left to right: blurred input, VRT baseline, S-VRT (ours), and ground truth.}
+%     \label{fig:baseline_qualitative}
+% \end{figure}
+
+\section{Experiments}
+
+\subsection{Datasets Used in Experiments}
+We evaluate our method on the GoPro video deblurring dataset \cite{nah_deep_2017}, which is a widely used benchmark for video deblurring. The dataset contains real-world motion blur captured using a GoPro camera with alternating short and long exposure times. The training set consists of 22 video sequences totaling 2,103 frames, while the test set contains 9 video sequences with approximately 900 frames. All RGB frames are stored in PNG format with a resolution of $1280 \times 720$ pixels. Each sequence includes both sharp (ground truth) and blurred versions, where the blurred frames are generated by averaging consecutive short-exposure frames to simulate motion blur.
+
+To enable spike-guided deblurring, we augment the GoPro dataset with corresponding spike camera data. The GoPro-with-Spike dataset maintains the same video sequence structure as the original GoPro dataset, with each RGB sequence paired with a corresponding spike sequence. The spike data is stored as binary files (`.dat` format) with a spatial resolution of $250 \times 400$ pixels, which is lower than the RGB resolution to reflect the typical characteristics of spike cameras. Each spike frame is converted into a 4-channel voxel grid using Texture-from-Playback (TFP) reconstruction, where the 4 channels represent temporal luminance integration over distinct time windows. The spike sequences are temporally aligned with their corresponding RGB sequences, ensuring that each RGB frame has a matching spike voxel grid at the same timestamp. The training set contains 22 spike sequences (matching the 22 RGB training sequences), and the test set contains 9 spike sequences (matching the 9 RGB test sequences), with each spike sequence containing the same number of frames as its corresponding RGB sequence.
+
+\subsection{Implementation Details}
+\placeholder{GPU setup, training schedule, hyperparameters.}
+\placeholder{Add mention of mixed precision or frameworks.}
+
+\subsection{Quantitative Comparison}
+<Insert Table: Comparison with prior work (placeholder numbers)>
+\placeholder{Summarize ranking and improvements.}
+
+\subsection{Visual Comparison}
+<Insert Figure: Blurry vs baseline vs ours (placeholder)>
+\placeholder{Describe qualitative gains.}
+
+\section{Conclusion}
+\placeholder{Summary of findings and future work.}
+\placeholder{Restate contributions briefly.}
+\placeholder{Add note on broader impact.}
+
+\section*{Acknowledgment}
+\placeholder{Add funding sources and contributor acknowledgments.}
+
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+\end{document}

@@ -10,4 +10,5 @@ timm
 einops
 tensorboard
 wandb
+swanlab
 matplotlib

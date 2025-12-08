@@ -9,7 +9,31 @@
 # ================================================================================
 
 # Default configuration (shared with training)
-DEFAULT_CONFIG="options/vrt/gopro_rgbspike_local.json"
+DEFAULT_CONFIG="options/gopro_rgbspike_local.json"
+
+# Auto-detect available GPU count
+detect_gpu_count() {
+    # Try nvidia-smi first (most reliable)
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        local count=$(nvidia-smi --list-gpus 2>/dev/null | wc -l)
+        if [[ $count -gt 0 ]]; then
+            echo $count
+            return 0
+        fi
+    fi
+    # Fallback to Python/PyTorch
+    if command -v python >/dev/null 2>&1; then
+        local count=$(python -c "import torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0)" 2>/dev/null)
+        if [[ -n "$count" && "$count" -gt 0 ]]; then
+            echo $count
+            return 0
+        fi
+    fi
+    # Default to 1 if detection fails
+    echo 1
+}
+
+DEFAULT_GPU_COUNT=$(detect_gpu_count)
 
 # Parsed arguments
 GPU_COUNT=""
@@ -24,10 +48,10 @@ GPU_LIST=""
 
 usage() {
     cat <<EOF
-Usage: $0 GPU_COUNT [CONFIG_PATH] [options]
+Usage: $0 [GPU_COUNT] [CONFIG_PATH] [options]
 
 Positional arguments:
-  GPU_COUNT        Number of GPUs requested (required unless --gpus provided)
+  GPU_COUNT        Number of GPUs requested (optional, auto-detected if not provided, default: $DEFAULT_GPU_COUNT)
   CONFIG_PATH      Optional path to training/test JSON config (default: $DEFAULT_CONFIG)
 
 Options:
@@ -37,8 +61,14 @@ Options:
   --dataset-root PATH            Root folder that contains GOPRO_Large and GOPRO_Large_spike_seq
   --gopro-root PATH              Override GoPro root explicitly
   --spike-root PATH              Override Spike root explicitly
-  --gpus 0,1,2                   Comma separated GPU ids (default mirrors GPU_COUNT)
+  --gpus 0,1,2                   Comma separated GPU ids (overrides GPU_COUNT)
   --help | -h                    Show this message
+
+Examples:
+  $0                                    # Auto-detect GPUs, use default config
+  $0 1                                  # Use 1 GPU, default config
+  $0 3 options/gopro_rgbspike_local.json  # Use 3 GPUs, custom config
+  $0 --gpus 0,1,2                      # Use specific GPUs
 EOF
 }
 
@@ -112,9 +142,10 @@ done
 # Defaults
 CONFIG_PATH=${CONFIG_PATH:-$DEFAULT_CONFIG}
 
+# Auto-detect GPU count if not provided
 if [[ -z "$GPU_COUNT" && -z "$GPU_LIST" ]]; then
-    echo "Error: GPU_COUNT positional argument or --gpus must be provided."
-    exit 1
+    GPU_COUNT=$DEFAULT_GPU_COUNT
+    echo "Info: GPU_COUNT not specified, auto-detected: $GPU_COUNT GPU(s)"
 fi
 
 if [[ -n "$GPU_COUNT" && -z "$GPU_LIST" ]]; then
@@ -129,8 +160,22 @@ if [[ -n "$GPU_COUNT" && -z "$GPU_LIST" ]]; then
     fi
 fi
 
+# Resolve config path (handle both relative and absolute paths)
+if [[ ! "$CONFIG_PATH" =~ ^/ ]]; then
+    # Relative path - check from current directory
+    if [[ ! -f "$CONFIG_PATH" ]]; then
+        # Try from script directory
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        if [[ -f "$SCRIPT_DIR/$CONFIG_PATH" ]]; then
+            CONFIG_PATH="$SCRIPT_DIR/$CONFIG_PATH"
+        fi
+    fi
+fi
+
 if [[ ! -f "$CONFIG_PATH" ]]; then
-    echo "Config file not found: $CONFIG_PATH"
+    echo "Error: Config file not found: $CONFIG_PATH"
+    echo "Current directory: $(pwd)"
+    echo "Please check the path and try again."
     exit 1
 fi
 
@@ -241,11 +286,12 @@ handle_error() {
         echo ""
         [[ -n "$message" ]] && echo "$message" && echo ""
         echo "错误信息已显示在上方。"
-        if [[ -t 1 ]]; then
+        # Only wait for input in interactive terminal and if stdin is a TTY
+        if [[ -t 0 && -t 1 ]]; then
             echo "按 Enter 键继续（脚本将结束，但终端保持打开）..."
-            read -r _
+            read -r _ 2>/dev/null || true
         fi
-        exit 0
+        exit $exit_code
     fi
 }
 

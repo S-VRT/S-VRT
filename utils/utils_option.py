@@ -66,6 +66,28 @@ def parse(opt_path, is_train=True):
         opt['logging']['wandb_entity'] = None
     if 'wandb_name' not in opt['logging']:
         opt['logging']['wandb_name'] = opt.get('task', 'experiment')
+    if 'use_swanlab' not in opt['logging']:
+        opt['logging']['use_swanlab'] = False
+    if 'swanlab_api_key' not in opt['logging']:
+        opt['logging']['swanlab_api_key'] = None
+    if 'swanlab_project' not in opt['logging']:
+        opt['logging']['swanlab_project'] = None
+    if 'swanlab_workspace' not in opt['logging']:
+        opt['logging']['swanlab_workspace'] = None
+    if 'swanlab_name' not in opt['logging']:
+        opt['logging']['swanlab_name'] = opt.get('task', 'experiment')
+    if 'swanlab_description' not in opt['logging']:
+        opt['logging']['swanlab_description'] = None
+    if 'swanlab_mode' not in opt['logging']:
+        opt['logging']['swanlab_mode'] = None
+    if 'swanlab_auto_resume' not in opt['logging']:
+        opt['logging']['swanlab_auto_resume'] = True
+    if 'swanlab_resume_strategy' not in opt['logging']:
+        opt['logging']['swanlab_resume_strategy'] = 'allow'
+    if 'swanlab_run_id' not in opt['logging']:
+        opt['logging']['swanlab_run_id'] = None
+    if 'swanlab_run_id_file' not in opt['logging']:
+        opt['logging']['swanlab_run_id_file'] = None
 
     # ----------------------------------------
     # datasets

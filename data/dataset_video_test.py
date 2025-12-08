@@ -96,7 +96,7 @@ class VideoRecurrentTestDataset(data.Dataset):
 
         # Find unique folder strings
         self.folders = sorted(list(set(self.data_info['folder'])))
-        self.sigma = opt['sigma'] / 255. if 'sigma' in opt else 0 # for non-blind video denoising
+        self.sigma = opt['sigma'] / 255. if 'sigma' in opt and opt['sigma'] is not None else 0 # for non-blind video denoising
 
     def __getitem__(self, index):
         folder = self.folders[index]

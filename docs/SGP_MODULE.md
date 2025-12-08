@@ -50,6 +50,52 @@ class SGPBlock(nn.Module):
 - `LayerNorm` → `SGP` → `DropPath` → 残差加和。
 - `DropPath` 内置在 block 中，启用时外部 TMSA 不再重复添加。
 
+### 3.3 本项目的替换示意图（TMSA/RTMSA 中的 self-attention → SGP）
+
+当 `use_sgp=true` 且 `mut_attn=false` 时，`TMSA` 的纯自注意力子层被 `SGPBlock` 替换；互注意力子层保持原 `WindowAttention`。以下流程基于 `models/network_vrt.py` 中 `TMSA`/`TMSAG`/`RTMSA` 的实际实现：
+
+```mermaid
+flowchart LR
+    subgraph Original Self-Attn Block
+        X0[x]
+        N1[LayerNorm (norm1)]
+        SA[WindowAttention\n(mut_attn=False)]
+        DP1[DropPath\n(drop_path>0)]
+        SUM1[(+)]
+        N2[LayerNorm (norm2)]
+        FFN[GEGLU-MLP]
+        DP2[DropPath\n(drop_path>0)]
+        SUM2[(+)]
+
+        X0 --> N1 --> SA --> DP1 --> SUM1
+        X0 -. residual .- SUM1
+        SUM1 --> N2 --> FFN --> DP2 --> SUM2
+        SUM1 -. residual .- SUM2
+    end
+
+    subgraph SGP Replacement Block
+        X1[x]
+        SGPB[SGPBlock\n(LayerNorm + SGP + DropPath 内置)]
+        SUM3[(+)]
+        N3[LayerNorm (norm2)]
+        FFN2[GEGLU-MLP]
+        DP3[DropPath\n(drop_path>0)]
+        SUM4[(+)]
+
+        X1 --> SGPB --> SUM3
+        X1 -. residual .- SUM3
+        SUM3 --> N3 --> FFN2 --> DP3 --> SUM4
+        SUM3 -. residual .- SUM4
+    end
+
+    Original Self-Attn Block ---替换---> SGP Replacement Block
+```
+
+要点：
+- SGP 只作用于 **纯 self-attention** 层（`mut_attn=False`）；互注意力层仍用 `WindowAttention`。
+- `SGPBlock` 内含 `LayerNorm` 与 `DropPath`，因此 `forward_part1` 会跳过外部 `norm1` 与 `DropPath`。
+- FFN 分支保持不变，仍使用 `norm2 + GEGLU-MLP + DropPath` 的残差结构。
+
 ## 4. 在网络中的嵌入方式
 
 ### 4.1 TMSA 层
@@ -109,7 +155,7 @@ else:
 ## 7. 调试与验证建议
 
 1. **模块单测**：在 `models/sgp_vrt.py` 中添加随机张量单元测试，确认 `SGPBlock` 保持张量形状 `(B_, N, C)` 不变。
-2. **训练日志**：关注 `options` 中 `use_sgp` 开关对应的 wandb 运行，比较 loss 曲线、PSNR/SSIM 等指标。
+2. **训练日志**：关注 `options` 中 `use_sgp` 开关对应的 WANDB/SwanLab 运行，比较 loss 曲线、PSNR/SSIM 等指标。
 3. **性能 Profiling**：使用 `torch.cuda.profiler` 或 `nsys` 对比启用/关闭 SGP 的时延与显存，便于确定最佳 `sgp_w/sgp_k` 组合。
 
 ---

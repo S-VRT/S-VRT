@@ -574,6 +574,23 @@ tensorboard --logdir experiments/006_train_vrt_videodeblurring_gopro_rgbspike/tb
 
 训练会自动上传到 W&B 平台。
 
+### SwanLab
+
+如果需要同步到 SwanLab（国内环境更友好）：
+
+```json
+{
+  "logging": {
+    "use_swanlab": true,
+    "swanlab_project": "VRT-VideoDeblurring",
+    "swanlab_api_key": "your_api_key",
+    "swanlab_mode": "cloud"
+  }
+}
+```
+
+在离线集群上，将`swanlab_mode`设置为`"offline"`或预先执行`swanlab offline`命令即可在本地存储日志，训练完成后可通过`swanlab sync`同步到云端。云端模式会在 `experiments/<task_name>/swanlab_run.id` 缓存 run id，训练因宕机/重启而继续时会自动续写同一个 run；如需全新 run，请删除该文件或在配置中设置 `"swanlab_auto_resume": false`。
+
 ### 命令行输出
 
 只有主进程（rank 0）会输出详细信息：

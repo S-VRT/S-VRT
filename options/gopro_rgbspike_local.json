@@ -67,13 +67,14 @@
     //   - "auto"：自动查找 models 目录中的最新检查点（用于恢复训练）
     //   - "path/to/model.pth"：使用指定的预训练模型路径
     ,
-    "pretrained_netG": null
+    "pretrained_netG": "experiments/gopro_rgbspike_channel_concat/models/30000_G.pth"
     // 预训练的编码器（Encoder）模型路径，支持三种模式：
     //   - null：不使用预训练编码器，不自动查找检查点
     //   - "auto"：自动查找 models 目录中的最新检查点（用于恢复训练）
     //   - "path/to/model.pth"：使用指定的预训练模型路径
+    // 注意：E 模型是 EMA（指数移动平均）模型，测试时会优先使用 E 模型
     ,
-    "pretrained_netE": null
+    "pretrained_netE": "experiments/gopro_rgbspike_channel_concat/models/30000_E.pth"
   }
   // ========================================
   // 数据集配置
@@ -170,14 +171,16 @@
       // 是否启用数据集的全内存缓存：true 会在 Dataset 初始化时把所有原始 RGB+Spike 帧载入内存
       // 建议在显存/内存允许时配合较小的 dataloader_num_workers 使用
       ,
-      "in_memory_cache": false
+      "in_memory_cache": true
       // 数据加载器配置
       // 是否打乱数据顺序：true 表示每个 epoch 随机打乱数据
       ,
       "dataloader_shuffle": true
       // 数据加载器工作进程数：用于并行加载数据的进程数
+      // 注意：在DDP模式下，每个GPU会创建 dataloader_num_workers // num_gpu 个worker
+      // 建议值：每个GPU 4-8个worker，3卡DDP建议设置为12-24
       ,
-      "dataloader_num_workers": 120
+      "dataloader_num_workers": 12
       // 批次大小：每个批次包含的样本数量
       ,
       "dataloader_batch_size": 9
@@ -257,11 +260,13 @@
       ,
       "dataloader_shuffle": false
       // 数据加载器工作进程数：可根据本地机器调整
+      // 注意：在DDP模式下，每个GPU会创建 dataloader_num_workers // num_gpu 个worker
+      // 建议值：每个GPU 4-8个worker，3卡DDP建议设置为12-24
       ,
-      "dataloader_num_workers": 120
+      "dataloader_num_workers": 12
       // 测试/验证批次大小：可根据显存调整
       ,
-      "dataloader_batch_size": 9
+      "dataloader_batch_size": 6
     }
   }
   // ========================================
@@ -529,6 +534,9 @@
     // 测试时的补丁大小：160 表示将大图像分割成 160x160 的补丁进行测试
     ,
     "size_patch_testing": 160
+    // 测试时的补丁重叠大小：20 表示相邻测试补丁之间有 20 像素重叠（用于滑动窗口测试）
+    ,
+    "size_patch_overlapping": 20
   }
   // ========================================
   // 日志记录配置
@@ -539,7 +547,7 @@
     "use_tensorboard": true
     // 是否使用 Weights & Biases (W&B)：true 表示启用 W&B 日志记录
     ,
-    "use_wandb": true
+    "use_wandb": false
     // W&B API 密钥：用于身份验证的 API 密钥（注意：实际使用时建议使用环境变量）
     ,
     "wandb_api_key": "ae83599fc8904d8986df7ba9e6f3328e042dcfb2"
@@ -552,5 +560,26 @@
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
     "wandb_name": "gopro_nosgp"
+    // 是否使用 SwanLab：true 表示启用 SwanLab 日志记录（默认关闭）
+    ,
+    "use_swanlab": true
+    // SwanLab API 密钥：可填入字符串实现非交互式登录，也可留空使用环境变量
+    ,
+    "swanlab_api_key": "3kZbeukQu2WMZqtP4WWbr"
+    // SwanLab 项目名称：默认与任务名或 W&B 项目一致
+    ,
+    "swanlab_project": "S-VRT"
+    // SwanLab 工作空间：例如你的 SwanLab 用户名/团队名，默认自动推断
+    ,
+    "swanlab_workspace": null
+    // SwanLab 运行名称：用于区分不同实验
+    ,
+    "swanlab_name": "gopro_nosgp"
+    // SwanLab 实验描述：可选文本信息
+    ,
+    "swanlab_description": "cloud"
+    // SwanLab 运行模式：可设置 cloud/offline/local；留空自动根据 API key 决定
+    ,
+    "swanlab_mode": null
   }
 }
