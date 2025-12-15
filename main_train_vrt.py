@@ -161,6 +161,7 @@ def main():
         tb_logger = utils_logger.Logger(opt, logger)
     else:
         # 非主进程不初始化日志记录器
+        logger = None
         tb_logger = None
 
     # ----------------------------------------
@@ -393,6 +394,14 @@ def main():
             # 每隔一定步数在测试集上评估模型性能
             if current_step % opt['train']['checkpoint_test'] == 0:
 
+                # 如果训练集使用内存缓存，在验证前主动释放，给验证阶段腾出内存
+                if hasattr(train_set, 'clear_in_memory_cache'):
+                    try:
+                        train_set.clear_in_memory_cache()
+                    except Exception as exc:
+                        if opt['rank'] == 0:
+                            logger.warning(f'Failed to clear in-memory cache before validation: {exc}')
+
                 is_master_process = opt['rank'] == 0
                 if opt['dist']:
                     barrier_safe()
@@ -571,10 +580,11 @@ def main():
 
             # 检查是否达到总迭代次数，如果达到则结束训练
             if current_step > opt['train']['total_iter']:
-                logger.info('Finish training.')
-                model.save(current_step)  # 保存最终模型
-                if tb_logger is not None:
-                    tb_logger.close()  # 关闭日志记录器
+                if opt['rank'] == 0:
+                    logger.info('Finish training.')
+                    model.save(current_step)  # 保存最终模型
+                    if tb_logger is not None:
+                        tb_logger.close()  # 关闭日志记录器
                 sys.exit()  # 退出程序
 
 # 主程序入口

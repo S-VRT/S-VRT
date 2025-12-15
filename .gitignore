@@ -41,6 +41,7 @@ ENV/
 
 # Model files and data
 *.pt
+*.pth
 *.ckpt
 *.safetensors
 *.h5
@@ -51,11 +52,15 @@ ENV/
 pretrained_models/
 experiments/
 results/
+trainsets/
+testsets/
 datasets/
 logs/
 outputs/
 checkpoints/
 saved_models/
+swanlog/
+spkvisual/output_frames/
 
 # Image and video files (large)
 *.jpg

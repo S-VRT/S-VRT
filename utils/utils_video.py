@@ -1,4 +1,5 @@
 import os
+import math
 import cv2
 import numpy as np
 import torch
@@ -6,6 +7,9 @@ import random
 from os import path as osp
 from torch.nn import functional as F
 from abc import ABCMeta, abstractmethod
+from torchvision.utils import make_grid
+
+from utils.utils_image import modcrop as mod_crop
 
 
 def scandir(dir_path, suffix=None, recursive=False, full_path=False):
@@ -96,10 +100,11 @@ def img2tensor(imgs, bgr2rgb=True, float32=True):
     """
 
     def _totensor(img, bgr2rgb, float32):
-        if img.shape[2] == 3 and bgr2rgb:
+        if bgr2rgb and img.shape[2] in (3, 4):
             if img.dtype == 'float64':
                 img = img.astype('float32')
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            color_code = cv2.COLOR_BGR2RGB if img.shape[2] == 3 else cv2.COLOR_BGRA2RGBA
+            img = cv2.cvtColor(img, color_code)
         img = torch.from_numpy(img.transpose(2, 0, 1))
         if float32:
             img = img.float()
@@ -155,7 +160,10 @@ def tensor2img(tensor, rgb2bgr=True, out_type=np.uint8, min_max=(0, 1)):
                 img_np = np.squeeze(img_np, axis=2)
             else:
                 if rgb2bgr:
-                    img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                    if img_np.shape[2] == 3:
+                        img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                    elif img_np.shape[2] == 4:
+                        img_np = cv2.cvtColor(img_np, cv2.COLOR_RGBA2BGRA)
         elif n_dim == 2:
             img_np = _tensor.numpy()
         else:

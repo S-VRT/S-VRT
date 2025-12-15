@@ -171,6 +171,10 @@
       // 建议在显存/内存允许时配合较小的 dataloader_num_workers 使用
       ,
       "in_memory_cache": false
+      ,
+      "in_memory_max_mem_ratio": 0.8    
+      ,
+      "in_memory_cache_workers": 40
       // 数据加载器配置
       // 是否打乱数据顺序：true 表示每个 epoch 随机打乱数据
       ,
@@ -261,7 +265,7 @@
       "dataloader_num_workers": 12
       // 测试/验证批次大小：可根据显存调整
       ,
-      "dataloader_batch_size": 9
+      "dataloader_batch_size": 54
     }
   }
   // ========================================
@@ -494,13 +498,13 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 2
+    "checkpoint_test": 100
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 5000
     // 打印检查点间隔：每训练多少迭代打印一次训练信息
     ,
-    "checkpoint_print": 1
+    "checkpoint_print": 10
   }
   // ========================================
   // 验证（测试）配置

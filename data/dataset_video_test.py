@@ -324,9 +324,13 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
         return {'mean': mean, 'std': std}
 
     def _to_channel_tensor(self, value, num_channels, label):
-        tensor = torch.tensor(value, dtype=torch.float32)
+        tensor = torch.tensor(value, dtype=torch.float32).flatten()
         if tensor.numel() == 1:
             tensor = tensor.repeat(num_channels)
+        elif num_channels % tensor.numel() == 0:
+            # Allow repeating a shorter pattern (e.g., 4 values for 8 channels).
+            repeat_times = num_channels // tensor.numel()
+            tensor = tensor.repeat(repeat_times)
         if tensor.numel() != num_channels:
             raise ValueError(f'Normalization {label} expected {num_channels} values, got {tensor.numel()}')
         return tensor.view(1, num_channels, 1, 1)

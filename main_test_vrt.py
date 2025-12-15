@@ -276,6 +276,10 @@ def main():
 
     assert len(test_loader) != 0, f'No dataset found at {args.folder_lq}'
 
+    # Track local progress (per rank) in terms of video folders, not batches
+    total_folders = len(test_sampler) if test_sampler is not None else len(test_set)
+    processed_folders = 0
+
     for idx, batch in enumerate(test_loader):
         lq = batch['L'].to(device)
         folder = batch['folder']
@@ -292,14 +296,15 @@ def main():
             output = output[:, 3:4, :, :, :]
             batch['lq_path'] = batch['gt_path']
 
-        test_results_folder = OrderedDict()
-        test_results_folder['psnr'] = []
-        test_results_folder['ssim'] = []
-        test_results_folder['psnr_y'] = []
-        test_results_folder['ssim_y'] = []
-
         B, T = output.shape[0], output.shape[1]
         for b in range(B):
+            test_results_folder = OrderedDict()
+            test_results_folder['psnr'] = []
+            test_results_folder['ssim'] = []
+            test_results_folder['psnr_y'] = []
+            test_results_folder['ssim_y'] = []
+
+            folder_name = folder[b] if isinstance(folder, (list, tuple)) else folder
             for t in range(T):
                 # save image
                 img = output[b, t, ...].data.float().cpu().clamp_(0, 1).numpy()
@@ -312,8 +317,8 @@ def main():
                         seq_name = osp.basename(batch['lq_path'][b][t]).split('.')[0]
                     except Exception:
                         seq_name = f'clip_{b:03d}_t{t:03d}'
-                    os.makedirs(f'{save_dir}/{folder[b]}', exist_ok=True)
-                    cv2.imwrite(f'{save_dir}/{folder[b]}/{seq_name}.png', img)
+                    os.makedirs(f'{save_dir}/{folder_name}', exist_ok=True)
+                    cv2.imwrite(f'{save_dir}/{folder_name}/{seq_name}.png', img)
 
                 # evaluate psnr/ssim
                 if gt is not None:
@@ -325,8 +330,7 @@ def main():
 
                     # validate shape before metrics to avoid errors
                     if img.shape != img_gt.shape or img.ndim not in (2, 3) or img_gt.ndim not in (2, 3) or min(img.shape[:2]) == 0:
-                        if args.rank == 0:
-                            print(f"[warn] skip metric for {folder[b]} b{b} t{t}: shape mismatch img{img.shape} gt{img_gt.shape}")
+                        print(f"[Rank {args.rank}] [warn] skip metric for {folder[b]} b{b} t{t}: shape mismatch img{img.shape} gt{img_gt.shape}")
                         continue
 
                     test_results_folder['psnr'].append(util.calculate_psnr(img, img_gt, border=0))
@@ -340,21 +344,24 @@ def main():
                         test_results_folder['psnr_y'].append(test_results_folder['psnr'][-1])
                         test_results_folder['ssim_y'].append(test_results_folder['ssim'][-1])
 
-        if gt is not None and len(test_results_folder['psnr']) > 0:
-            psnr = sum(test_results_folder['psnr']) / len(test_results_folder['psnr'])
-            ssim = sum(test_results_folder['ssim']) / len(test_results_folder['ssim'])
-            psnr_y = sum(test_results_folder['psnr_y']) / len(test_results_folder['psnr_y'])
-            ssim_y = sum(test_results_folder['ssim_y']) / len(test_results_folder['ssim_y'])
-            test_results['psnr'].append(psnr)
-            test_results['ssim'].append(ssim)
-            test_results['psnr_y'].append(psnr_y)
-            test_results['ssim_y'].append(ssim_y)
-            print('Testing {:20s} ({:2d}/{}) - PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
-                      format(folder[0] if isinstance(folder, (list, tuple)) else folder, idx, len(test_loader), psnr, ssim, psnr_y, ssim_y))
-        elif gt is not None and len(test_results_folder['psnr']) == 0 and args.rank == 0:
-            print(f"[warn] metrics skipped for {folder[0] if isinstance(folder, (list, tuple)) else folder} ({idx}/{len(test_loader)}) due to empty valid frames")
-        else:
-            print('Testing {:20s}  ({:2d}/{})'.format(folder[0] if isinstance(folder, (list, tuple)) else folder, idx, len(test_loader)))
+            if gt is not None and len(test_results_folder['psnr']) > 0:
+                psnr = sum(test_results_folder['psnr']) / len(test_results_folder['psnr'])
+                ssim = sum(test_results_folder['ssim']) / len(test_results_folder['ssim'])
+                psnr_y = sum(test_results_folder['psnr_y']) / len(test_results_folder['psnr_y'])
+                ssim_y = sum(test_results_folder['ssim_y']) / len(test_results_folder['ssim_y'])
+                test_results['psnr'].append(psnr)
+                test_results['ssim'].append(ssim)
+                test_results['psnr_y'].append(psnr_y)
+                test_results['ssim_y'].append(ssim_y)
+                processed_folders += 1
+                print('[Rank {}] Testing {:20s} ({:2d}/{}) - PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                          format(args.rank, folder_name, processed_folders, total_folders, psnr, ssim, psnr_y, ssim_y))
+            elif gt is not None and len(test_results_folder['psnr']) == 0:
+                processed_folders += 1
+                print(f"[Rank {args.rank}] [warn] metrics skipped for {folder_name} ({processed_folders}/{total_folders}) due to empty valid frames")
+            else:
+                processed_folders += 1
+                print('[Rank {}] Testing {:20s}  ({:2d}/{})'.format(args.rank, folder_name, processed_folders, total_folders))
 
     # summarize psnr/ssim (distributed-aware, align with training val logic)
     if gt is not None:
@@ -394,6 +401,21 @@ def main():
                   format(save_dir, ave_psnr, ave_ssim, ave_psnr_y, ave_ssim_y))
         elif args.rank == 0:
             print('[warn] no valid frames for PSNR/SSIM; all metrics skipped')
+
+
+def _assert_lq_channels(tensor, tensor_name, netG_cfg):
+    """Validate that the incoming temporal tensor matches configured in_chans."""
+    expected_in_chans = netG_cfg.get('in_chans', 3)
+    actual_in_chans = tensor.size(2)
+    if actual_in_chans != expected_in_chans:
+        raise ValueError(
+            f"{tensor_name} Channel Mismatch!\n"
+            f"Tensor shape: {tensor.shape} (Channels: {actual_in_chans})\n"
+            f"Expected netG.in_chans: {expected_in_chans}\n"
+            f"Mode: Test/Inference\n"
+            f"Hint: Ensure your dataset returns all expected channels "
+            f"(e.g., RGB 3 + Spike 4 = 7) before feeding them to netG."
+        )
 
 
 def prepare_model_dataset(args):
@@ -600,6 +622,10 @@ def prepare_model_dataset(args):
 def test_video(lq, model, args):
         '''test the video as a whole or as clips (divided temporally). '''
 
+        # Channel validation - align with validation code
+        netG_cfg = args.netG_cfg if hasattr(args, 'netG_cfg') and args.netG_cfg else {}
+        _assert_lq_channels(lq, 'Test Video Input', netG_cfg)
+
         num_frame_testing = args.tile[0]
         if num_frame_testing:
             # test as multiple clips if out-of-memory
@@ -608,17 +634,21 @@ def test_video(lq, model, args):
             not_overlap_border = False
             b, d, c, h, w = lq.size()
             c = c - 1 if args.nonblind_denoising else c
+            # Get output channels from config, similar to validation code
+            c_out = netG_cfg.get('out_chans', c)
             stride = num_frame_testing - num_frame_overlapping
             d_idx_list = list(range(0, d-num_frame_testing, stride)) + [max(0, d-num_frame_testing)]
             E = None
-            W = torch.zeros(b, d, 1, 1, 1)
+            W = None
 
             for d_idx in d_idx_list:
                 lq_clip = lq[:, d_idx:d_idx+num_frame_testing, ...]
                 out_clip = test_clip(lq_clip, model, args)
                 if E is None:
-                    _, _, c_out, _, _ = out_clip.size()
+                    # Use actual output channels from model, but fallback to config if needed
+                    c_out = out_clip.size(2)
                     E = torch.zeros(b, d, c_out, h*sf, w*sf)
+                    W = torch.zeros(b, d, 1, 1, 1)
                 out_clip_mask = torch.ones((b, min(num_frame_testing, d), 1, 1, 1))
 
                 if not_overlap_border:
@@ -634,9 +664,10 @@ def test_video(lq, model, args):
             output = E.div_(W)
         else:
             # test as one clip (the whole video) if you have enough memory
+            # Align padding logic with validation code: (d_old// window_size[0]+1)*window_size[0] - d_old
             window_size = args.window_size
             d_old = lq.size(1)
-            d_pad = (window_size[0] - d_old % window_size[0]) % window_size[0]
+            d_pad = (d_old // window_size[0] + 1) * window_size[0] - d_old
             lq = torch.cat([lq, torch.flip(lq[:, -d_pad:, ...], [1])], 1) if d_pad else lq
             output = test_clip(lq, model, args)
             output = output[:, :d_old, :, :, :]
@@ -647,6 +678,10 @@ def test_video(lq, model, args):
 def test_clip(lq, model, args):
     ''' test the clip as a whole or as patches. '''
 
+    # Channel validation - align with validation code
+    netG_cfg = args.netG_cfg if hasattr(args, 'netG_cfg') and args.netG_cfg else {}
+    _assert_lq_channels(lq, 'Test Clip Input', netG_cfg)
+
     sf = args.scale
     window_size = args.window_size
     size_patch_testing = args.tile[1]
@@ -654,11 +689,15 @@ def test_clip(lq, model, args):
 
     if size_patch_testing:
         # divide the clip to patches (spatially only, tested patch by patch)
+        # Use overlap_size from config (validation code uses hardcoded 20, but test should use config)
         overlap_size = args.tile_overlap[1]
         not_overlap_border = True
 
         # test patch by patch
-        b, d, _, h, w = lq.size()
+        b, d, c, h, w = lq.size()
+        c = c - 1 if args.nonblind_denoising else c
+        # Get output channels from config, similar to validation code
+        c_out = netG_cfg.get('out_chans', c)
         stride = size_patch_testing - overlap_size
         h_idx_list = list(range(0, h-size_patch_testing, stride)) + [max(0, h-size_patch_testing)]
         w_idx_list = list(range(0, w-size_patch_testing, stride)) + [max(0, w-size_patch_testing)]
@@ -672,7 +711,8 @@ def test_clip(lq, model, args):
 
                 # Lazy-init accumulation buffers using model output shape (not LQ channels)
                 if E is None:
-                    _, _, c_out, _, _ = out_patch.size()
+                    # Use actual output channels from model, but fallback to config if needed
+                    c_out = out_patch.size(2)
                     E = torch.zeros(b, d, c_out, h*sf, w*sf)
                     W = torch.zeros_like(E)
 
@@ -697,9 +737,10 @@ def test_clip(lq, model, args):
         output = E.div_(W)
 
     else:
+        # Align padding logic with validation code: (h_old// window_size[1]+1)*window_size[1] - h_old
         _, _, _, h_old, w_old = lq.size()
-        h_pad = (window_size[1] - h_old % window_size[1]) % window_size[1]
-        w_pad = (window_size[2] - w_old % window_size[2]) % window_size[2]
+        h_pad = (h_old // window_size[1] + 1) * window_size[1] - h_old
+        w_pad = (w_old // window_size[2] + 1) * window_size[2] - w_old
 
         lq = torch.cat([lq, torch.flip(lq[:, :, :, -h_pad:, :], [3])], 3) if h_pad else lq
         lq = torch.cat([lq, torch.flip(lq[:, :, :, :, -w_pad:], [4])], 4) if w_pad else lq

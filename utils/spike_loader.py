@@ -141,7 +141,9 @@ def voxelize_spikes_tfp(spike_matrix, num_channels=1, device='cpu', half_win_len
     
     Args:
         spike_matrix (np.ndarray): Spike data (T, H, W).
-        num_channels (int): Number of output channels (1 or 4).
+        num_channels (int): Number of output channels. Supports any positive integer.
+            For num_channels=1: uses center frame.
+            For num_channels>1: evenly divides time sequence into segments and uses center of each segment.
         device (str or torch.device): Device for torch tensor ops used by TFP.
         half_win_length (int): Half window length for the TFP algorithm.
     
@@ -157,20 +159,24 @@ def voxelize_spikes_tfp(spike_matrix, num_channels=1, device='cpu', half_win_len
             f"Need more time steps ({T}) than twice the half window ({2 * half_win_length}) for TFP."
         )
     
+    if num_channels <= 0:
+        raise ValueError(f"num_channels must be positive, got {num_channels}")
+    
     tfp = TFP(H, W, device)
     
     def _clamp_center(center_idx):
         return max(half_win_length, min(center_idx, T - half_win_length))
     
     if num_channels == 1:
+        # Single channel: use center frame
         centers = [_clamp_center(T // 2)]
-    elif num_channels == 4:
+    else:
+        # Multiple channels: evenly divide time sequence into segments
         segment_edges = np.linspace(0, T, num_channels + 1, dtype=int)
         centers = []
         for start, end in zip(segment_edges[:-1], segment_edges[1:]):
+            # Use center of each segment
             centers.append(_clamp_center((start + end) // 2))
-    else:
-        raise ValueError(f"Unsupported num_channels: {num_channels}. Must be 1 or 4.")
     
     frames = []
     for center in centers:
@@ -248,6 +254,9 @@ if __name__ == '__main__':
         
         spike_voxel_4ch = voxelize_spikes_tfp(spike_matrix, num_channels=4)
         print(f"Voxelized (4 channels) shape: {spike_voxel_4ch.shape}")
+        
+        spike_voxel_8ch = voxelize_spikes_tfp(spike_matrix, num_channels=8)
+        print(f"Voxelized (8 channels) shape: {spike_voxel_8ch.shape}")
         
     except Exception as e:
         print(f"Error: {e}")

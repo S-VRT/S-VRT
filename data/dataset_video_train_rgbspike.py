@@ -1,7 +1,10 @@
+import gc
 import numpy as np
 import os
 import random
 import torch
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import torch.utils.data as data
 from torch.utils.data import get_worker_info
@@ -172,6 +175,9 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         # Optional partial in-memory cache (per rank)
         self.in_memory_cache = opt.get('in_memory_cache', False)
         self.in_memory_max_mem_ratio = opt.get('in_memory_max_mem_ratio', 0.5)
+        # concurrent workers for eager cache warmup (IO bound, safe defaults)
+        default_cache_workers = max(1, min(8, os.cpu_count() or 4))
+        self.in_memory_cache_workers = int(opt.get('in_memory_cache_workers', default_cache_workers))
         self.key_to_index = {key: idx for idx, key in enumerate(self.keys)}
         self._cache = None
         self._num_cached = 0
@@ -270,51 +276,98 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
     def _ensure_file_client(self):
         if self.file_client is None:
             self.file_client = utils_video.FileClient(self.io_backend_type, **self.io_backend_opt)
+        return self.file_client
+
+    def _new_file_client(self):
+        """Create an isolated FileClient instance (for threaded cache warmup)."""
+        return utils_video.FileClient(self.io_backend_type, **self.io_backend_opt)
 
     def _build_partial_in_memory_cache(self):
         """Eagerly cache per-frame raw RGB/Spike data while respecting the memory budget."""
         try:
-            total_bytes = psutil.virtual_memory().total
+            vm = psutil.virtual_memory()
+            total_bytes = vm.total
+            available_bytes = vm.available  # leave headroom based on current free memory
         except Exception as exc:
             print(f'Warning: Unable to read system memory via psutil ({exc}). Disabling in-memory cache.')
             self.in_memory_cache = False
             self._cache = None
             return
 
-        mem_budget_bytes = int(total_bytes * self.in_memory_max_mem_ratio)
+        # Respect current available memory instead of total so we do not evict the system
+        mem_budget_bytes = int(available_bytes * self.in_memory_max_mem_ratio)
+        # Additionally guarantee a minimum free memory threshold based on total memory.
+        min_free_bytes = int(total_bytes * (1.0 - self.in_memory_max_mem_ratio))
         if mem_budget_bytes <= 0:
             print('Warning: Memory budget is zero; disabling in-memory cache.')
             self.in_memory_cache = False
             self._cache = None
             return
 
-        self._ensure_file_client()
         self._cache = [None] * len(self.keys)
         used_bytes = 0
         self._num_cached = 0
+        lock = threading.Lock()
+        stop_flag = threading.Event()
 
-        for idx, key in enumerate(self.keys):
-            frame_sample = self._load_raw_frame(key)
+        def _load_and_cache(idx_key):
+            if stop_flag.is_set():
+                return None
+            idx, key = idx_key
 
+            # Stop early if current free memory is already below the minimum threshold.
+            try:
+                if psutil.virtual_memory().available <= min_free_bytes:
+                    stop_flag.set()
+                    return None
+            except Exception:
+                # If psutil fails temporarily, proceed with budget-based guard.
+                pass
+
+            local_client = self._new_file_client()
+            frame_sample = self._load_raw_frame(key, file_client=local_client)
             sample_bytes = (
                 frame_sample['lq'].nbytes +
                 frame_sample['gt'].nbytes +
                 frame_sample['spike'].nbytes
             )
+            with lock:
+                nonlocal used_bytes
+                if stop_flag.is_set():
+                    return None
+                if used_bytes + sample_bytes > mem_budget_bytes:
+                    stop_flag.set()
+                    return None
+                self._cache[idx] = frame_sample
+                used_bytes += sample_bytes
+                self._num_cached += 1
+            return None
 
-            if used_bytes + sample_bytes > mem_budget_bytes:
-                print(f'VideoRecurrentTrainDatasetRGBSpike: Memory budget ({mem_budget_bytes / (1024**3):.1f} GB) '
-                      f'exceeded after caching {self._num_cached} frames. Remaining frames will use on-demand loading.')
-                break
-
-            self._cache[idx] = frame_sample
-            used_bytes += sample_bytes
-            self._num_cached += 1
+        # Threaded warmup to better utilize disk and decoding throughput.
+        # Small worker count (<=8) keeps overhead low while overlapping IO/CPU.
+        with ThreadPoolExecutor(max_workers=self.in_memory_cache_workers) as ex:
+            futures = [ex.submit(_load_and_cache, (idx, key)) for idx, key in enumerate(self.keys)]
+            for fut in as_completed(futures):
+                # stop early once budget hit
+                if stop_flag.is_set():
+                    break
 
         cache_gb = used_bytes / (1024**3)
         print(f'VideoRecurrentTrainDatasetRGBSpike: Cached {self._num_cached}/{len(self.keys)} frames '
               f'(~{cache_gb:.1f} GB). Each DataLoader worker maintains a private cache copy - '
               f'consider reducing num_workers (0-4 recommended) to save memory.')
+
+    def clear_in_memory_cache(self):
+        """Release cached frames to free host memory (per worker/rank)."""
+        if not self.in_memory_cache:
+            return
+        self._cache = None
+        self._num_cached = 0
+        try:
+            gc.collect()
+        except Exception:
+            pass
+        print('VideoRecurrentTrainDatasetRGBSpike: In-memory cache cleared before validation.')
 
     def _get_raw_frame(self, key):
         if self.in_memory_cache and self._cache is not None:
@@ -329,9 +382,9 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
                 }
         return self._load_raw_frame(key)
 
-    def _load_raw_frame(self, key):
+    def _load_raw_frame(self, key, file_client=None):
         """Load a single raw RGB+Spike frame triplet from disk/LMDB without augmentation."""
-        self._ensure_file_client()
+        fc = file_client if file_client is not None else self._ensure_file_client()
         clip_name, frame_name = key.split('/')
         neighbor = int(frame_name)
         if self.is_lmdb:
@@ -342,12 +395,12 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
             img_gt_path = self.gt_root / clip_name / f'{neighbor:{self.filename_tmpl}}.{self.filename_ext}'
 
         # get LQ
-        img_bytes = self.file_client.get(img_lq_path, 'lq')
+        img_bytes = fc.get(img_lq_path, 'lq')
         img_lq = utils_video.imfrombytes(img_bytes, float32=True)
         img_lq = cv2.cvtColor(img_lq, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
 
         # get GT
-        img_bytes = self.file_client.get(img_gt_path, 'gt')
+        img_bytes = fc.get(img_gt_path, 'gt')
         img_gt = utils_video.imfrombytes(img_bytes, float32=True)
         img_gt = cv2.cvtColor(img_gt, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
 
@@ -485,9 +538,13 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         return {'mean': mean, 'std': std}
 
     def _to_channel_tensor(self, value, num_channels, label):
-        tensor = torch.tensor(value, dtype=torch.float32)
+        tensor = torch.tensor(value, dtype=torch.float32).flatten()
         if tensor.numel() == 1:
             tensor = tensor.repeat(num_channels)
+        elif num_channels % tensor.numel() == 0:
+            # Allow repeating a shorter pattern (e.g., 4 values for 8 channels).
+            repeat_times = num_channels // tensor.numel()
+            tensor = tensor.repeat(repeat_times)
         if tensor.numel() != num_channels:
             raise ValueError(f'Normalization {label} expected {num_channels} values, got {tensor.numel()}')
         return tensor.view(1, num_channels, 1, 1)
