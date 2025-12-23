@@ -66,6 +66,8 @@ def parse(opt_path, is_train=True):
         opt['logging']['wandb_entity'] = None
     if 'wandb_name' not in opt['logging']:
         opt['logging']['wandb_name'] = opt.get('task', 'experiment')
+    if 'wandb_mode' not in opt['logging']:
+        opt['logging']['wandb_mode'] = None
     if 'use_swanlab' not in opt['logging']:
         opt['logging']['use_swanlab'] = False
     if 'swanlab_api_key' not in opt['logging']:

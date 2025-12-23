@@ -464,6 +464,9 @@
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
     "wandb_name": "gopro_rgb_local"
+    // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
+    ,
+    "wandb_mode": null
     // 是否使用 SwanLab：true 表示启用 SwanLab 云端/本地日志记录
     ,
     "use_swanlab": false

@@ -148,7 +148,7 @@ def _init_dist_slurm(backend, port=None):
 
 
 # ----------------------------------
-# get rank and world_size (legacy compatibility)
+# get rank and world_size
 # ----------------------------------
 def get_dist_info():
     """Legacy function. Returns (rank, world_size) tuple."""

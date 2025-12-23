@@ -192,10 +192,12 @@ class Logger(object):
                 wandb_project = logging_config.get('wandb_project', 'kair-training')
                 wandb_entity = logging_config.get('wandb_entity', None)
                 wandb_name = logging_config.get('wandb_name', opt.get('task', 'experiment'))
+                wandb_mode = logging_config.get('wandb_mode', None)
                 
                 try:
-                    # Set mode to offline if no API key is available
-                    wandb_mode = 'online' if (wandb_api_key or 'WANDB_API_KEY' in os.environ) else 'offline'
+                    # Set mode: use configured mode if provided, otherwise auto-detect based on API key
+                    if not wandb_mode:
+                        wandb_mode = 'online' if (wandb_api_key or 'WANDB_API_KEY' in os.environ) else 'offline'
                     
                     self.wandb_run = wandb.init(
                         project=wandb_project,
