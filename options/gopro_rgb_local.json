@@ -133,10 +133,6 @@
       // 是否使用旋转数据增强：true 表示使用
       ,
       "use_rot": true
-      // 是否启用数据集的全内存缓存（仅部分 Dataset 支持）：true 时会在初始化阶段将所有原始帧载入内存
-      // 对 RGB-only 数据集保持 false，可根据未来需要开启
-      ,
-      "in_memory_cache": false
       // 数据加载器配置
       // 是否打乱数据顺序：true 表示每个 epoch 随机打乱数据
       ,
@@ -280,6 +276,13 @@
     // 如果指定路径但文件不存在，会自动从 GitHub 下载
     ,
     "spynet_path": "model_zoo/vrt/spynet_sintel_final-3d2a1287.pth"
+    // 光流模块配置：可选值 'spynet' 或 'sea_raft'。若指定 checkpoint 路径且文件不存在，部分实现会尝试下载或使用随机初始化。
+    ,
+    "optical_flow": {
+      "module": "spynet",
+      "checkpoint": "model_zoo/vrt/spynet_sintel_final-3d2a1287.pth",
+      "params": {}
+    }
     // 并行对齐帧数：用于对齐的并行帧数量（支持 2、4、6）
     // 当 pa_frames=2 时，使用 get_flow_2frames 计算相邻帧之间的光流
     ,

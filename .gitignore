@@ -54,7 +54,6 @@ experiments/
 results/
 trainsets/
 testsets/
-datasets/
 logs/
 outputs/
 checkpoints/

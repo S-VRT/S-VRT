@@ -17,6 +17,8 @@ import torch  # PyTorch 深度学习框架
 import torch.distributed as dist
 from torch.utils.data import DataLoader  # 数据加载器
 from torch.utils.data.distributed import DistributedSampler  # 分布式训练的数据采样器
+import psutil  # 系统和进程信息
+import gc  # 垃圾回收
 
 # 工具函数导入
 from utils import utils_logger  # 日志工具，包括 TensorBoard 和 WANDB 支持
@@ -27,6 +29,26 @@ from utils.utils_dist import get_dist_info, init_dist, barrier_safe, setup_distr
 # 数据集和模型定义
 from data.select_dataset import define_Dataset  # 数据集工厂函数
 from models.select_model import define_Model  # 模型工厂函数
+
+
+def get_memory_usage():
+    """获取当前进程的内存使用情况"""
+    try:
+        process = psutil.Process(os.getpid())
+        mem_info = process.memory_info()
+        # 返回 RSS (Resident Set Size) 内存使用量，单位为 GB
+        return mem_info.rss / (1024 ** 3)
+    except Exception as e:
+        return 0.0
+
+
+def log_memory_stage(logger, stage_name, rank=0):
+    """记录内存使用阶段信息"""
+    if rank == 0:
+        mem_usage = get_memory_usage()
+        logger.info(f'[MEMORY] {stage_name} - Current memory usage: {mem_usage:.2f} GB')
+        return mem_usage
+    return 0.0
 
 
 def main():
@@ -177,9 +199,9 @@ def main():
     seed_rank = seed + opt['rank']
     
     # 打印种子信息
-    if opt['rank'] == 0:
+    if is_main_process():
         print('Base random seed: {}'.format(seed))
-    print('Rank {} using seed: {}'.format(opt['rank'], seed_rank))
+        print('Rank {} using seed: {}'.format(opt['rank'], seed_rank))
     
     # 设置所有随机数生成器的种子，确保结果可复现
     random.seed(seed_rank)  # Python 随机数
@@ -202,7 +224,16 @@ def main():
     for phase, dataset_opt in opt['datasets'].items():
         if phase == 'train':
             # 创建训练数据集
+            if opt['rank'] == 0:
+                logger.info('[DATASET] Creating training dataset...')
+            mem_before_train = log_memory_stage(logger, 'Before creating train dataset', opt['rank'])
+
             train_set = define_Dataset(dataset_opt)
+
+            mem_after_train = log_memory_stage(logger, 'After creating train dataset', opt['rank'])
+            if opt['rank'] == 0:
+                logger.info('[DATASET] Train dataset created. Memory delta: {:.2f} GB'.format(mem_after_train - mem_before_train))
+
             # 计算训练迭代次数（向上取整）
             train_size = int(math.ceil(len(train_set) / dataset_opt['dataloader_batch_size']))
             if opt['rank'] == 0:
@@ -233,7 +264,16 @@ def main():
 
         elif phase == 'test':
             # 创建测试/验证数据集
+            if opt['rank'] == 0:
+                logger.info('[DATASET] Creating test/validation dataset...')
+            mem_before_test = log_memory_stage(logger, 'Before creating test dataset', opt['rank'])
+
             test_set = define_Dataset(dataset_opt)
+
+            mem_after_test = log_memory_stage(logger, 'After creating test dataset', opt['rank'])
+            if opt['rank'] == 0:
+                logger.info('[DATASET] Test dataset created. Memory delta: {:.2f} GB'.format(mem_after_test - mem_before_test))
+                logger.info('[DATASET] Test dataset does not use in-memory caching (cache_data=False by default)')
             # 允许通过配置指定 DataLoader 的各项参数
             test_batch_size = dataset_opt.get('dataloader_batch_size', 1)
             test_num_workers = dataset_opt.get('dataloader_num_workers', 1)
@@ -394,19 +434,16 @@ def main():
             # 每隔一定步数在测试集上评估模型性能
             if current_step % opt['train']['checkpoint_test'] == 0:
 
-                # 如果训练集使用内存缓存，在验证前主动释放，给验证阶段腾出内存
-                if hasattr(train_set, 'clear_in_memory_cache'):
-                    try:
-                        train_set.clear_in_memory_cache()
-                    except Exception as exc:
-                        if opt['rank'] == 0:
-                            logger.warning(f'Failed to clear in-memory cache before validation: {exc}')
+                if opt['rank'] == 0:
+                    logger.info('[VALIDATION] Starting model validation/test phase...')
+                mem_before_validation = log_memory_stage(logger, 'Before validation memory cleanup', opt['rank'])
+
 
                 is_master_process = opt['rank'] == 0
                 if opt['dist']:
                     barrier_safe()
 
-                # 初始化测试结果字典，用于存储所有测试序列的指标
+                # 初始化测试结果字典，用于存储所有文件夹的指标
                 test_results = OrderedDict()
                 test_results['psnr'] = []  # 峰值信噪比（RGB 通道）
                 test_results['ssim'] = []  # 结构相似性指数（RGB 通道）
@@ -463,7 +500,7 @@ def main():
                             img = np.transpose(img[[2, 1, 0], :, :], (1, 2, 0))  # CHW-RGB to HWC-BGR
                         # 将浮点数 [0, 1] 转换为 uint8 [0, 255]
                         img = (img * 255.0).round().astype(np.uint8)  # float32 to uint8
-                        
+
                         # 如果配置要求保存图像，则保存到磁盘
                         if opt['val']['save_img']:
                             save_dir = opt['path']['images']
@@ -490,7 +527,7 @@ def main():
                             clip_ssim = util.calculate_ssim(img, img_gt, border=0)
                             test_results_folder['psnr'].append(clip_psnr)
                             test_results_folder['ssim'].append(clip_ssim)
-                            
+
                             # 如果是 RGB 图像，计算 Y 通道（亮度）的指标
                             if img_gt.ndim == 3:  # RGB image
                                 # 转换为 YCbCr 颜色空间，只取 Y 通道（亮度）
@@ -506,8 +543,6 @@ def main():
                             test_results_folder['psnr_y'].append(clip_psnr_y)
                             test_results_folder['ssim_y'].append(clip_ssim_y)
 
-
-
                     # 如果有计算的指标，记录并保存结果
                     if len(test_results_folder['psnr']) > 0:
                         # 计算当前测试序列的平均指标
@@ -516,16 +551,20 @@ def main():
                         psnr_y = sum(test_results_folder['psnr_y']) / len(test_results_folder['psnr_y'])
                         ssim_y = sum(test_results_folder['ssim_y']) / len(test_results_folder['ssim_y'])
 
-
                         test_results['psnr'].append(psnr)
                         test_results['ssim'].append(ssim)
                         test_results['psnr_y'].append(psnr_y)
                         test_results['ssim_y'].append(ssim_y)
+
+                        # 打印每个文件夹的结果（保持原有的打印行为）
+                        print('[Rank {}] Testing {:20s} ({:2d}/{}) - PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                              format(opt['rank'], folder_name, len(test_results['psnr']), len(test_loader), psnr, ssim, psnr_y, ssim_y))
                     else:
                         # 没有真实标签时，只记录测试序列名称
                         pass
 
 
+                # 计算全局平均值和最大值
                 local_psnr_sum = sum(test_results['psnr'])
                 local_ssim_sum = sum(test_results['ssim'])
                 local_psnr_y_sum = sum(test_results['psnr_y'])
@@ -542,38 +581,109 @@ def main():
                      local_psnr_count, local_ssim_count, local_psnr_y_count, local_ssim_y_count],
                     dtype=torch.float64, device=device)
 
-                if opt['dist']:
-                    dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+                world_size = opt.get('world_size', 1)
 
-                (global_psnr_sum, global_ssim_sum, global_psnr_y_sum, global_ssim_y_sum,
-                 global_psnr_count, global_ssim_count, global_psnr_y_count,
-                 global_ssim_y_count) = metrics_tensor.tolist()
-
-                global_psnr_count = int(round(global_psnr_count))
-                global_ssim_count = int(round(global_ssim_count))
-                global_psnr_y_count = int(round(global_psnr_y_count))
-                global_ssim_y_count = int(round(global_ssim_y_count))
-
-                if global_psnr_count > 0:
-                    ave_psnr = global_psnr_sum / global_psnr_count
-                    ave_ssim = global_ssim_sum / max(global_ssim_count, 1)
-                    ave_psnr_y = global_psnr_y_sum / max(global_psnr_y_count, 1)
-                    ave_ssim_y = global_ssim_y_sum / max(global_ssim_y_count, 1)
+                if opt['dist'] and dist.is_initialized():
+                    # Gather per-rank folder metrics so rank 0 can print each rank's results and compute global stats
+                    gathered = [torch.zeros_like(metrics_tensor) for _ in range(world_size)]
+                    dist.all_gather(gathered, metrics_tensor)
 
                     if is_master_process:
-                        logger.info('<epoch:{:3d}, iter:{:8,d} Average PSNR: {:.2f} dB; SSIM: {:.4f}; '
-                                    'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
-                            epoch, current_step, ave_psnr, ave_ssim, ave_psnr_y, ave_ssim_y))
-                        
-                        # 将测试指标记录到 TensorBoard 和 WANDB
-                        if tb_logger is not None:
-                            test_metrics = {
-                                'psnr': ave_psnr,
-                                'ssim': ave_ssim,
-                                'psnr_y': ave_psnr_y,
-                                'ssim_y': ave_ssim_y
-                            }
-                            tb_logger.log_scalars(current_step, test_metrics, tag_prefix='test')
+                        # Print per-rank average results and collect all folder metrics for global max
+                        all_folder_psnr = []
+                        all_folder_ssim = []
+                        all_folder_psnr_y = []
+                        all_folder_ssim_y = []
+
+                        for r, t in enumerate(gathered):
+                            (psnr_sum, ssim_sum, psnr_y_sum, ssim_y_sum,
+                             psnr_cnt, ssim_cnt, psnr_y_cnt, ssim_y_cnt) = t.tolist()
+                            psnr_cnt = int(round(psnr_cnt))
+                            ssim_cnt = int(round(ssim_cnt))
+                            psnr_y_cnt = int(round(psnr_y_cnt))
+                            ssim_y_cnt = int(round(ssim_y_cnt))
+                            if psnr_cnt > 0:
+                                ave_psnr_r = psnr_sum / psnr_cnt
+                                ave_ssim_r = ssim_sum / max(ssim_cnt, 1)
+                                ave_psnr_y_r = psnr_y_sum / max(psnr_y_cnt, 1)
+                                ave_ssim_y_r = ssim_y_sum / max(ssim_y_cnt, 1)
+                                logger.info('[Rank {}] Average PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                                            format(r, ave_psnr_r, ave_ssim_r, ave_psnr_y_r, ave_ssim_y_r))
+
+                                # Collect all folder metrics for global max calculation
+                                all_folder_psnr.extend([ave_psnr_r] * psnr_cnt)
+                                all_folder_ssim.extend([ave_ssim_r] * ssim_cnt)
+                                all_folder_psnr_y.extend([ave_psnr_y_r] * psnr_y_cnt)
+                                all_folder_ssim_y.extend([ave_ssim_y_r] * ssim_y_cnt)
+
+                        # Compute global maximums and averages
+                        if all_folder_psnr:
+                            # Find the clip with maximum PSNR and use its complete metrics
+                            max_psnr_idx = all_folder_psnr.index(max(all_folder_psnr))
+                            max_psnr = all_folder_psnr[max_psnr_idx]
+                            max_ssim = all_folder_ssim[max_psnr_idx]
+                            max_psnr_y = all_folder_psnr_y[max_psnr_idx]
+                            max_ssim_y = all_folder_ssim_y[max_psnr_idx]
+
+                            avg_psnr = sum(all_folder_psnr) / len(all_folder_psnr)
+                            avg_ssim = sum(all_folder_ssim) / len(all_folder_ssim)
+                            avg_psnr_y = sum(all_folder_psnr_y) / len(all_folder_psnr_y)
+                            avg_ssim_y = sum(all_folder_ssim_y) / len(all_folder_ssim_y)
+
+                            logger.info('<epoch:{:3d}, iter:{:8,d} Max PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                                        'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                                epoch, current_step, max_psnr, max_ssim, max_psnr_y, max_ssim_y))
+
+                            logger.info('<epoch:{:3d}, iter:{:8,d} Average PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                                        'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                                epoch, current_step, avg_psnr, avg_ssim, avg_psnr_y, avg_ssim_y))
+
+                            # 将测试指标记录到 TensorBoard 和 WANDB (使用PSNR最大的clip的完整指标)
+                            if tb_logger is not None:
+                                test_metrics = {
+                                    'psnr': max_psnr,
+                                    'ssim': max_ssim,
+                                    'psnr_y': max_psnr_y,
+                                    'ssim_y': max_ssim_y
+                                }
+                                tb_logger.log_scalars(current_step, test_metrics, tag_prefix='test')
+                else:
+                    # Non-distributed: just compute local max and average
+                    if is_master_process:
+                        if test_results['psnr']:
+                            # Find the clip with maximum PSNR and use its complete metrics
+                            max_psnr_idx = test_results['psnr'].index(max(test_results['psnr']))
+                            max_psnr = test_results['psnr'][max_psnr_idx]
+                            max_ssim = test_results['ssim'][max_psnr_idx]
+                            max_psnr_y = test_results['psnr_y'][max_psnr_idx]
+                            max_ssim_y = test_results['ssim_y'][max_psnr_idx]
+
+                            avg_psnr = sum(test_results['psnr']) / len(test_results['psnr'])
+                            avg_ssim = sum(test_results['ssim']) / len(test_results['ssim'])
+                            avg_psnr_y = sum(test_results['psnr_y']) / len(test_results['psnr_y'])
+                            avg_ssim_y = sum(test_results['ssim_y']) / len(test_results['ssim_y'])
+
+                            logger.info('<epoch:{:3d}, iter:{:8,d} Max PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                                        'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                                epoch, current_step, max_psnr, max_ssim, max_psnr_y, max_ssim_y))
+
+                            logger.info('<epoch:{:3d}, iter:{:8,d} Average PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                                        'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                                epoch, current_step, avg_psnr, avg_ssim, avg_psnr_y, avg_ssim_y))
+
+                            # 将测试指标记录到 TensorBoard 和 WANDB (使用PSNR最大的clip的完整指标)
+                            if tb_logger is not None:
+                                test_metrics = {
+                                    'psnr': max_psnr,
+                                    'ssim': max_ssim,
+                                    'psnr_y': max_psnr_y,
+                                    'ssim_y': max_ssim_y
+                                }
+                                tb_logger.log_scalars(current_step, test_metrics, tag_prefix='test')
+
+                mem_after_validation = log_memory_stage(logger, 'After validation completion', opt['rank'])
+                if opt['rank'] == 0:
+                    logger.info('[VALIDATION] Validation phase completed. Memory usage: {:.2f} GB'.format(mem_after_validation))
 
                 if opt['dist']:
                     barrier_safe()

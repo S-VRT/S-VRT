@@ -149,10 +149,10 @@
       "scale": 1
       // 输入帧数：每个训练样本使用的视频帧数量
       ,
-      "num_frame": 4
+      "num_frame": 6
       // 真实标签图像尺寸：训练时裁剪的真实标签图像大小（像素）
       ,
-      "gt_size": 64
+      "gt_size": 160
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -167,24 +167,16 @@
       // 是否使用旋转数据增强：true 表示使用
       ,
       "use_rot": true
-      // 是否启用数据集的全内存缓存：true 会在 Dataset 初始化时把所有原始 RGB+Spike 帧载入内存
-      // 建议在显存/内存允许时配合较小的 dataloader_num_workers 使用
-      ,
-      "in_memory_cache": false
-      ,
-      "in_memory_max_mem_ratio": 0.8    
-      ,
-      "in_memory_cache_workers": 40
       // 数据加载器配置
       // 是否打乱数据顺序：true 表示每个 epoch 随机打乱数据
       ,
       "dataloader_shuffle": true
       // 数据加载器工作进程数：用于并行加载数据的进程数
       ,
-      "dataloader_num_workers": 12
+      "dataloader_num_workers": 40
       // 批次大小：每个批次包含的样本数量
       ,
-      "dataloader_batch_size": 60
+      "dataloader_batch_size": 6
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 20
@@ -217,7 +209,7 @@
       "spike_w": 400
       // Spike 数据通道数：4 表示 TFP 体素 (RGB+Spike=7)
       ,
-      "spike_channels": 4
+      "spike_channels": 8
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
@@ -265,7 +257,7 @@
       "dataloader_num_workers": 12
       // 测试/验证批次大小：可根据显存调整
       ,
-      "dataloader_batch_size": 54
+      "dataloader_batch_size": 12
     }
   }
   // ========================================
@@ -282,17 +274,17 @@
     // 上采样倍数：1 表示不进行上采样（保持原始分辨率）
     ,
     "upscale": 1
-    // 图像尺寸：[时间, 高度, 宽度]，[4,64,64] 表示 4 帧，每帧 64x64
+    // 图像尺寸：[时间, 高度, 宽度]，[4,160,160] 表示 4 帧，每帧 160x160
     ,
     "img_size": [
-      4,
-      64,
-      64
+      6,
+      160,
+      160
     ]
     // 窗口大小：[时间, 高度, 宽度]，[4,8,8] 表示 4 帧时间窗口，8x8 空间窗口
     ,
     "window_size": [
-      4,
+      6,
       8,
       8
     ]
@@ -357,6 +349,13 @@
     // 如果指定路径但文件不存在，会自动从 GitHub 下载
     ,
     "spynet_path": "model_zoo/vrt/spynet_sintel_final-3d2a1287.pth"
+    // 光流模块配置：可选值 'spynet' 或 'sea_raft'。若指定 checkpoint 路径且文件不存在，部分实现会尝试下载或使用随机初始化。
+    ,
+    "optical_flow": {
+      "module": "sea_raft",
+      "checkpoint": "weights/optical_flow/Tartan-C-T-TSKH-kitti432x960-M.pth",
+      "params": {}
+    }
     // 并行对齐帧数：用于对齐的并行帧数量（支持 2、4、6）
     // 当 pa_frames=2 时，使用 get_flow_2frames 计算相邻帧之间的光流
     // 注意：光流计算时只使用 RGB 通道（前 3 个通道），即使输入包含 Spike 通道
@@ -457,7 +456,7 @@
     // 固定参数配置（用于分阶段训练）
     // 固定参数的迭代次数：在前 fix_iter 次迭代中，fix_keys 指定的参数保持固定
     ,
-    "fix_iter": 20000
+    "fix_iter": 2
     // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
     ,
     "fix_lr_mul": 0.125
@@ -498,13 +497,13 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 100
+    "checkpoint_test": 2
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
-    "checkpoint_save": 5000
+    "checkpoint_save": 2
     // 打印检查点间隔：每训练多少迭代打印一次训练信息
     ,
-    "checkpoint_print": 10
+    "checkpoint_print": 1
   }
   // ========================================
   // 验证（测试）配置
@@ -528,9 +527,9 @@
     // 测试时的重叠帧数：2 表示相邻测试窗口之间有 2 帧重叠（用于滑动窗口测试）
     ,
     "num_frame_overlapping": 2
-    // 测试时的补丁大小：64 表示将大图像分割成 64x64 的补丁进行测试
+    // 测试时的补丁大小：160 表示将大图像分割成 160x160 的补丁进行测试
     ,
-    "size_patch_testing": 64
+    "size_patch_testing": 160
   }
   // ========================================
   // 日志记录配置

@@ -50,6 +50,15 @@ def logger_info(logger_name, log_path='default_logger.log'):
     modified by Kai Zhang (github: https://github.com/cszn)
     Enhanced to create timestamped log files for each run
     '''
+    # Avoid attaching handlers on non-master processes to prevent duplicate logs
+    try:
+        rank_env = int(os.environ.get('RANK', os.environ.get('LOCAL_RANK', '0')))
+    except Exception:
+        rank_env = 0
+    if rank_env != 0:
+        # Return early for non-master ranks; they should not create handlers
+        return
+
     log = logging.getLogger(logger_name)
     if log.hasHandlers():
         print('LogHandlers exist!')
@@ -127,12 +136,14 @@ class Logger(object):
         logger (logging.Logger, optional): Python logger for file logging
     """
     
-    def __init__(self, opt, logger=None):
+    def __init__(self, opt, logger=None, timer=None):
         self.opt = opt
         self.logger = logger
         self.tb_writer = None
         self.wandb_run = None
         self.swanlab_run = None
+        # Optional Timer instance can be injected for logging timings
+        self.timer = timer
         
         # Get logging configuration
         logging_config = opt.get('logging', {})
@@ -390,6 +401,51 @@ class Logger(object):
                     else:
                         print(f'Warning: Failed to log images to SwanLab: {e}')
                     self.use_swanlab = False
+    
+    def log_timings(self, step=None, timings_dict=None, prefix='timings'):
+        """
+        Log timing information. Accepts either a timings dict or uses the injected Timer.
+        timings_dict: dict[str, float] mapping name->seconds
+        """
+        # resolve timings source
+        if timings_dict is None:
+            timings_source = getattr(self, 'timer', None)
+            if timings_source is None:
+                return
+            # Timer exposes get_current_timings()
+            timings_dict = timings_source.get_current_timings()
+
+        if not timings_dict:
+            return
+
+        # Format message
+        try:
+            msg = prefix + ': ' + ' '.join(f'{k}={v:.4f}s' for k, v in timings_dict.items())
+        except Exception:
+            msg = prefix + ': (unprintable timings)'
+
+        if self.logger:
+            self.logger.info(msg)
+        else:
+            print(msg)
+
+        # send to TensorBoard
+        if self.use_tensorboard and self.tb_writer is not None:
+            for k, v in timings_dict.items():
+                try:
+                    self.tb_writer.add_scalar(f'{prefix}/{k}', v, step if step is not None else 0)
+                except Exception:
+                    pass
+
+        # send to WANDB
+        if self.use_wandb and self.wandb_run is not None:
+            try:
+                wandb_dict = {f'{prefix}/{k}': v for k, v in timings_dict.items()}
+                if step is not None:
+                    wandb_dict['step'] = step
+                self.wandb_run.log(wandb_dict, step=step)
+            except Exception:
+                pass
     
     def log_config(self, config_dict):
         """

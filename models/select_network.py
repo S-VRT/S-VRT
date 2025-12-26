@@ -1,4 +1,5 @@
 import functools
+import os
 import torch
 from torch.nn import init
 
@@ -21,7 +22,7 @@ def define_G(opt):
     # VRT
     # ----------------------------------------
     if net_type == 'vrt':
-        from models.network_vrt import VRT as net
+        from models.architectures.vrt import VRT as net
         netG = net(upscale=opt_net['upscale'],
                    in_chans=opt_net.get('in_chans', 3),
                    img_size=opt_net['img_size'],
@@ -31,6 +32,7 @@ def define_G(opt):
                    embed_dims=opt_net['embed_dims'],
                    num_heads=opt_net['num_heads'],
                    spynet_path=opt_net['spynet_path'],
+                   optical_flow=opt_net.get('optical_flow', None),
                    pa_frames=opt_net['pa_frames'],
                    deformable_groups=opt_net['deformable_groups'],
                    nonblind_denoising=opt_net['nonblind_denoising'],
@@ -79,6 +81,23 @@ def define_G(opt):
                      init_type=opt_net['init_type'],
                      init_bn_type=opt_net['init_bn_type'],
                      gain=opt_net['init_gain'])
+    # ----------------------------------------
+    # move model to device (centralized placement)
+    # prefer LOCAL_RANK if present (DDP), else use first gpu_id from config, else cpu
+    if torch.cuda.is_available():
+        local_rank = int(os.environ.get('LOCAL_RANK', -1))
+        if local_rank >= 0:
+            device = torch.device(f'cuda:{local_rank}')
+        else:
+            gpu_ids = opt.get('gpu_ids', None)
+            if gpu_ids and len(gpu_ids) > 0:
+                device = torch.device(f'cuda:{gpu_ids[0]}')
+            else:
+                device = torch.device('cuda:0')
+    else:
+        device = torch.device('cpu')
+
+    netG = netG.to(device)
 
     return netG
 

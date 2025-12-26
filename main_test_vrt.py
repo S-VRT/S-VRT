@@ -18,12 +18,34 @@ from collections import OrderedDict
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from pathlib import Path
+import psutil  # 系统和进程信息
+import gc  # 垃圾回收
 
-from models.network_vrt import VRT as net
+from models.architectures.vrt import VRT as net
 from utils import utils_image as util
 from data.dataset_video_test import VideoRecurrentTestDataset, VideoTestVimeo90KDataset, \
     SingleVideoRecurrentTestDataset, VFI_DAVIS, VFI_UCF101, VFI_Vid4
 from data.select_dataset import define_Dataset
+
+
+def get_memory_usage():
+    """获取当前进程的内存使用情况"""
+    try:
+        process = psutil.Process(os.getpid())
+        mem_info = process.memory_info()
+        # 返回 RSS (Resident Set Size) 内存使用量，单位为 GB
+        return mem_info.rss / (1024 ** 3)
+    except Exception as e:
+        return 0.0
+
+
+def log_memory_stage(stage_name, rank=0):
+    """记录内存使用阶段信息"""
+    if rank == 0:
+        mem_usage = get_memory_usage()
+        print(f'[MEMORY] {stage_name} - Current memory usage: {mem_usage:.2f} GB')
+        return mem_usage
+    return 0.0
 
 
 def _strip_json_comments(text: str) -> str:
@@ -200,9 +222,21 @@ def main():
     device = _init_device()
     is_dist, rank, world_size = _init_distributed()
     args.rank = rank
+
+    print('[TEST] Starting VRT inference...')
+    mem_before_model = log_memory_stage('Before model and dataset creation', rank)
+
     model = prepare_model_dataset(args)
     model.eval()
     model = model.to(device)
+
+    mem_after_model = log_memory_stage('After model loaded to device', rank)
+    if rank == 0:
+        print(f'[TEST] Model creation completed. Memory delta: {mem_after_model - mem_before_model:.2f} GB')
+
+    print('[TEST] Creating test dataset...')
+    mem_before_dataset = log_memory_stage('Before creating test dataset', rank)
+
     if 'vimeo' in args.folder_lq.lower():
         if 'videofi' in args.task:
             test_set = VideoTestVimeo90KDataset({'dataroot_gt':args.folder_gt, 'dataroot_lq':args.folder_gt,
@@ -240,6 +274,11 @@ def main():
         test_set = SingleVideoRecurrentTestDataset({'dataroot_gt':args.folder_gt, 'dataroot_lq':args.folder_lq,
                                               'sigma':args.sigma, 'num_frame':-1, 'cache_data': False})
 
+    mem_after_dataset = log_memory_stage('After creating test dataset', rank)
+    if rank == 0:
+        print(f'[TEST] Dataset creation completed. Memory delta: {mem_after_dataset - mem_before_dataset:.2f} GB')
+        print(f'[TEST] Test dataset uses cache_data=False - no in-memory caching')
+
     test_batch_size = 1
     if hasattr(args, 'test_cfg') and args.test_cfg:
         bs_from_cfg = args.test_cfg.get('dataloader_batch_size')
@@ -268,24 +307,54 @@ def main():
     save_dir = f'results/{args.task}'
     if args.save_result:
         os.makedirs(save_dir, exist_ok=True)
-    test_results = OrderedDict()
-    test_results['psnr'] = []
-    test_results['ssim'] = []
-    test_results['psnr_y'] = []
-    test_results['ssim_y'] = []
+    all_clip_results = []  # 存储所有clip的结果
 
     assert len(test_loader) != 0, f'No dataset found at {args.folder_lq}'
+
+    mem_before_inference = log_memory_stage('Before starting inference loop', rank)
+    if rank == 0:
+        print(f'[TEST] Starting inference on {len(test_loader)} batches...')
+
+    # Debug: check dataset properties
+    print(f"Dataset length: {len(test_set)}")
+    if hasattr(test_set, 'folders'):
+        print(f"Available folders: {len(test_set.folders)}")
+        if test_set.folders:
+            print(f"First folder: {test_set.folders[0]}")
+
+    # Get first sample to check shape (skip actual loading to avoid memory usage)
+    if len(test_set) > 0:
+        folder = test_set.folders[0]
+        # Just check file paths without loading images
+        if hasattr(test_set, 'imgs_lq') and folder in test_set.imgs_lq:
+            lq_paths = test_set.imgs_lq[folder]
+            gt_paths = test_set.imgs_gt[folder] if hasattr(test_set, 'imgs_gt') and folder in test_set.imgs_gt else []
+            print(f"Sample folder: {folder}")
+            print(f"LQ frames: {len(lq_paths)}")
+            print(f"GT frames: {len(gt_paths)}")
+            if lq_paths:
+                print(f"First LQ path: {lq_paths[0]}")
+            if gt_paths:
+                print(f"First GT path: {gt_paths[0]}")
+        else:
+            print(f"Sample folder: {folder} (no cached path info available)")
 
     # Track local progress (per rank) in terms of video folders, not batches
     total_folders = len(test_sampler) if test_sampler is not None else len(test_set)
     processed_folders = 0
 
     for idx, batch in enumerate(test_loader):
-        lq = batch['L'].to(device)
+        if idx == 0 and rank == 0:
+            print(f'[TEST] Processing first batch - monitoring memory usage...')
+        elif idx > 0 and idx % 10 == 0 and rank == 0:  # 每10个batch记录一次内存
+            log_memory_stage(f'Processing batch {idx}/{len(test_loader)}', rank)
+        lq = batch['L'].to(device)  # Shape: (batch_size, frames, channels, height, width)
         folder = batch['folder']
         gt = batch['H'] if 'H' in batch else None
 
-        # inference
+        print(f"DEBUG main: Processing batch, lq shape: {lq.shape}")
+
+        # inference - keep original test_video logic but ensure model compatibility
         with torch.no_grad():
             output = test_video(lq, model, args)
 
@@ -298,12 +367,6 @@ def main():
 
         B, T = output.shape[0], output.shape[1]
         for b in range(B):
-            test_results_folder = OrderedDict()
-            test_results_folder['psnr'] = []
-            test_results_folder['ssim'] = []
-            test_results_folder['psnr_y'] = []
-            test_results_folder['ssim_y'] = []
-
             folder_name = folder[b] if isinstance(folder, (list, tuple)) else folder
             for t in range(T):
                 # save image
@@ -333,38 +396,68 @@ def main():
                         print(f"[Rank {args.rank}] [warn] skip metric for {folder[b]} b{b} t{t}: shape mismatch img{img.shape} gt{img_gt.shape}")
                         continue
 
-                    test_results_folder['psnr'].append(util.calculate_psnr(img, img_gt, border=0))
-                    test_results_folder['ssim'].append(util.calculate_ssim(img, img_gt, border=0))
+                    clip_psnr = util.calculate_psnr(img, img_gt, border=0)
+                    clip_ssim = util.calculate_ssim(img, img_gt, border=0)
                     if img_gt.ndim == 3:  # RGB image
                         img_y = util.bgr2ycbcr(img.astype(np.float32) / 255.) * 255.
                         img_gt_y = util.bgr2ycbcr(img_gt.astype(np.float32) / 255.) * 255.
-                        test_results_folder['psnr_y'].append(util.calculate_psnr(img_y, img_gt_y, border=0))
-                        test_results_folder['ssim_y'].append(util.calculate_ssim(img_y, img_gt_y, border=0))
+                        clip_psnr_y = util.calculate_psnr(img_y, img_gt_y, border=0)
+                        clip_ssim_y = util.calculate_ssim(img_y, img_gt_y, border=0)
                     else:
-                        test_results_folder['psnr_y'].append(test_results_folder['psnr'][-1])
-                        test_results_folder['ssim_y'].append(test_results_folder['ssim'][-1])
+                        clip_psnr_y = clip_psnr
+                        clip_ssim_y = clip_ssim
 
-            if gt is not None and len(test_results_folder['psnr']) > 0:
-                psnr = sum(test_results_folder['psnr']) / len(test_results_folder['psnr'])
-                ssim = sum(test_results_folder['ssim']) / len(test_results_folder['ssim'])
-                psnr_y = sum(test_results_folder['psnr_y']) / len(test_results_folder['psnr_y'])
-                ssim_y = sum(test_results_folder['ssim_y']) / len(test_results_folder['ssim_y'])
-                test_results['psnr'].append(psnr)
-                test_results['ssim'].append(ssim)
-                test_results['psnr_y'].append(psnr_y)
-                test_results['ssim_y'].append(ssim_y)
-                processed_folders += 1
-                print('[Rank {}] Testing {:20s} ({:2d}/{}) - PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
-                          format(args.rank, folder_name, processed_folders, total_folders, psnr, ssim, psnr_y, ssim_y))
-            elif gt is not None and len(test_results_folder['psnr']) == 0:
-                processed_folders += 1
-                print(f"[Rank {args.rank}] [warn] metrics skipped for {folder_name} ({processed_folders}/{total_folders}) due to empty valid frames")
-            else:
-                processed_folders += 1
-                print('[Rank {}] Testing {:20s}  ({:2d}/{})'.format(args.rank, folder_name, processed_folders, total_folders))
+                    # 存储每个clip的结果
+                    clip_result = {
+                        'folder_name': folder_name,
+                        'clip_name': f'clip_{b:03d}_t{t:03d}',
+                        'psnr': clip_psnr,
+                        'ssim': clip_ssim,
+                        'psnr_y': clip_psnr_y,
+                        'ssim_y': clip_ssim_y
+                    }
+                    all_clip_results.append(clip_result)
+
+            processed_folders += 1
+            print('[Rank {}] Testing {:20s}  ({:2d}/{})'.format(args.rank, folder_name, processed_folders, total_folders))
 
     # summarize psnr/ssim (distributed-aware, align with training val logic)
     if gt is not None:
+        # Collect all folder results across ranks for rank 0 to print and compute global stats
+        world_size = world_size if 'world_size' in locals() else (dist.get_world_size() if dist.is_initialized() else 1)
+
+        # Create test_results from all_clip_results (group by folder)
+        test_results = {'psnr': [], 'ssim': [], 'psnr_y': [], 'ssim_y': []}
+        folder_results = {}
+
+        # Group clips by folder and compute folder averages
+        for clip_result in all_clip_results:
+            folder_name = clip_result['folder_name']
+            if folder_name not in folder_results:
+                folder_results[folder_name] = {'psnr': [], 'ssim': [], 'psnr_y': [], 'ssim_y': []}
+            folder_results[folder_name]['psnr'].append(clip_result['psnr'])
+            folder_results[folder_name]['ssim'].append(clip_result['ssim'])
+            folder_results[folder_name]['psnr_y'].append(clip_result['psnr_y'])
+            folder_results[folder_name]['ssim_y'].append(clip_result['ssim_y'])
+
+        # Compute folder averages
+        for folder_name, folder_data in folder_results.items():
+            if folder_data['psnr']:
+                avg_psnr = sum(folder_data['psnr']) / len(folder_data['psnr'])
+                avg_ssim = sum(folder_data['ssim']) / len(folder_data['ssim'])
+                avg_psnr_y = sum(folder_data['psnr_y']) / len(folder_data['psnr_y'])
+                avg_ssim_y = sum(folder_data['ssim_y']) / len(folder_data['ssim_y'])
+
+                test_results['psnr'].append(avg_psnr)
+                test_results['ssim'].append(avg_ssim)
+                test_results['psnr_y'].append(avg_psnr_y)
+                test_results['ssim_y'].append(avg_ssim_y)
+
+                # Print folder results (keep original behavior)
+                print('[Rank {}] Testing {:20s} - PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                      format(args.rank, folder_name, avg_psnr, avg_ssim, avg_psnr_y, avg_ssim_y))
+
+        # Now aggregate across ranks
         local_psnr_sum = sum(test_results['psnr'])
         local_ssim_sum = sum(test_results['ssim'])
         local_psnr_y_sum = sum(test_results['psnr_y'])
@@ -380,27 +473,84 @@ def main():
              local_psnr_count, local_ssim_count, local_psnr_y_count, local_ssim_y_count],
             dtype=torch.float64, device=device)
 
-        if is_dist:
-            dist.all_reduce(metrics_tensor, op=dist.ReduceOp.SUM)
+        if is_dist and dist.is_initialized():
+            # Gather per-rank folder metrics
+            gathered = [torch.zeros_like(metrics_tensor) for _ in range(world_size)]
+            dist.all_gather(gathered, metrics_tensor)
 
-        (global_psnr_sum, global_ssim_sum, global_psnr_y_sum, global_ssim_y_sum,
-         global_psnr_count, global_ssim_count, global_psnr_y_count,
-         global_ssim_y_count) = metrics_tensor.tolist()
+            if args.rank == 0:
+                # Print per-rank average results and collect all folder metrics for global max/avg
+                all_folder_psnr = []
+                all_folder_ssim = []
+                all_folder_psnr_y = []
+                all_folder_ssim_y = []
 
-        global_psnr_count = int(round(global_psnr_count))
-        global_ssim_count = int(round(global_ssim_count))
-        global_psnr_y_count = int(round(global_psnr_y_count))
-        global_ssim_y_count = int(round(global_ssim_y_count))
+                for r, t in enumerate(gathered):
+                    (psnr_sum, ssim_sum, psnr_y_sum, ssim_y_sum,
+                     psnr_cnt, ssim_cnt, psnr_y_cnt, ssim_y_cnt) = t.tolist()
+                    psnr_cnt = int(round(psnr_cnt))
+                    ssim_cnt = int(round(ssim_cnt))
+                    psnr_y_cnt = int(round(psnr_y_cnt))
+                    ssim_y_cnt = int(round(ssim_y_cnt))
+                    if psnr_cnt > 0:
+                        ave_psnr_r = psnr_sum / psnr_cnt
+                        ave_ssim_r = ssim_sum / max(ssim_cnt, 1)
+                        ave_psnr_y_r = psnr_y_sum / max(psnr_y_cnt, 1)
+                        ave_ssim_y_r = ssim_y_sum / max(ssim_y_cnt, 1)
+                        print('[Rank {}] Average PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                              format(r, ave_psnr_r, ave_ssim_r, ave_psnr_y_r, ave_ssim_y_r))
 
-        if global_psnr_count > 0 and args.rank == 0:
-            ave_psnr = global_psnr_sum / global_psnr_count
-            ave_ssim = global_ssim_sum / max(global_ssim_count, 1)
-            ave_psnr_y = global_psnr_y_sum / max(global_psnr_y_count, 1)
-            ave_ssim_y = global_ssim_y_sum / max(global_ssim_y_count, 1)
-            print('\n{} \n-- Average PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
-                  format(save_dir, ave_psnr, ave_ssim, ave_psnr_y, ave_ssim_y))
-        elif args.rank == 0:
-            print('[warn] no valid frames for PSNR/SSIM; all metrics skipped')
+                        # Collect all folder metrics for global max/avg calculation
+                        all_folder_psnr.extend([ave_psnr_r] * psnr_cnt)
+                        all_folder_ssim.extend([ave_ssim_r] * ssim_cnt)
+                        all_folder_psnr_y.extend([ave_psnr_y_r] * psnr_y_cnt)
+                        all_folder_ssim_y.extend([ave_ssim_y_r] * ssim_y_cnt)
+
+                # Compute global maximums and averages
+                if all_folder_psnr:
+                    # Find the clip with maximum PSNR and use its complete metrics
+                    max_psnr_idx = all_folder_psnr.index(max(all_folder_psnr))
+                    max_psnr = all_folder_psnr[max_psnr_idx]
+                    max_ssim = all_folder_ssim[max_psnr_idx]
+                    max_psnr_y = all_folder_psnr_y[max_psnr_idx]
+                    max_ssim_y = all_folder_ssim_y[max_psnr_idx]
+
+                    avg_psnr = sum(all_folder_psnr) / len(all_folder_psnr)
+                    avg_ssim = sum(all_folder_ssim) / len(all_folder_ssim)
+                    avg_psnr_y = sum(all_folder_psnr_y) / len(all_folder_psnr_y)
+                    avg_ssim_y = sum(all_folder_ssim_y) / len(all_folder_ssim_y)
+
+                    print('\n{} \n-- Max PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                          format(save_dir, max_psnr, max_ssim, max_psnr_y, max_ssim_y))
+
+                    print('\n{} \n-- Average PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                          format(save_dir, avg_psnr, avg_ssim, avg_psnr_y, avg_ssim_y))
+        else:
+            # Non-distributed: just compute local max and average
+            if args.rank == 0:
+                if test_results['psnr']:
+                    # Find the clip with maximum PSNR and use its complete metrics
+                    max_psnr_idx = test_results['psnr'].index(max(test_results['psnr']))
+                    max_psnr = test_results['psnr'][max_psnr_idx]
+                    max_ssim = test_results['ssim'][max_psnr_idx]
+                    max_psnr_y = test_results['psnr_y'][max_psnr_idx]
+                    max_ssim_y = test_results['ssim_y'][max_psnr_idx]
+
+                    avg_psnr = sum(test_results['psnr']) / len(test_results['psnr'])
+                    avg_ssim = sum(test_results['ssim']) / len(test_results['ssim'])
+                    avg_psnr_y = sum(test_results['psnr_y']) / len(test_results['psnr_y'])
+                    avg_ssim_y = sum(test_results['ssim_y']) / len(test_results['ssim_y'])
+
+                    print('\n{} \n-- Max PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                          format(save_dir, max_psnr, max_ssim, max_psnr_y, max_ssim_y))
+
+                    print('\n{} \n-- Average PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                          format(save_dir, avg_psnr, avg_ssim, avg_psnr_y, avg_ssim_y))
+
+    mem_after_inference = log_memory_stage('After inference completion', rank)
+    if rank == 0:
+        print(f'[TEST] Inference completed. Total memory delta: {mem_after_inference - mem_before_inference:.2f} GB')
+        print(f'[TEST] Final memory usage: {mem_after_inference:.2f} GB')
 
 
 def _assert_lq_channels(tensor, tensor_name, netG_cfg):
@@ -422,7 +572,8 @@ def prepare_model_dataset(args):
     ''' prepare model and dataset according to args.task. '''
 
     # Check if we should load model from config file
-    if hasattr(args, 'netG_cfg') and args.netG_cfg and args.netG_cfg.get('net_type') == 'vrt':
+    # Prioritize config-based loading if netG_cfg is available and valid
+    if hasattr(args, 'netG_cfg') and args.netG_cfg and isinstance(args.netG_cfg, dict) and args.netG_cfg.get('net_type') == 'vrt':
         netG_cfg = args.netG_cfg
         path_cfg = args.path_cfg or {}
         pretrained_netG = path_cfg.get('pretrained_netG')
@@ -438,6 +589,7 @@ def prepare_model_dataset(args):
                    embed_dims=netG_cfg['embed_dims'],
                    num_heads=netG_cfg['num_heads'],
                    spynet_path=netG_cfg.get('spynet_path'),
+                   optical_flow=netG_cfg.get('optical_flow', None),  # Add optical_flow config
                    pa_frames=netG_cfg.get('pa_frames', 2),
                    deformable_groups=netG_cfg.get('deformable_groups', 16),
                    nonblind_denoising=netG_cfg.get('nonblind_denoising', False),
@@ -513,108 +665,18 @@ def prepare_model_dataset(args):
         return model
 
     # define model
-    if args.task == '001_VRT_videosr_bi_REDS_6frames':
-        model = net(upscale=4, img_size=[6,64,64], window_size=[6,8,8], depths=[8,8,8,8,8,8,8, 4,4,4,4, 4,4],
-                    indep_reconsts=[11,12], embed_dims=[120,120,120,120,120,120,120, 180,180,180,180, 180,180],
-                    num_heads=[6,6,6,6,6,6,6, 6,6,6,6, 6,6], pa_frames=2, deformable_groups=12)
-        datasets = ['REDS4']
-        args.scale = 4
-        args.window_size = [6,8,8]
-        args.nonblind_denoising = False
+    # Config-based loading is preferred. If not available, raise an error
+    if not hasattr(args, 'netG_cfg') or not args.netG_cfg:
+        raise ValueError("Config-based model loading is required. "
+                        "Please use --opt to specify a configuration file with a valid 'netG' section.")
 
-    elif args.task == '002_VRT_videosr_bi_REDS_16frames':
-        model = net(upscale=4, img_size=[16,64,64], window_size=[8,8,8], depths=[8,8,8,8,8,8,8, 4,4,4,4, 4,4],
-                    indep_reconsts=[11,12], embed_dims=[120,120,120,120,120,120,120, 180,180,180,180, 180,180],
-                    num_heads=[6,6,6,6,6,6,6, 6,6,6,6, 6,6], pa_frames=6, deformable_groups=24)
-        datasets = ['REDS4']
-        args.scale = 4
-        args.window_size = [8,8,8]
-        args.nonblind_denoising = False
+    # Config-based model creation only - no more legacy hardcoded tasks
 
-    elif args.task in ['003_VRT_videosr_bi_Vimeo_7frames', '004_VRT_videosr_bd_Vimeo_7frames']:
-        model = net(upscale=4, img_size=[8,64,64], window_size=[8,8,8], depths=[8,8,8,8,8,8,8, 4,4,4,4, 4,4],
-                    indep_reconsts=[11,12], embed_dims=[120,120,120,120,120,120,120, 180,180,180,180, 180,180],
-                    num_heads=[6,6,6,6,6,6,6, 6,6,6,6, 6,6], pa_frames=4, deformable_groups=16)
-        datasets = ['Vid4'] # 'Vimeo'. Vimeo dataset is too large. Please refer to #training to download it.
-        args.scale = 4
-        args.window_size = [8,8,8]
-        args.nonblind_denoising = False
-
-    elif args.task in ['005_VRT_videodeblurring_DVD']:
-        model = net(upscale=1, img_size=[6,192,192], window_size=[6,8,8], depths=[8,8,8,8,8,8,8, 4,4, 4,4],
-                    indep_reconsts=[9,10], embed_dims=[96,96,96,96,96,96,96, 120,120, 120,120],
-                    num_heads=[6,6,6,6,6,6,6, 6,6, 6,6], pa_frames=2, deformable_groups=16)
-        datasets = ['DVD10']
-        args.scale = 1
-        args.window_size = [6,8,8]
-        args.nonblind_denoising = False
-
-    elif args.task in ['006_VRT_videodeblurring_GoPro']:
-        model = net(upscale=1, img_size=[6,192,192], window_size=[6,8,8], depths=[8,8,8,8,8,8,8, 4,4, 4,4],
-                    indep_reconsts=[9,10], embed_dims=[96,96,96,96,96,96,96, 120,120, 120,120],
-                    num_heads=[6,6,6,6,6,6,6, 6,6, 6,6], pa_frames=2, deformable_groups=16)
-        datasets = ['GoPro11-part1', 'GoPro11-part2']
-        args.scale = 1
-        args.window_size = [6,8,8]
-        args.nonblind_denoising = False
-
-    elif args.task in ['007_VRT_videodeblurring_REDS']:
-        model = net(upscale=1, img_size=[6,192,192], window_size=[6,8,8], depths=[8,8,8,8,8,8,8, 4,4, 4,4],
-                    indep_reconsts=[9,10], embed_dims=[96,96,96,96,96,96,96, 120,120, 120,120],
-                    num_heads=[6,6,6,6,6,6,6, 6,6, 6,6], pa_frames=2, deformable_groups=16)
-        datasets = ['REDS4']
-        args.scale = 1
-        args.window_size = [6,8,8]
-        args.nonblind_denoising = False
-
-    elif args.task == '008_VRT_videodenoising_DAVIS':
-        model = net(upscale=1, img_size=[6,192,192], window_size=[6,8,8], depths=[8,8,8,8,8,8,8, 4,4, 4,4],
-                    indep_reconsts=[9,10], embed_dims=[96,96,96,96,96,96,96, 120,120, 120,120],
-                    num_heads=[6,6,6,6,6,6,6, 6,6, 6,6], pa_frames=2, deformable_groups=16,
-                    nonblind_denoising=True)
-        datasets = ['Set8', 'DAVIS-test']
-        args.scale = 1
-        args.window_size = [6,8,8]
-        args.nonblind_denoising = True
-
-    elif args.task == '009_VRT_videofi_Vimeo_4frames':
-        model = net(upscale=1, out_chans=3, img_size=[4,192,192], window_size=[4,8,8], depths=[8,8,8,8,8,8,8, 4,4, 4,4],
-                    indep_reconsts=[], embed_dims=[96,96,96,96,96,96,96, 120,120, 120,120],
-                    num_heads=[6,6,6,6,6,6,6, 6,6, 6,6], pa_frames=0)
-        datasets = ['UCF101', 'DAVIS-train']  # 'Vimeo'. Vimeo dataset is too large. Please refer to #training to download it.
-        args.scale = 1
-        args.window_size = [4,8,8]
-        args.nonblind_denoising = False
-
-    # download model
-    model_path = f'model_zoo/vrt/{args.task}.pth'
-    if os.path.exists(model_path):
-        print(f'loading model from ./model_zoo/vrt/{model_path}')
-    else:
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-        url = 'https://github.com/JingyunLiang/VRT/releases/download/v0.0/{}'.format(os.path.basename(model_path))
-        r = requests.get(url, allow_redirects=True)
-        print(f'downloading model {model_path}')
-        open(model_path, 'wb').write(r.content)
-
-    pretrained_model = torch.load(model_path)
-    model.load_state_dict(pretrained_model['params'] if 'params' in pretrained_model.keys() else pretrained_model, strict=True)
-
-    # download datasets
-    if os.path.exists(f'{args.folder_lq}'):
-        print(f'using dataset from {args.folder_lq}')
-    else:
-        if 'vimeo' in args.folder_lq.lower():
-            print(f'Vimeo dataset is not at {args.folder_lq}! Please refer to #training of Readme.md to download it.')
-        else:
-            os.makedirs('testsets', exist_ok=True)
-            for dataset in datasets:
-                url = f'https://github.com/JingyunLiang/VRT/releases/download/v0.0/testset_{dataset}.tar.gz'
-                r = requests.get(url, allow_redirects=True)
-                print(f'downloading testing dataset {dataset}')
-                open(f'testsets/{dataset}.tar.gz', 'wb').write(r.content)
-                os.system(f'tar -xvf testsets/{dataset}.tar.gz -C testsets')
-                os.system(f'rm testsets/{dataset}.tar.gz')
+    # Data should be prepared via launch_test.sh --prepare-data or manually
+    if not os.path.exists(f'{args.folder_lq}'):
+        print(f'Warning: Dataset not found at {args.folder_lq}')
+        print('Please ensure data is prepared using launch_test.sh --prepare-data or manually')
+        print('For GoPro+Spike dataset, run: ./launch_test.sh --prepare-data')
 
     return model
 
@@ -626,16 +688,38 @@ def test_video(lq, model, args):
         netG_cfg = args.netG_cfg if hasattr(args, 'netG_cfg') and args.netG_cfg else {}
         _assert_lq_channels(lq, 'Test Video Input', netG_cfg)
 
-        num_frame_testing = args.tile[0]
-        if num_frame_testing:
+        # Use tile-based testing as in original KAIR implementation
+
+        # DEBUG: Print input shapes and configurations
+        print(f"DEBUG test_video: input lq shape: {lq.shape}")
+        print(f"DEBUG test_video: args.tile: {getattr(args, 'tile', 'None')}")
+        print(f"DEBUG test_video: args.tile_overlap: {getattr(args, 'tile_overlap', 'None')}")
+        print(f"DEBUG test_video: netG_cfg img_size: {netG_cfg.get('img_size', 'None')}")
+        print(f"DEBUG test_video: netG_cfg in_chans: {netG_cfg.get('in_chans', 'None')}")
+
+        # Use tile[0] for temporal tiling as in original logic
+        num_frame_testing = args.tile[0] if args.tile and len(args.tile) > 0 else netG_cfg.get('img_size', [6, 160, 160])[0]
+        print(f"DEBUG test_video: num_frame_testing: {num_frame_testing}")
+
+        # Check if we have enough frames for tiling
+        b, d, c, h, w = lq.size()
+        print(f"DEBUG test_video: parsed shapes - b:{b}, d:{d}, c:{c}, h:{h}, w:{w}")
+        c = c - 1 if args.nonblind_denoising else c
+
+        # Ensure we have enough frames
+        if d < num_frame_testing:
+            print(f"WARNING: Video has {d} frames but model expects {num_frame_testing}. Using available frames.")
+            num_frame_testing = d
+
+        # Keep original behavior: use configured num_frame_testing, let model handle frame count issues
+        if num_frame_testing > 0 and d >= num_frame_testing:
             # test as multiple clips if out-of-memory
             sf = args.scale
-            num_frame_overlapping = args.tile_overlap[0]
+            num_frame_overlapping = args.tile_overlap[0] if args.tile_overlap else 2
             not_overlap_border = False
-            b, d, c, h, w = lq.size()
-            c = c - 1 if args.nonblind_denoising else c
             # Get output channels from config, similar to validation code
             c_out = netG_cfg.get('out_chans', c)
+
             stride = num_frame_testing - num_frame_overlapping
             d_idx_list = list(range(0, d-num_frame_testing, stride)) + [max(0, d-num_frame_testing)]
             E = None
@@ -714,9 +798,9 @@ def test_clip(lq, model, args):
                     # Use actual output channels from model, but fallback to config if needed
                     c_out = out_patch.size(2)
                     E = torch.zeros(b, d, c_out, h*sf, w*sf)
-                    W = torch.zeros_like(E)
+                    W = torch.zeros(b, d, 1, h*sf, w*sf)
 
-                out_patch_mask = torch.ones_like(out_patch)
+                out_patch_mask = torch.ones(b, d, 1, out_patch.size(-2), out_patch.size(-1))
 
                 if not_overlap_border:
                     if h_idx < h_idx_list[-1]:

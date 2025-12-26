@@ -3,7 +3,7 @@
   // 基础配置
   // ========================================
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
-  "task": "gopro_tfp8_sgp"
+  "task": "gopro_tfp8_sgp_searaft"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
   ,
   "model": "vrt"
@@ -72,7 +72,7 @@
     //   - "path/to/model.pth"：使用指定的预训练模型路径
     // 注意：E 模型是 EMA（指数移动平均）模型，测试时会优先使用 E 模型
     ,
-    "pretrained_netE": "experiments/gopro_tfp8_sgp/models/30000_E.pth"
+    "pretrained_netE": "experiments/gopro_tfp8_sgp_searaft/models/10000_E.pth"
   }
   // ========================================
   // 数据集配置
@@ -148,7 +148,7 @@
       "scale": 1
       // 输入帧数：每个训练样本使用的视频帧数量
       ,
-      "num_frame": 4
+      "num_frame": 6
       // 真实标签图像尺寸：训练时裁剪的真实标签图像大小（像素）
       ,
       "gt_size": 160
@@ -166,14 +166,6 @@
       // 是否使用旋转数据增强：true 表示使用
       ,
       "use_rot": true
-      // 是否启用数据集的全内存缓存：true 会在 Dataset 初始化时把所有原始 RGB+Spike 帧载入内存
-      // 建议在显存/内存允许时配合较小的 dataloader_num_workers 使用
-      ,
-      "in_memory_cache": false
-      ,
-      "in_memory_max_mem_ratio": 0.8
-      ,
-      "in_memory_cache_workers": 16
       // 数据加载器配置
       // 是否打乱数据顺序：true 表示每个 epoch 随机打乱数据
       ,
@@ -185,7 +177,7 @@
       "dataloader_num_workers": 12
       // 批次大小：每个批次包含的样本数量
       ,
-      "dataloader_batch_size": 9
+      "dataloader_batch_size": 6
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -253,7 +245,7 @@
       // IO 后端配置：指定数据读取方式
       ,
       "io_backend": {
-        "type": "disk"
+        "type": "lmdb"
       }
       // 输入帧数：-1 表示使用所有可用帧
       ,
@@ -268,7 +260,7 @@
       "dataloader_num_workers": 12
       // 测试/验证批次大小：可根据显存调整
       ,
-      "dataloader_batch_size": 4
+      "dataloader_batch_size": 9
     }
   }
   // ========================================
@@ -289,14 +281,14 @@
     // 图像尺寸：[时间, 高度, 宽度]，[4,160,160] 表示 4 帧，每帧 160x160
     ,
     "img_size": [
-      4,
+      6,
       160,
       160
     ]
     // 窗口大小：[时间, 高度, 宽度]，[4,8,8] 表示 4 帧时间窗口，8x8 空间窗口
     ,
     "window_size": [
-      4,
+      6,
       8,
       8
     ]
@@ -361,6 +353,13 @@
     // 如果指定路径但文件不存在，会自动从 GitHub 下载
     ,
     "spynet_path": "model_zoo/vrt/spynet_sintel_final-3d2a1287.pth"
+    // 光流模块配置：可选值 'spynet' 或 'sea_raft'。若指定 checkpoint 路径且文件不存在，部分实现会尝试下载或使用随机初始化。
+    ,
+    "optical_flow": {
+      "module": "sea_raft",
+      "checkpoint": "weights/optical_flow/searaft/Tartan-C-T432x960-S.pth",
+      "params": {}
+    }
     // 并行对齐帧数：用于对齐的并行帧数量（支持 2、4、6）
     // 当 pa_frames=2 时，使用 get_flow_2frames 计算相邻帧之间的光流
     // 注意：光流计算时只使用 RGB 通道（前 3 个通道），即使输入包含 Spike 通道
@@ -503,7 +502,7 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 10000
+    "checkpoint_test": 30000
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 2000
@@ -529,7 +528,7 @@
     "center_frame_only": false
     // 测试时使用的帧数：18 表示测试时处理 18 帧视频
     ,
-    "num_frame_testing": 18
+    "num_frame_testing": 24
     // 测试时的重叠帧数：2 表示相邻测试窗口之间有 2 帧重叠（用于滑动窗口测试）
     ,
     "num_frame_overlapping": 2
@@ -561,7 +560,10 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_tfp8_sgp"
+    "wandb_name": "gopro_tfp8_sgp_searaft"
+    // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
+    ,
+    "wandb_mode": "offline"
     // 是否使用 SwanLab：true 表示启用 SwanLab 日志记录（默认关闭）
     ,
     "use_swanlab": true
@@ -576,10 +578,10 @@
     "swanlab_workspace": null
     // SwanLab 运行名称：用于区分不同实验
     ,
-    "swanlab_name": "gopro_tfp8_sgp"
+    "swanlab_name": "gopro_tfp8_sgp_searaft"
     // SwanLab 实验描述：可选文本信息
     ,
-    "swanlab_description": "cloud"
+    "swanlab_description": "offline"
     // SwanLab 运行模式：可设置 cloud/offline/local；留空自动根据 API key 决定
     ,
     "swanlab_mode": null

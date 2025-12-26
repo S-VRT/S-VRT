@@ -1,15 +1,11 @@
-import gc
 import numpy as np
 import os
 import random
 import torch
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import torch.utils.data as data
 from torch.utils.data import get_worker_info
 import cv2
-import psutil
 
 import utils.utils_video as utils_video
 from utils.spike_loader import SpikeStreamSimple, voxelize_spikes_tfp
@@ -38,11 +34,6 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
     LQ (lq): Low-Quality RGB frames, e.g., low-resolution/blurry/noisy/compressed frames.
     Spike: Spike camera data (.dat files).
 
-    Note: When in_memory_cache=True, each DataLoader worker process maintains its own
-    private cache copy. To avoid excessive memory usage, manually reduce num_workers
-    (recommended: 0-4) when using this mode. If the memory budget is insufficient for
-    all samples, the dataset automatically falls back to on-demand loading for remaining
-    samples, ensuring safe operation on machines with limited memory.
 
     Args:
         opt (dict): Config for train dataset. It contains the following keys:
@@ -71,15 +62,6 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
             tfp_half_win_length (int): Half window length fed into TFP. Default: 20.
             tfp_device (str): Torch device string for TFP reconstruction. Default: 'cpu'.
 
-            in_memory_cache (bool): When True, eagerly cache per-frame raw RGB/Spike data
-                for as many keys as possible within the memory budget, so each DDP rank
-                reuses cached frames while still performing all random window/augmentation logic
-                at __getitem__ time. Consider lowering DataLoader num_worker in this mode to
-                avoid duplicating cache memory across workers/ranks. If memory budget is
-                insufficient, automatically falls back to on-demand loading for remaining frames.
-                Default: False.
-            in_memory_max_mem_ratio (float): Maximum fraction of system physical memory
-                to use for caching. Default: 0.5.
     """
 
     def __init__(self, opt):
@@ -172,17 +154,6 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         print(f'Temporal augmentation interval list: [{interval_str}]; '
                     f'random reverse is {self.random_reverse}.')
 
-        # Optional partial in-memory cache (per rank)
-        self.in_memory_cache = opt.get('in_memory_cache', False)
-        self.in_memory_max_mem_ratio = opt.get('in_memory_max_mem_ratio', 0.5)
-        # concurrent workers for eager cache warmup (IO bound, safe defaults)
-        default_cache_workers = max(1, min(8, os.cpu_count() or 4))
-        self.in_memory_cache_workers = int(opt.get('in_memory_cache_workers', default_cache_workers))
-        self.key_to_index = {key: idx for idx, key in enumerate(self.keys)}
-        self._cache = None
-        self._num_cached = 0
-        if self.in_memory_cache:
-            self._build_partial_in_memory_cache()
 
     def __getitem__(self, index):
         key = self.keys[index]
@@ -214,7 +185,7 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         img_gt_path_reference = None
         for neighbor in neighbor_list:
             neighbor_key = f'{clip_name}/{neighbor:{self.filename_tmpl}}'
-            sample = self._get_raw_frame(neighbor_key)
+            sample = self._load_raw_frame(neighbor_key)
             img_lqs.append(sample['lq'])
             img_gts.append(sample['gt'])
             spike_voxels.append(sample['spike'])
@@ -282,105 +253,6 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         """Create an isolated FileClient instance (for threaded cache warmup)."""
         return utils_video.FileClient(self.io_backend_type, **self.io_backend_opt)
 
-    def _build_partial_in_memory_cache(self):
-        """Eagerly cache per-frame raw RGB/Spike data while respecting the memory budget."""
-        try:
-            vm = psutil.virtual_memory()
-            total_bytes = vm.total
-            available_bytes = vm.available  # leave headroom based on current free memory
-        except Exception as exc:
-            print(f'Warning: Unable to read system memory via psutil ({exc}). Disabling in-memory cache.')
-            self.in_memory_cache = False
-            self._cache = None
-            return
-
-        # Respect current available memory instead of total so we do not evict the system
-        mem_budget_bytes = int(available_bytes * self.in_memory_max_mem_ratio)
-        # Additionally guarantee a minimum free memory threshold based on total memory.
-        min_free_bytes = int(total_bytes * (1.0 - self.in_memory_max_mem_ratio))
-        if mem_budget_bytes <= 0:
-            print('Warning: Memory budget is zero; disabling in-memory cache.')
-            self.in_memory_cache = False
-            self._cache = None
-            return
-
-        self._cache = [None] * len(self.keys)
-        used_bytes = 0
-        self._num_cached = 0
-        lock = threading.Lock()
-        stop_flag = threading.Event()
-
-        def _load_and_cache(idx_key):
-            if stop_flag.is_set():
-                return None
-            idx, key = idx_key
-
-            # Stop early if current free memory is already below the minimum threshold.
-            try:
-                if psutil.virtual_memory().available <= min_free_bytes:
-                    stop_flag.set()
-                    return None
-            except Exception:
-                # If psutil fails temporarily, proceed with budget-based guard.
-                pass
-
-            local_client = self._new_file_client()
-            frame_sample = self._load_raw_frame(key, file_client=local_client)
-            sample_bytes = (
-                frame_sample['lq'].nbytes +
-                frame_sample['gt'].nbytes +
-                frame_sample['spike'].nbytes
-            )
-            with lock:
-                nonlocal used_bytes
-                if stop_flag.is_set():
-                    return None
-                if used_bytes + sample_bytes > mem_budget_bytes:
-                    stop_flag.set()
-                    return None
-                self._cache[idx] = frame_sample
-                used_bytes += sample_bytes
-                self._num_cached += 1
-            return None
-
-        # Threaded warmup to better utilize disk and decoding throughput.
-        # Small worker count (<=8) keeps overhead low while overlapping IO/CPU.
-        with ThreadPoolExecutor(max_workers=self.in_memory_cache_workers) as ex:
-            futures = [ex.submit(_load_and_cache, (idx, key)) for idx, key in enumerate(self.keys)]
-            for fut in as_completed(futures):
-                # stop early once budget hit
-                if stop_flag.is_set():
-                    break
-
-        cache_gb = used_bytes / (1024**3)
-        print(f'VideoRecurrentTrainDatasetRGBSpike: Cached {self._num_cached}/{len(self.keys)} frames '
-              f'(~{cache_gb:.1f} GB). Each DataLoader worker maintains a private cache copy - '
-              f'consider reducing num_workers (0-4 recommended) to save memory.')
-
-    def clear_in_memory_cache(self):
-        """Release cached frames to free host memory (per worker/rank)."""
-        if not self.in_memory_cache:
-            return
-        self._cache = None
-        self._num_cached = 0
-        try:
-            gc.collect()
-        except Exception:
-            pass
-        print('VideoRecurrentTrainDatasetRGBSpike: In-memory cache cleared before validation.')
-
-    def _get_raw_frame(self, key):
-        if self.in_memory_cache and self._cache is not None:
-            cache_idx = self.key_to_index[key]
-            sample = self._cache[cache_idx]
-            if sample is not None:
-                return {
-                    'lq': sample['lq'].copy(),
-                    'gt': sample['gt'].copy(),
-                    'spike': sample['spike'].copy(),
-                    'gt_path': sample['gt_path'],
-                }
-        return self._load_raw_frame(key)
 
     def _load_raw_frame(self, key, file_client=None):
         """Load a single raw RGB+Spike frame triplet from disk/LMDB without augmentation."""

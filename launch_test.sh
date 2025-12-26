@@ -277,22 +277,36 @@ fi
 # NCCL / CUDA stability vars
 export NCCL_ASYNC_ERROR_HANDLING=1
 
-# Helper to keep terminal open on error
-handle_error() {
+# Helper to keep terminal open on error or completion
+handle_exit() {
     local exit_code=$1
     local message="${2:-}"
 
     if [[ $exit_code -ne 0 ]]; then
         echo ""
-        [[ -n "$message" ]] && echo "$message" && echo ""
-        echo "错误信息已显示在上方。"
-        # Only wait for input in interactive terminal and if stdin is a TTY
-        if [[ -t 0 && -t 1 ]]; then
-            echo "按 Enter 键继续（脚本将结束，但终端保持打开）..."
-            read -r _ 2>/dev/null || true
+        if [[ -n "$message" ]]; then
+            echo "$message"
         fi
-        exit $exit_code
+        echo ""
+        echo "错误信息已显示在上方。"
+        echo "您可以在修复问题后，在同一终端会话中重新运行此脚本。"
+        echo ""
+    else
+        echo ""
+        if [[ -n "$message" ]]; then
+            echo "$message"
+        fi
+        echo ""
     fi
+
+    # Always wait for input in interactive terminal to prevent auto-close
+    if [[ -t 1 ]]; then
+        echo "按 Enter 键继续..."
+        read -r _
+    fi
+
+    # Always exit with code 0 to prevent terminal from closing
+    exit 0
 }
 
 echo "=========================================="
@@ -354,7 +368,7 @@ if [[ "$PREPARE_DATA" == true ]]; then
         echo "=========================================="
         echo "Data preparation FAILED (exit code: $PREP_EXIT_CODE)"
         echo "=========================================="
-        handle_error $PREP_EXIT_CODE "数据准备失败，请检查上面的错误信息。"
+        handle_exit $PREP_EXIT_CODE "数据准备失败，请检查上面的错误信息。"
     fi
 
     echo "=========================================="
@@ -463,9 +477,9 @@ echo "=========================================="
 if [[ $EXIT_CODE -eq 0 ]]; then
     echo "Testing completed successfully"
     echo "=========================================="
-    exit 0
+    handle_exit 0 "测试完成。"
 else
     echo "Testing exited with code: $EXIT_CODE"
     echo "=========================================="
-    handle_error $EXIT_CODE "测试失败，请检查上面的错误信息。"
+    handle_exit $EXIT_CODE "测试失败，请检查上面的错误信息。"
 fi

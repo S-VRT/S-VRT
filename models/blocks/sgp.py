@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 
-class SGP(nn.Module):
+class SGPLayer(nn.Module):
     """Scalable Granularity Perception Layer from TriDet.
 
     Implements the formula: f_SGP(x) = φ(x) · FC(x) + ψ(x) · (Conv_w(x) + Conv_{kw}(x)) + x
@@ -93,7 +93,7 @@ class SGP(nn.Module):
         out = x + instant_out + window_out
 
         return out
-
+ 
 
 class SGPBlock(nn.Module):
     """SGP Block that mirrors the existing Transformer block structure.
@@ -115,7 +115,7 @@ class SGPBlock(nn.Module):
         super().__init__()
         self.dim = dim
         self.norm = norm_layer(dim)
-        self.sgp = SGP(dim, w=sgp_w, k=sgp_k, reduction=sgp_reduction)
+        self.sgp = SGPLayer(dim, w=sgp_w, k=sgp_k, reduction=sgp_reduction)
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
     def forward(self, x):
@@ -131,3 +131,7 @@ class SGPBlock(nn.Module):
 
 
 from models.utils.init import DropPath
+
+__all__ = ['SGPLayer', 'SGPBlock']
+
+
