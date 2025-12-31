@@ -70,6 +70,43 @@ python scripts/data_preparation/prepare_gopro_spike_dataset.py \
     --spike_root /path/to/GOPRO_Large_spike_seq
 ```
 
+### DCNv4 支持（可选）
+
+项目支持 DCNv4 作为可选的可变形卷积实现，提供更好的性能和速度。DCNv4 需要 CUDA 支持。
+
+#### 构建 DCNv4
+
+```bash
+# 进入 DCNv4 目录
+cd models/op/dcnv4
+
+# 构建 CUDA 扩展
+./build.sh
+
+# 或手动构建
+python setup.py build_ext --inplace
+```
+
+#### 使用 DCNv4
+
+在配置文件中设置：
+```json
+{
+  "netG": {
+    "dcn_type": "DCNv4"
+  }
+}
+```
+
+默认配置使用 DCNv2：
+```json
+{
+  "netG": {
+    "dcn_type": "DCNv2"
+  }
+}
+```
+
 ## 训练
 
 ### 快速开始

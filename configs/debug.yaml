@@ -51,6 +51,9 @@ datasets:
     random_reverse: false
     use_hflip: true
     use_rot: true
+    in_memory_cache: false
+    in_memory_max_mem_ratio: 0.8
+    in_memory_cache_workers: 16
     dataloader_shuffle: true
     dataloader_num_workers: 12
     dataloader_batch_size: 9

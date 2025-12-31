@@ -23,8 +23,8 @@ import gc  # 垃圾回收
 
 from models.architectures.vrt import VRT as net
 from utils import utils_image as util
-from data.dataset_video_test import VideoRecurrentTestDataset, VideoTestVimeo90KDataset, \
-    SingleVideoRecurrentTestDataset, VFI_DAVIS, VFI_UCF101, VFI_Vid4
+from data.dataset_video_test import VideoRecurrentTestDataset, \
+    SingleVideoRecurrentTestDataset
 from data.select_dataset import define_Dataset
 
 

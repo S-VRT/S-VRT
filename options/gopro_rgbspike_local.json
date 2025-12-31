@@ -3,7 +3,7 @@
   // 基础配置
   // ========================================
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
-  "task": "gopro_tfp8_sgp_searaft"
+  "task": "gopro_tfp8_sgp_spynet_dcn4"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
   ,
   "model": "vrt"
@@ -72,7 +72,7 @@
     //   - "path/to/model.pth"：使用指定的预训练模型路径
     // 注意：E 模型是 EMA（指数移动平均）模型，测试时会优先使用 E 模型
     ,
-    "pretrained_netE": "experiments/gopro_tfp8_sgp_searaft/models/10000_E.pth"
+    "pretrained_netE": null
   }
   // ========================================
   // 数据集配置
@@ -356,8 +356,8 @@
     // 光流模块配置：可选值 'spynet' 或 'sea_raft'。若指定 checkpoint 路径且文件不存在，部分实现会尝试下载或使用随机初始化。
     ,
     "optical_flow": {
-      "module": "sea_raft",
-      "checkpoint": "weights/optical_flow/searaft/Tartan-C-T432x960-S.pth",
+      "module": "spynet",
+      "checkpoint": "weights/optical_flow/spynet/spynet_sintel_final-3d2a1287.pth",
       "params": {}
     }
     // 并行对齐帧数：用于对齐的并行帧数量（支持 2、4、6）
@@ -366,6 +366,11 @@
     ,
     "pa_frames": 2
     // 可变形卷积组数：可变形对齐模块的组数
+    ,
+    // 可变形卷积类型：选择使用的可变形卷积实现（DCNv2 或 DCNv4）
+    //   - "DCNv2": 使用传统的 DCNv2 实现（默认）
+    //   - "DCNv4": 使用新的 DCNv4 实现（速度更快，性能更好）
+    "dcn_type": "DCNv4"
     ,
     "deformable_groups": 16
     // 是否为非盲去噪：false 表示盲去模糊（不知道模糊核）
@@ -548,7 +553,7 @@
     "use_tensorboard": true
     // 是否使用 Weights & Biases (W&B)：true 表示启用 W&B 日志记录
     ,
-    "use_wandb": false
+    "use_wandb": true
     // W&B API 密钥：用于身份验证的 API 密钥（注意：实际使用时建议使用环境变量）
     ,
     "wandb_api_key": "ae83599fc8904d8986df7ba9e6f3328e042dcfb2"
@@ -560,7 +565,7 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_tfp8_sgp_searaft"
+    "wandb_name": "gopro_tfp8_sgp_spynet_dcn4"
     // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
     ,
     "wandb_mode": "offline"
@@ -578,7 +583,7 @@
     "swanlab_workspace": null
     // SwanLab 运行名称：用于区分不同实验
     ,
-    "swanlab_name": "gopro_tfp8_sgp_searaft"
+    "swanlab_name": "gopro_tfp8_sgp_spynet_dcn4"
     // SwanLab 实验描述：可选文本信息
     ,
     "swanlab_description": "offline"

@@ -167,6 +167,14 @@
       // 是否使用旋转数据增强：true 表示使用
       ,
       "use_rot": true
+      // 是否启用数据集的全内存缓存：true 会在 Dataset 初始化时把所有原始 RGB+Spike 帧载入内存
+      // 建议在显存/内存允许时配合较小的 dataloader_num_workers 使用
+      ,
+      "in_memory_cache": false
+      ,
+      "in_memory_max_mem_ratio": 0.8    
+      ,
+      "in_memory_cache_workers": 40
       // 数据加载器配置
       // 是否打乱数据顺序：true 表示每个 epoch 随机打乱数据
       ,
@@ -209,7 +217,7 @@
       "spike_w": 400
       // Spike 数据通道数：4 表示 TFP 体素 (RGB+Spike=7)
       ,
-      "spike_channels": 8
+      "spike_channels": 4
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
@@ -352,8 +360,8 @@
     // 光流模块配置：可选值 'spynet' 或 'sea_raft'。若指定 checkpoint 路径且文件不存在，部分实现会尝试下载或使用随机初始化。
     ,
     "optical_flow": {
-      "module": "sea_raft",
-      "checkpoint": "weights/optical_flow/Tartan-C-T-TSKH-kitti432x960-M.pth",
+      "module": "spynet",
+      "checkpoint": "weights/optical_flow/spynet/spynet_sintel_final-3d2a1287.pth",
       "params": {}
     }
     // 并行对齐帧数：用于对齐的并行帧数量（支持 2、4、6）
@@ -361,6 +369,11 @@
     // 注意：光流计算时只使用 RGB 通道（前 3 个通道），即使输入包含 Spike 通道
     ,
     "pa_frames": 2
+    ,
+    // 可变形卷积类型：选择使用的可变形卷积实现（DCNv2 或 DCNv4）
+    //   - "DCNv2": 使用传统的 DCNv2 实现（默认）
+    //   - "DCNv4": 使用新的 DCNv4 实现（速度更快，性能更好）
+    "dcn_type": "DCNv4"
     // 可变形卷积组数：可变形对齐模块的组数
     ,
     "deformable_groups": 16
@@ -497,7 +510,7 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 2
+    "checkpoint_test": 4
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 2
@@ -553,6 +566,9 @@
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
     "wandb_name": "gopro_nosgp"
+    // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
+    ,
+    "wandb_mode": null
     // 是否使用 SwanLab：true 表示启用 SwanLab 日志记录（默认为 false）
     ,
     "use_swanlab": false

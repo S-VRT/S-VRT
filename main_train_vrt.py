@@ -411,22 +411,23 @@ def main():
             if current_step % opt['train']['checkpoint_save'] == 0 and opt['dist']:
                 barrier_safe()  # 同步所有进程
 
+
             # 特殊处理：当使用静态计算图时，在改变计算图之前提前保存模型
             # 这是因为在分布式训练中使用 use_checkpoint=True 时存在 bug
-            # if opt['use_static_graph'] and (current_step == opt['train']['fix_iter'] - 1):
-            #     current_step += 1
-            #     model.update_learning_rate(current_step)
-            #     if opt['rank'] == 0:
-            #         model.save(current_step)  # 提前保存模型
-            #     # 等待 rank 0 完成保存
-            #     if opt['dist']:
-            #         barrier_safe()
-            #     current_step -= 1  # 恢复步数
-            #     if opt['rank'] == 0:
-            #         logger.info('Saving models ahead of time when changing the computation graph with use_static_graph=True'
-            #                     ' (we need it due to a bug with use_checkpoint=True in distributed training). The training '
-            #                     'will be terminated by PyTorch in the next iteration. Just resume training with the same '
-            #                     '.json config file.')
+            if opt['use_static_graph'] and (current_step == opt['train']['fix_iter'] - 1):
+                current_step += 1
+                model.update_learning_rate(current_step)
+                if opt['rank'] == 0:
+                    model.save(current_step)  # 提前保存模型
+                # 等待 rank 0 完成保存
+                if opt['dist']:
+                    barrier_safe()
+                current_step -= 1  # 恢复步数
+                if opt['rank'] == 0:
+                    logger.info('Saving models ahead of time when changing the computation graph with use_static_graph=True'
+                                ' (we need it due to a bug with use_checkpoint=True in distributed training). The training '
+                                'will be terminated by PyTorch in the next iteration. Just resume training with the same '
+                                '.json config file.')
 
             # -------------------------------
             # 6) 模型测试和评估

@@ -7,7 +7,7 @@ from models.utils.flow import flow_warp
 
 from models.architectures.vrt.attention import WindowAttention
 from models.blocks.mlp import Mlp_GEGLU
-from models.blocks.dcn import DCNv2PackFlowGuided
+from models.blocks.dcn import get_deformable_module
 from models.utils.windows import get_window_size, compute_mask, window_partition, window_reverse
 from models.utils.init import DropPath
 
@@ -306,7 +306,8 @@ class Stage(nn.Module):
                  use_sgp=False,
                  sgp_w=3,
                  sgp_k=3,
-                 sgp_reduction=4):
+                 sgp_reduction=4,
+                 opt=None):
         super(Stage, self).__init__()
         self.pa_frames = pa_frames
 
@@ -363,8 +364,9 @@ class Stage(nn.Module):
         self.linear2 = nn.Linear(dim, dim)
 
         if self.pa_frames:
-            self.pa_deform = DCNv2PackFlowGuided(dim, dim, 3, padding=1, deformable_groups=deformable_groups,
-                                                 max_residue_magnitude=max_residue_magnitude, pa_frames=pa_frames)
+            DCNClass = get_deformable_module(opt)
+            self.pa_deform = DCNClass(dim, dim, 3, padding=1, deformable_groups=deformable_groups,
+                                     max_residue_magnitude=max_residue_magnitude, pa_frames=pa_frames)
             self.pa_fuse = Mlp_GEGLU(dim * (1 + 2), dim * (1 + 2), dim)
 
     def forward(self, x, flows_backward, flows_forward):

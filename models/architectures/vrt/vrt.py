@@ -114,7 +114,8 @@ class VRT(nn.Module):
                  use_sgp=False,
                  sgp_w=3,
                  sgp_k=3,
-                 sgp_reduction=4):
+                 sgp_reduction=4,
+                 opt=None):
         super().__init__()
         self.in_chans = in_chans
         self.out_chans = out_chans
@@ -182,6 +183,7 @@ class VRT(nn.Module):
                         sgp_w=sgp_w,
                         sgp_k=sgp_k,
                         sgp_reduction=sgp_reduction,
+                        opt=opt
                         )
                     )
 

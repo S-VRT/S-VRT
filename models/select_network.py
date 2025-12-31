@@ -43,7 +43,8 @@ def define_G(opt):
                    use_sgp=opt_net.get('use_sgp', False),
                    sgp_w=opt_net.get('sgp_w', 3),
                    sgp_k=opt_net.get('sgp_k', 3),
-                   sgp_reduction=opt_net.get('sgp_reduction', 4))
+                   sgp_reduction=opt_net.get('sgp_reduction', 4),
+                   opt=opt)
 
         # ----------------------------------------
         # RVRT
