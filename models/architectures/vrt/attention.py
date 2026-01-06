@@ -7,6 +7,14 @@ from functools import lru_cache
 
 from models.utils.init import trunc_normal_
 
+# Flash Attention imports with fallback
+try:
+    from flash_attn import flash_attn_func
+    FLASH_ATTN_AVAILABLE = True
+except ImportError:
+    FLASH_ATTN_AVAILABLE = False
+    flash_attn_func = None
+
 
 class WindowAttention(nn.Module):
     """ Window based multi-head mutual attention and self attention.
@@ -20,7 +28,7 @@ class WindowAttention(nn.Module):
         mut_attn (bool): If True, add mutual attention to the module. Default: True
     """
 
-    def __init__(self, dim, window_size, num_heads, qkv_bias=False, qk_scale=None, mut_attn=True):
+    def __init__(self, dim, window_size, num_heads, qkv_bias=False, qk_scale=None, mut_attn=True, use_flash_attn=True):
         super().__init__()
         self.dim = dim
         self.window_size = window_size
@@ -28,6 +36,7 @@ class WindowAttention(nn.Module):
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
         self.mut_attn = mut_attn
+        self.use_flash_attn = use_flash_attn and FLASH_ATTN_AVAILABLE
 
         self.relative_position_bias_table = nn.Parameter(
             torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1) * (2 * window_size[2] - 1),

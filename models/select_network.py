@@ -44,6 +44,11 @@ def define_G(opt):
                    sgp_w=opt_net.get('sgp_w', 3),
                    sgp_k=opt_net.get('sgp_k', 3),
                    sgp_reduction=opt_net.get('sgp_reduction', 4),
+                   use_flash_attn=opt_net.get('use_flash_attn', True),
+                   dcn_config={
+                       'type': opt_net['dcn_type'],
+                       'apply_softmax': opt_net['dcn_apply_softmax']
+                   },
                    opt=opt)
 
         # ----------------------------------------

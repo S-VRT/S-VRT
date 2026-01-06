@@ -52,7 +52,8 @@ class TMSA(nn.Module):
                  use_sgp=False,
                  sgp_w=3,
                  sgp_k=3,
-                 sgp_reduction=4):
+                 sgp_reduction=4,
+                 use_flash_attn=True):
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
@@ -62,6 +63,7 @@ class TMSA(nn.Module):
         self.use_checkpoint_attn = use_checkpoint_attn
         self.use_checkpoint_ffn = use_checkpoint_ffn
         self.use_sgp = use_sgp
+        self.use_flash_attn = use_flash_attn
 
         assert 0 <= self.shift_size[0] < self.window_size[0]
         assert 0 <= self.shift_size[1] < self.window_size[1]
@@ -77,7 +79,7 @@ class TMSA(nn.Module):
             # SGPBlock internally handles drop_path; do not wrap again
             self.drop_path = nn.Identity()
         else:
-            self.attn = WindowAttention(dim, window_size=self.window_size, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, mut_attn=mut_attn)
+            self.attn = WindowAttention(dim, window_size=self.window_size, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, mut_attn=mut_attn, use_flash_attn=use_flash_attn)
             self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         self.mlp = Mlp_GEGLU(in_features=dim, hidden_features=int(dim * mlp_ratio), act_layer=act_layer)
@@ -166,11 +168,12 @@ class TMSAG(nn.Module):
         sgp_k (int): Multiplier for SGP large kernel. Default: 3.
         sgp_reduction (int): Reduction ratio for SGP instant-level branch. Default: 4.
     """
-    def __init__(self, dim, input_resolution, depth, num_heads, window_size=[6,8,8], shift_size=None, mut_attn=True, mlp_ratio=2., qkv_bias=False, qk_scale=None, drop_path=0., norm_layer=nn.LayerNorm, use_checkpoint_attn=False, use_checkpoint_ffn=False, use_sgp=False, sgp_w=3, sgp_k=3, sgp_reduction=4):
+    def __init__(self, dim, input_resolution, depth, num_heads, window_size=[6,8,8], shift_size=None, mut_attn=True, mlp_ratio=2., qkv_bias=False, qk_scale=None, drop_path=0., norm_layer=nn.LayerNorm, use_checkpoint_attn=False, use_checkpoint_ffn=False, use_sgp=False, sgp_w=3, sgp_k=3, sgp_reduction=4, use_flash_attn=True):
         super().__init__()
         self.input_resolution = input_resolution
         self.window_size = window_size
         self.shift_size = list(i // 2 for i in window_size) if shift_size is None else shift_size
+        self.use_flash_attn = use_flash_attn
 
         self.blocks = nn.ModuleList([
             TMSA(
@@ -190,7 +193,8 @@ class TMSAG(nn.Module):
                 use_sgp=use_sgp,
                 sgp_w=sgp_w,
                 sgp_k=sgp_k,
-                sgp_reduction=sgp_reduction
+                sgp_reduction=sgp_reduction,
+                use_flash_attn=use_flash_attn
             )
             for i in range(depth)])
 
@@ -283,6 +287,7 @@ class Stage(nn.Module):
         sgp_w (int): Kernel size for SGP window-level branch. Default: 3.
         sgp_k (int): Multiplier for SGP large kernel. Default: 3.
         sgp_reduction (int): Reduction ratio for SGP instant-level branch. Default: 4.
+        dcn_config (dict): DCN configuration {'type': 'DCNv2'/'DCNv4', 'apply_softmax': bool}.
     """
     def __init__(self,
                  in_dim,
@@ -307,9 +312,12 @@ class Stage(nn.Module):
                  sgp_w=3,
                  sgp_k=3,
                  sgp_reduction=4,
-                 opt=None):
+                 use_flash_attn=True,
+                 opt=None,
+                 dcn_config=None):
         super(Stage, self).__init__()
         self.pa_frames = pa_frames
+        self.use_flash_attn = use_flash_attn
 
         if reshape == 'none':
             self.reshape = nn.Sequential(Rearrange('n c d h w -> n d h w c'),
@@ -364,7 +372,7 @@ class Stage(nn.Module):
         self.linear2 = nn.Linear(dim, dim)
 
         if self.pa_frames:
-            DCNClass = get_deformable_module(opt)
+            DCNClass = get_deformable_module({'dcn': dcn_config})
             self.pa_deform = DCNClass(dim, dim, 3, padding=1, deformable_groups=deformable_groups,
                                      max_residue_magnitude=max_residue_magnitude, pa_frames=pa_frames)
             self.pa_fuse = Mlp_GEGLU(dim * (1 + 2), dim * (1 + 2), dim)

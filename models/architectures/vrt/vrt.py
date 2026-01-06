@@ -115,7 +115,9 @@ class VRT(nn.Module):
                  sgp_w=3,
                  sgp_k=3,
                  sgp_reduction=4,
-                 opt=None):
+                 use_flash_attn=True,
+                 dcn_config=None,  # DCN configuration dict: {'type': 'DCNv2'/'DCNv4', 'apply_softmax': bool}
+                 opt=None):  # Global configuration for initialization
         super().__init__()
         self.in_chans = in_chans
         self.out_chans = out_chans
@@ -124,6 +126,12 @@ class VRT(nn.Module):
         self.recal_all_flows = recal_all_flows
         self.nonblind_denoising = nonblind_denoising
         self.use_sgp = use_sgp
+        self.use_flash_attn = use_flash_attn
+
+        # Parse DCN configuration
+        self.dcn_config = dcn_config or {}
+        self.dcn_type = self.dcn_config.get('type', 'DCNv2')
+        self.dcn_apply_softmax = self.dcn_config.get('apply_softmax', False)
 
         if self.pa_frames:
             if self.nonblind_denoising:
@@ -183,8 +191,8 @@ class VRT(nn.Module):
                         sgp_w=sgp_w,
                         sgp_k=sgp_k,
                         sgp_reduction=sgp_reduction,
-                        opt=opt
-                        )
+                        use_flash_attn=use_flash_attn,
+                        dcn_config={'type': self.dcn_type, 'apply_softmax': self.dcn_apply_softmax})
                     )
 
         # stage8

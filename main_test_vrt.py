@@ -600,7 +600,11 @@ def prepare_model_dataset(args):
                    use_sgp=netG_cfg.get('use_sgp', False),
                    sgp_w=netG_cfg.get('sgp_w', 3),
                    sgp_k=netG_cfg.get('sgp_k', 3),
-                   sgp_reduction=netG_cfg.get('sgp_reduction', 4))
+                   sgp_reduction=netG_cfg.get('sgp_reduction', 4),
+                   dcn_config={
+                       'type': netG_cfg.get('dcn_type', 'DCNv2'),
+                       'apply_softmax': netG_cfg.get('dcn_apply_softmax', False)
+                   })
         
         # Set args for testing
         args.scale = netG_cfg.get('upscale', 1)

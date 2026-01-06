@@ -13,6 +13,7 @@ Spike-VRT (S-VRT) 是一个基于VRT架构的视频恢复框架，通过融合RG
 - **Spike数据支持**：内置Spike数据加载和处理工具
 - **分布式训练**：支持单GPU和多GPU分布式训练
 - **灵活配置**：支持多种数据集和训练配置
+- **DCNv4支持**：可选使用DCNv4代替DCNv2，提升性能并保持完全兼容
 
 ## 环境要求
 
@@ -160,7 +161,8 @@ python -u main_train_vrt.py \
   "netG": {
     "in_chans": 7,  // 输入通道数：3 (RGB) + 4 (Spike TFP)
     "img_size": [6, 224, 224],
-    "window_size": [6, 8, 8]
+    "window_size": [6, 8, 8],
+    "dcn_type": "DCNv2"  // 可选: "DCNv2" (默认) 或 "DCNv4"
   },
   "datasets": {
     "train": {
@@ -175,6 +177,15 @@ python -u main_train_vrt.py \
   }
 }
 ```
+
+### DCNv4支持
+
+项目支持可选使用DCNv4代替传统的DCNv2，通过在配置中设置 `"dcn_type": "DCNv4"` 来启用：
+
+- **DCNv2** (默认): 传统可变形卷积，稳定可靠
+- **DCNv4**: 最新可变形卷积版本，提供更好的性能和收敛速度
+
+DCNv4与DCNv2完全兼容，无需修改其他配置项。DCNv4会自动编译安装，使用前请确保CUDA环境正确配置。
 
 ## 测试
 

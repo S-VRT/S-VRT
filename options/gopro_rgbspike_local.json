@@ -372,6 +372,9 @@
     //   - "DCNv4": 使用新的 DCNv4 实现（速度更快，性能更好）
     "dcn_type": "DCNv4"
     ,
+    // 当使用DCNv4时，启用DCNv4 + Softmax（更接近DCNv2行为）
+    "dcn_apply_softmax": false
+    ,
     "deformable_groups": 16
     // 是否为非盲去噪：false 表示盲去模糊（不知道模糊核）
     ,

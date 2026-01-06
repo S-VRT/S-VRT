@@ -265,7 +265,7 @@
       "dataloader_num_workers": 12
       // 测试/验证批次大小：可根据显存调整
       ,
-      "dataloader_batch_size": 12
+      "dataloader_batch_size": 6
     }
   }
   // ========================================
@@ -374,6 +374,9 @@
     //   - "DCNv2": 使用传统的 DCNv2 实现（默认）
     //   - "DCNv4": 使用新的 DCNv4 实现（速度更快，性能更好）
     "dcn_type": "DCNv4"
+    ,
+    // 当使用DCNv4时，启用DCNv4 + Softmax（更接近DCNv2行为）
+    "dcn_apply_softmax": false
     // 可变形卷积组数：可变形对齐模块的组数
     ,
     "deformable_groups": 16

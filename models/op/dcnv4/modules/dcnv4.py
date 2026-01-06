@@ -40,6 +40,7 @@ class DCNv4(nn.Module):
             remove_center=False,
             output_bias=True,
             without_pointwise=False,
+            apply_softmax=False,  # New parameter for experimental softmax
             **kwargs):
         """
         DCNv4 Module
@@ -75,6 +76,7 @@ class DCNv4(nn.Module):
         self.center_feature_scale = center_feature_scale
         self.remove_center = int(remove_center)
         self.without_pointwise = without_pointwise
+        self.apply_softmax = apply_softmax
 
         self.K =  group * (kernel_size * kernel_size - self.remove_center)
         if dw_kernel_size is not None:
@@ -138,6 +140,26 @@ class DCNv4(nn.Module):
             256,
             self.remove_center
             )
+
+        # Experimental: Apply softmax normalization (similar to DCNv3)
+        if self.apply_softmax:
+            # The output x has shape (N, H, W, C)
+            # We need to apply softmax across the spatial dimensions for each group
+            # Reshape to apply softmax properly
+            B, H, W, C = x.shape
+            # Group the channels: (B, H, W, G, C//G)
+            x_reshaped = x.view(B, H, W, self.group, C // self.group)
+            # Apply softmax along spatial dimensions (H, W) for each group and channel
+            # First transpose to (B, G, C//G, H, W) for softmax
+            x_transposed = x_reshaped.permute(0, 3, 4, 1, 2)  # (B, G, C//G, H, W)
+            # Flatten spatial dims for softmax: (B, G, C//G, H*W)
+            x_flattened = x_transposed.flatten(-2)
+            # Apply softmax
+            x_softmax = F.softmax(x_flattened, dim=-1)
+            # Reshape back
+            x_softmax = x_softmax.view(B, self.group, C // self.group, H, W)
+            # Transpose back to original shape
+            x = x_softmax.permute(0, 3, 4, 1, 2).flatten(-2)
 
         if self.center_feature_scale:
             center_feature_scale = self.center_feature_scale_module(

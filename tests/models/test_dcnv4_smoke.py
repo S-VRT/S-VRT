@@ -165,12 +165,12 @@ class TestDCNv4Integration:
             opt=config
         ).cuda()
 
-        # 创建测试输入
-        batch_size, num_frames, channels, height, width = 1, 4, 32, 64, 64
-        x = torch.randn(batch_size, num_frames, channels, height, width).cuda()
+        # 创建测试输入 (VRT Stage期望格式: [num_frames, channels, depth, height, width])
+        num_frames, channels, depth, height, width = 4, 32, 1, 64, 64
+        x = torch.randn(num_frames, channels, depth, height, width).cuda()
 
-        # 创建光流（模拟）
-        flow_shape = (batch_size, num_frames-1, 2, height, width)
+        # 创建光流（模拟，VRT格式）
+        flow_shape = (num_frames-1, 2, height, width)
         flows_backward = [torch.randn(*flow_shape).cuda()]
         flows_forward = [torch.randn(*flow_shape).cuda()]
 
