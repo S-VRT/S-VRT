@@ -3,7 +3,7 @@
   // 基础配置
   // ========================================
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
-  "task": "gopro_tfp8_sgp_spynet_dcn4"
+  "task": "gopro_tfp8_sgpv2_spynet_dcn4"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
   ,
   "model": "vrt"
@@ -568,7 +568,7 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_tfp8_sgp_spynet_dcn4"
+    "wandb_name": "gopro_tfp8_sgpv2_spynet_dcn4"
     // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
     ,
     "wandb_mode": "offline"
@@ -586,7 +586,7 @@
     "swanlab_workspace": null
     // SwanLab 运行名称：用于区分不同实验
     ,
-    "swanlab_name": "gopro_tfp8_sgp_spynet_dcn4"
+    "swanlab_name": "gopro_tfp8_sgpv2_spynet_dcn4"
     // SwanLab 实验描述：可选文本信息
     ,
     "swanlab_description": "offline"

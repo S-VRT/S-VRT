@@ -70,27 +70,51 @@ class TMSA(nn.Module):
         assert 0 <= self.shift_size[2] < self.window_size[2]
 
         self.norm1 = norm_layer(dim)
-        # Use SGPBlock as a drop-in replacement for self-attention when requested
+        # Use SGPWrapper as a drop-in replacement for self-attention when requested
         if self.use_sgp and not mut_attn:
             # lazy import to avoid circular import at module import time
-            from models.blocks.sgp import SGPBlock
-            self.attn = SGPBlock(dim=dim, norm_layer=norm_layer, drop_path=drop_path,
-                                 sgp_w=sgp_w, sgp_k=sgp_k, sgp_reduction=sgp_reduction)
-            # SGPBlock internally handles drop_path; do not wrap again
-            self.drop_path = nn.Identity()
+            from models.blocks.sgp import SGPWrapper
+            # instantiate SGPWrapper (it may expose `use_inner` to indicate full-block behavior)
+            self.attn = SGPWrapper(dim=dim, kernel_size=sgp_w, k=sgp_k, path_pdrop=drop_path)
+            # record whether the injected attn contains internal identity/FFN
+            self._sgp_use_inner = getattr(self.attn, 'use_inner', True)
+            # decide outer drop_path behavior:
+            # - if attn is full-block (use_inner=True): attn handles its own residual/FFN -> outer should be identity
+            # - if attn is operator-only (use_inner=False): outer block should apply DropPath/residual as usual
+            if self._sgp_use_inner:
+                self.drop_path = nn.Identity()
+            else:
+                self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         else:
             self.attn = WindowAttention(dim, window_size=self.window_size, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, mut_attn=mut_attn, use_flash_attn=use_flash_attn)
             self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
+
+        # According to Figure 4, when using SGP, replace the second norm (norm2) with GroupNorm
+        if self.use_sgp and not mut_attn:
+            # Find a num_groups that divides dim evenly
+            for num_groups in [32, 16, 8, 4, 2, 1]:
+                if dim % num_groups == 0:
+                    break
+            self.norm2 = nn.GroupNorm(num_groups, dim)
+        else:
+            self.norm2 = norm_layer(dim)
         self.mlp = Mlp_GEGLU(in_features=dim, hidden_features=int(dim * mlp_ratio), act_layer=act_layer)
 
     def forward_part1(self, x, mask_matrix):
         B, D, H, W, C = x.shape
+
+        # For SGP (temporal mixing), we don't need window partitioning
+        if self.use_sgp and not hasattr(self.attn, 'mut_attn'):
+            # SGPWrapper handles its own normalization, skip external norm1
+            # Directly apply SGP to 5D input (temporal mixing across spatial positions).
+            # Return the raw attn output; outer caller will decide whether to apply outer residual/drop_path
+            attn_out = self.attn(x)  # SGPWrapper: [B,D,H,W,C] -> [B,D,H,W,C]
+            return attn_out
+
+        # Original WindowAttention path
         window_size, shift_size = get_window_size((D, H, W), self.window_size, self.shift_size)
 
-        # When using SGPBlock (which handles its own normalization), skip external norm1
-        if not (self.use_sgp and not hasattr(self.attn, 'mut_attn')):
-            x = self.norm1(x)
+        x = self.norm1(x)
 
         pad_l = pad_t = pad_d0 = 0
         pad_d1 = (window_size[0] - D % window_size[0]) % window_size[0]
@@ -108,11 +132,8 @@ class TMSA(nn.Module):
 
         x_windows = window_partition(shifted_x, window_size)
 
-        # WindowAttention expects mask argument; SGPBlock does not
-        if hasattr(self.attn, 'mut_attn'):
-            attn_windows = self.attn(x_windows, mask=attn_mask)
-        else:
-            attn_windows = self.attn(x_windows)
+        # WindowAttention expects mask argument
+        attn_windows = self.attn(x_windows, mask=attn_mask)
 
         attn_windows = attn_windows.view(-1, *(window_size + (C,)))
         shifted_x = window_reverse(attn_windows, window_size, B, Dp, Hp, Wp)
@@ -129,18 +150,56 @@ class TMSA(nn.Module):
         return x
 
     def forward_part2(self, x):
-        return self.drop_path(self.mlp(self.norm2(x)))
+        if isinstance(self.norm2, nn.GroupNorm):
+            # GroupNorm expects [..., C] format, need to reshape for 5D input [B,D,H,W,C]
+            B, D, H, W, C = x.shape
+            x_reshaped = x.view(B*D*H*W, C)
+            x_norm = self.norm2(x_reshaped)
+            x_norm = x_norm.view(B, D, H, W, C)
+        else:
+            # Standard LayerNorm for 5D input
+            x_norm = self.norm2(x)
+        return self.drop_path(self.mlp(x_norm))
 
     def forward(self, x, mask_matrix):
-        if self.use_checkpoint_attn:
-            x = x + torch.utils.checkpoint.checkpoint(self.forward_part1, x, mask_matrix)
-        else:
-            x = x + self.forward_part1(x, mask_matrix)
+        # Decide behavior based on whether SGP is injected and whether it is full-block (use_inner)
+        if self.use_sgp and not getattr(self.attn, 'mut_attn', False):
+            # SGP path
+            if getattr(self, '_sgp_use_inner', True):
+                # full-block: the injected attn implements its own residual/FFN internally,
+                # so call it and DO NOT add outer residual/FFN here.
+                if self.use_checkpoint_attn:
+                    x = torch.utils.checkpoint.checkpoint(self.forward_part1, x, mask_matrix)
+                else:
+                    x = self.forward_part1(x, mask_matrix)
+                # outer FFN/residual intentionally skipped
+            else:
+                # operator-only: attn returns operator output (no internal identity/FFN).
+                # We must preserve the original outer residual + FFN semantics.
+                if self.use_checkpoint_attn:
+                    attn_out = torch.utils.checkpoint.checkpoint(self.forward_part1, x, mask_matrix)
+                else:
+                    attn_out = self.forward_part1(x, mask_matrix)
 
-        if self.use_checkpoint_ffn:
-            x = x + torch.utils.checkpoint.checkpoint(self.forward_part2, x)
+                # apply outer DropPath (configured in __init__ according to use_inner)
+                x = x + self.drop_path(attn_out)
+
+                # outer FFN
+                if self.use_checkpoint_ffn:
+                    x = x + torch.utils.checkpoint.checkpoint(self.forward_part2, x)
+                else:
+                    x = x + self.forward_part2(x)
         else:
-            x = x + self.forward_part2(x)
+            # Original WindowAttention path: preserve previous behavior (outer residual + FFN)
+            if self.use_checkpoint_attn:
+                x = x + torch.utils.checkpoint.checkpoint(self.forward_part1, x, mask_matrix)
+            else:
+                x = x + self.forward_part1(x, mask_matrix)
+
+            if self.use_checkpoint_ffn:
+                x = x + torch.utils.checkpoint.checkpoint(self.forward_part2, x)
+            else:
+                x = x + self.forward_part2(x)
 
         return x
 

@@ -33,6 +33,9 @@ def drop_path(x, drop_prob: float = 0., training: bool = False):
     if drop_prob == 0. or not training:
         return x
     keep_prob = 1 - drop_prob
+    # handle edge-case keep_prob == 0 (drop_prob == 1.0) to avoid division by zero
+    if keep_prob <= 0.0:
+        return torch.zeros_like(x)
     shape = (x.shape[0], ) + (1, ) * (x.ndim - 1)
     random_tensor = keep_prob + torch.rand(shape, dtype=x.dtype, device=x.device)
     random_tensor.floor_()
