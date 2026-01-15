@@ -115,6 +115,7 @@ class VRT(nn.Module):
                  sgp_w=3,
                  sgp_k=3,
                  sgp_reduction=4,
+                 sgp_use_partitioned=True,
                  use_flash_attn=True,
                  dcn_config=None,  # DCN configuration dict: {'type': 'DCNv2'/'DCNv4', 'apply_softmax': bool}
                  opt=None):  # Global configuration for initialization
@@ -191,6 +192,7 @@ class VRT(nn.Module):
                         sgp_w=sgp_w,
                         sgp_k=sgp_k,
                         sgp_reduction=sgp_reduction,
+                        sgp_use_partitioned=sgp_use_partitioned,
                         use_flash_attn=use_flash_attn,
                         dcn_config={'type': self.dcn_type, 'apply_softmax': self.dcn_apply_softmax})
                     )
@@ -221,7 +223,8 @@ class VRT(nn.Module):
                       use_sgp=use_sgp,
                       sgp_w=sgp_w,
                       sgp_k=sgp_k,
-                      sgp_reduction=sgp_reduction
+                      sgp_reduction=sgp_reduction,
+                      sgp_use_partitioned=sgp_use_partitioned
                       )
             )
 

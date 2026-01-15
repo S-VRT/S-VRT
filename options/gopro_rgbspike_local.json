@@ -3,7 +3,7 @@
   // 基础配置
   // ========================================
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
-  "task": "gopro_tfp8_sgpv2_spynet_dcn4"
+  "task": "gopro_tfp8_sgpv3_spynet_dcn4"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
   ,
   "model": "vrt"
@@ -34,6 +34,8 @@
   // GPU 设备 ID 列表：指定使用的 GPU（分布式模式下会被忽略）
   ,
   "gpu_ids": [
+    0,
+    1,
     2
   ]
   // 是否启用分布式训练：true 表示启用，会自动检测环境变量
@@ -177,7 +179,7 @@
       "dataloader_num_workers": 12
       // 批次大小：每个批次包含的样本数量
       ,
-      "dataloader_batch_size": 6
+      "dataloader_batch_size": 9
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -418,7 +420,10 @@
     // SGP 瞬时分支的通道缩减比例：默认 4
     ,
     "sgp_reduction": 4
-    
+    // SGP 是否使用窗口化后的数据：true 表示 SGP 接收窗口化后的 3D 数据 [B*nW, Wd*Wh*Ww, C]，false 表示使用 5D 数据 [B, D, H, W, C]
+    ,
+    "sgp_use_partitioned": true
+
     // 初始化类型：网络参数的初始化方式，"default" 表示使用默认初始化
     ,
     "init_type": "default"
@@ -568,7 +573,7 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_tfp8_sgpv2_spynet_dcn4"
+    "wandb_name": "gopro_tfp8_sgpv3_spynet_dcn4"
     // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
     ,
     "wandb_mode": "offline"
@@ -586,7 +591,7 @@
     "swanlab_workspace": null
     // SwanLab 运行名称：用于区分不同实验
     ,
-    "swanlab_name": "gopro_tfp8_sgpv2_spynet_dcn4"
+    "swanlab_name": "gopro_tfp8_sgpv3_spynet_dcn4"
     // SwanLab 实验描述：可选文本信息
     ,
     "swanlab_description": "offline"

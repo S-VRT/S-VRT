@@ -53,6 +53,7 @@ class TMSA(nn.Module):
                  sgp_w=3,
                  sgp_k=3,
                  sgp_reduction=4,
+                 sgp_use_partitioned=True,
                  use_flash_attn=True):
         super().__init__()
         self.dim = dim
@@ -75,7 +76,7 @@ class TMSA(nn.Module):
             # lazy import to avoid circular import at module import time
             from models.blocks.sgp import SGPWrapper
             # instantiate SGPWrapper (it may expose `use_inner` to indicate full-block behavior)
-            self.attn = SGPWrapper(dim=dim, kernel_size=sgp_w, k=sgp_k, path_pdrop=drop_path)
+            self.attn = SGPWrapper(dim=dim, kernel_size=sgp_w, k=sgp_k, path_pdrop=drop_path, sgp_reduction=sgp_reduction, sgp_use_partitioned=sgp_use_partitioned)
             # record whether the injected attn contains internal identity/FFN
             self._sgp_use_inner = getattr(self.attn, 'use_inner', True)
             # decide outer drop_path behavior:
@@ -103,15 +104,16 @@ class TMSA(nn.Module):
     def forward_part1(self, x, mask_matrix):
         B, D, H, W, C = x.shape
 
-        # For SGP (temporal mixing), we don't need window partitioning
-        if self.use_sgp and not hasattr(self.attn, 'mut_attn'):
-            # SGPWrapper handles its own normalization, skip external norm1
-            # Directly apply SGP to 5D input (temporal mixing across spatial positions).
-            # Return the raw attn output; outer caller will decide whether to apply outer residual/drop_path
-            attn_out = self.attn(x)  # SGPWrapper: [B,D,H,W,C] -> [B,D,H,W,C]
+        # Check if we should skip window partitioning for 5D SGP input
+        skip_window_partition = (self.use_sgp and not getattr(self.attn, 'mut_attn', False) and
+                                 not getattr(self.attn, 'sgp_use_partitioned', True))
+
+        if skip_window_partition:
+            # SGP with 5D input: skip window partitioning
+            attn_out = self.attn(x)  # SGPWrapper handles 5D input directly
             return attn_out
 
-        # Original WindowAttention path
+        # Standard path: WindowAttention or SGP with partitioned input
         window_size, shift_size = get_window_size((D, H, W), self.window_size, self.shift_size)
 
         x = self.norm1(x)
@@ -132,7 +134,7 @@ class TMSA(nn.Module):
 
         x_windows = window_partition(shifted_x, window_size)
 
-        # WindowAttention expects mask argument
+        # Apply attention (WindowAttention or SGPWrapper with partitioned input)
         attn_windows = self.attn(x_windows, mask=attn_mask)
 
         attn_windows = attn_windows.view(-1, *(window_size + (C,)))
@@ -227,7 +229,7 @@ class TMSAG(nn.Module):
         sgp_k (int): Multiplier for SGP large kernel. Default: 3.
         sgp_reduction (int): Reduction ratio for SGP instant-level branch. Default: 4.
     """
-    def __init__(self, dim, input_resolution, depth, num_heads, window_size=[6,8,8], shift_size=None, mut_attn=True, mlp_ratio=2., qkv_bias=False, qk_scale=None, drop_path=0., norm_layer=nn.LayerNorm, use_checkpoint_attn=False, use_checkpoint_ffn=False, use_sgp=False, sgp_w=3, sgp_k=3, sgp_reduction=4, use_flash_attn=True):
+    def __init__(self, dim, input_resolution, depth, num_heads, window_size=[6,8,8], shift_size=None, mut_attn=True, mlp_ratio=2., qkv_bias=False, qk_scale=None, drop_path=0., norm_layer=nn.LayerNorm, use_checkpoint_attn=False, use_checkpoint_ffn=False, use_sgp=False, sgp_w=3, sgp_k=3, sgp_reduction=4, sgp_use_partitioned=True, use_flash_attn=True):
         super().__init__()
         self.input_resolution = input_resolution
         self.window_size = window_size
@@ -253,6 +255,7 @@ class TMSAG(nn.Module):
                 sgp_w=sgp_w,
                 sgp_k=sgp_k,
                 sgp_reduction=sgp_reduction,
+                sgp_use_partitioned=sgp_use_partitioned,
                 use_flash_attn=use_flash_attn
             )
             for i in range(depth)])
@@ -295,7 +298,7 @@ class RTMSA(nn.Module):
         sgp_k (int): Multiplier for SGP large kernel. Default: 3.
         sgp_reduction (int): Reduction ratio for SGP instant-level branch. Default: 4.
     """
-    def __init__(self, dim, input_resolution, depth, num_heads, window_size, mlp_ratio=2., qkv_bias=True, qk_scale=None, drop_path=0., norm_layer=nn.LayerNorm, use_checkpoint_attn=False, use_checkpoint_ffn=None, use_sgp=False, sgp_w=3, sgp_k=3, sgp_reduction=4):
+    def __init__(self, dim, input_resolution, depth, num_heads, window_size, mlp_ratio=2., qkv_bias=True, qk_scale=None, drop_path=0., norm_layer=nn.LayerNorm, use_checkpoint_attn=False, use_checkpoint_ffn=None, use_sgp=False, sgp_w=3, sgp_k=3, sgp_reduction=4, sgp_use_partitioned=True):
         super(RTMSA, self).__init__()
         self.residual_group = TMSAG(dim=dim,
                                     input_resolution=input_resolution,
@@ -312,7 +315,8 @@ class RTMSA(nn.Module):
                                     use_sgp=use_sgp,
                                     sgp_w=sgp_w,
                                     sgp_k=sgp_k,
-                                    sgp_reduction=sgp_reduction
+                                    sgp_reduction=sgp_reduction,
+                                    sgp_use_partitioned=sgp_use_partitioned
                                     )
         self.linear = nn.Linear(dim, dim)
 
@@ -371,6 +375,7 @@ class Stage(nn.Module):
                  sgp_w=3,
                  sgp_k=3,
                  sgp_reduction=4,
+                 sgp_use_partitioned=True,
                  use_flash_attn=True,
                  opt=None,
                  dcn_config=None):
@@ -407,7 +412,8 @@ class Stage(nn.Module):
                                      use_sgp=False,
                                      sgp_w=sgp_w,
                                      sgp_k=sgp_k,
-                                     sgp_reduction=sgp_reduction
+                                     sgp_reduction=sgp_reduction,
+                                     sgp_use_partitioned=sgp_use_partitioned
                                      )
         self.linear1 = nn.Linear(dim, dim)
 
@@ -426,7 +432,8 @@ class Stage(nn.Module):
                                      use_sgp=use_sgp,
                                      sgp_w=sgp_w,
                                      sgp_k=sgp_k,
-                                     sgp_reduction=sgp_reduction
+                                     sgp_reduction=sgp_reduction,
+                                     sgp_use_partitioned=sgp_use_partitioned
                                      )
         self.linear2 = nn.Linear(dim, dim)
 

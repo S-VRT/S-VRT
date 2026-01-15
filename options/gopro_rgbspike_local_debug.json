@@ -115,7 +115,7 @@
       }
       // Spike 数据通道数：4 表示 TFP 体素 (RGB+Spike=7)
       ,
-      "spike_channels": 4
+      "spike_channels": 8
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
@@ -217,7 +217,7 @@
       "spike_w": 400
       // Spike 数据通道数：4 表示 TFP 体素 (RGB+Spike=7)
       ,
-      "spike_channels": 4
+      "spike_channels": 8
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
@@ -278,7 +278,7 @@
     // 输入通道数：7 表示 RGB (3) + Spike TFP (4) 通道拼接
     // 当 pa_frames>0 且使用 nearest4 对齐时，conv_first 实际接收 in_chans * 9 = 63 通道
     ,
-    "in_chans": 7
+    "in_chans": 11
     // 上采样倍数：1 表示不进行上采样（保持原始分辨率）
     ,
     "upscale": 1
@@ -412,16 +412,19 @@
     ],
     // SGP (Scalable Granularity Perception) 配置：TriDet 风格的可选注意力替代
     // 当 use_sgp=true 时，纯 self-attention 分支将使用 SGP 而不是标准注意力
-    "use_sgp": false
+    "use_sgp": true
     // SGP 窗口分支的主卷积核大小：默认 3
     ,
     "sgp_w": 3
     // SGP 窗口分支的大卷积核倍数因子：实际核大小 = w * k，默认 3*3=9
     ,
-    "sgp_k": 3
+    "sgp_k": 1.5
     // SGP 瞬时分支的通道缩减比例：默认 4
     ,
-    "sgp_reduction": 4
+    "sgp_reduction": 16
+    // SGP 是否使用窗口化后的数据：true 表示 SGP 接收窗口化后的 3D 数据 [B*nW, Wd*Wh*Ww, C]，false 表示使用 5D 数据 [B, D, H, W, C]
+    ,
+    "sgp_use_partitioned": true
     // 初始化类型：网络参数的初始化方式，"default" 表示使用默认初始化
     ,
     "init_type": "default"
@@ -472,7 +475,7 @@
     // 固定参数配置（用于分阶段训练）
     // 固定参数的迭代次数：在前 fix_iter 次迭代中，fix_keys 指定的参数保持固定
     ,
-    "fix_iter": 2
+    "fix_iter": 6
     // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
     ,
     "fix_lr_mul": 0.125
@@ -513,7 +516,7 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 4
+    "checkpoint_test": 6
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 2

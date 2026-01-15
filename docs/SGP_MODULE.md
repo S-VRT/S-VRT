@@ -43,11 +43,60 @@ SGP（Scalable Granularity Perception）来自 TriDet（arXiv:2303.07347 / CVPR 
   - fused = φ * FC(x) + ψ * (Conv_w(x) + Conv_kw(x))
   - 最终输出由 fused 与 identity（shortcut）按 `use_inner` 的策略决定是否合并。
 
-### 3.3 SGPBlock 内部行为与 `use_inner`
+### 3.4 数据形状变化流程（完整追踪）
+
+SGP模块的数据形状变化经过精心设计，确保时间维度聚合的语义正确性。以下是完整的形状变换流程：
+
+#### VRT输入 → TMSA类
+- **输入**: `[B, D, H, W, C]` (VRT的标准5D格式)
+  - B: batch size（批次大小）
+  - D: temporal depth（时间帧数）
+  - H, W: spatial height/width（空间高宽）
+  - C: channels（特征通道数）
+
+#### TMSA → SGPWrapper（张量适配）
+- **输入**: `[B, D, H, W, C]` (直接传入5D格式，跳过window partition)
+- **内部转换**:
+  1. **重塑为时间序列**: `x.permute(0, 2, 3, 1, 4).reshape(B*H*W, D, C)`
+     - **形状**: `[B*H*W, D, C]`
+     - **语义**: 每个空间位置(H,W)的D帧时间序列独立处理
+  2. **转换为Conv1D格式**: `x_seq.permute(0, 2, 1)`
+     - **形状**: `[B*H*W, C, D]`
+     - **语义**: 转换为channel-first格式供Conv1D使用
+
+#### SGPWrapper → SGPBlock（时间聚合）
+- **输入**: `[B*H*W, C, D]` (3D格式，B*H*W个独立的时间序列)
+- **内部处理**:
+  1. **LayerNorm**: `[B*H*W, C, D]` → `[B*H*W, C, D]`
+  2. **门控分支计算**:
+     - φ (instant-level): `out.mean(dim=-1, keepdim=True)` → `[B*H*W, C, 1]`
+     - ψ (window-level): 通过Conv1D生成 → `[B*H*W, C, D]`
+  3. **多分支卷积**:
+     - fc_branch: `[B*H*W, C, D]` (pointwise conv)
+     - convw: `[B*H*W, C, D]` (kernel_size=sgp_w)
+     - convkw: `[B*H*W, C, D]` (kernel_size=up_size)
+  4. **融合**: `φ*fc_branch + ψ*(convw + convkw)` → `[B*H*W, C, D]`
+
+#### SGPBlock → SGPWrapper（输出转换）
+- **从SGPBlock输出**: `[B*H*W, C, D]`
+- **转换步骤**:
+  1. **转回序列格式**: `y_conv.permute(0, 2, 1)` → `[B*H*W, D, C]`
+  2. **恢复空间格式**: `y_seq.reshape(B, H, W, D, C).permute(0, 3, 1, 2, 4)` → `[B, D, H, W, C]`
+
+#### TMSA输出
+- **最终输出**: `[B, D, H, W, C]` (与输入形状完全相同)
+
+#### 关键设计要点
+1. **空间位置独立**: 每个(H,W)位置的时间序列独立进行SGP聚合
+2. **形状守恒**: 输入输出都是5D格式 `[B,D,H,W,C]`
+3. **时间维度聚合**: 只在D(时间)维度进行卷积，不涉及空间维度混合
+4. **批量处理优化**: 将所有空间位置展平后批量处理，提高计算效率
+
+### 3.5 SGPBlock 内部行为与 `use_inner`
 
 - 为了支持两类可比消融，代码实现中提供 `use_inner` 参数（**默认值为 True**，即保留 TriDet 的原始行为）：
-  - `use_inner=True`（完整替换模式，默认）：SGPBlock 内部完成 `LN -> SGP -> DropPath -> identity add -> GN -> FFN`（即 SGPBlock 封装了内部的 residual + 内部 FFN），这最接近 TriDet 的“完整图示”实现；在这种模式下，外层不应再对该子层重复做外层残差/FFN（以避免双重残差）。  
-  - `use_inner=False`（算子替换模式）：SGPBlock 只返回 fused（或 fused + 内部 drop_path），外层 Transformer block 负责 `x + DropPath(SGP(...))` 与后续 `norm2 + FFN`，这是做“仅替换 self-attn 算子”的首选设置，便于把性能变化归因到 SGP 运算本身。
+  - `use_inner=True`（完整替换模式，默认）：SGPBlock 内部完成 `LN -> SGP -> DropPath -> identity add -> GN -> FFN`（即 SGPBlock 封装了内部的 residual + 内部 FFN），这最接近 TriDet 的"完整图示"实现；在这种模式下，外层不应再对该子层重复做外层残差/FFN（以避免双重残差）。
+  - `use_inner=False`（算子替换模式）：SGPBlock 只返回 fused（或 fused + 内部 drop_path），外层 Transformer block 负责 `x + DropPath(SGP(...))` 与后续 `norm2 + FFN`，这是做"仅替换 self-attn 算子"的首选设置，便于把性能变化归因到 SGP 运算本身。
 
 ### 3.4 DropPath / AffineDropPath 与 Norm 行为
 
@@ -209,9 +258,14 @@ flowchart LR
 - `SGPBlock` 的内部卷积以 channel-first `[N, C, T]` 形式工作（`N = B*H*W`）。
 - `LayerNorm` 使用了从 TriDet 复现的 3D-friendly 实现（支持 `[B, C, T]`），并且在 SGP 后、FFN 前将第二个 norm 替换为 `GroupNorm`（当 `use_sgp=True` 且该层为 self-only 时）。
 
-示例：常见 shape conservation（单次前向）  
-- 输入（VRT block）： `x.shape = [B, D, H, W, C] = [2, 8, 4, 4, 64]`  
-- SGPWrapper 输出： `y.shape = [2, 8, 4, 4, 64]`（经单元测试与 smoke tests 验证）
+示例：常见 shape conservation（单次前向）
+- 输入（VRT block）： `x.shape = [B, D, H, W, C] = [2, 8, 4, 4, 64]`
+- SGPWrapper 内部处理：
+  - 重塑后：`[2*4*4, 8, 64] = [32, 8, 64]`
+  - Conv1D格式：`[32, 64, 8]`
+  - SGPBlock输出：`[32, 64, 8]`
+  - 转换回：`[32, 8, 64]` → `[2, 8, 4, 4, 64]`
+- 最终输出： `y.shape = [2, 8, 4, 4, 64]`（经单元测试与 smoke tests 验证）
 
 ## 6. 验收标准与 Smoke Tests（必须通过）
 
@@ -241,9 +295,12 @@ from models.blocks.sgp import SGPWrapper
 device = torch.device('cpu')
 sgp = SGPWrapper(dim=64).to(device)
 x = torch.randn(2, 8, 4, 4, 64).to(device)  # [B,D,H,W,C]
+print(f'Input shape: {x.shape}')
+
 with torch.no_grad():
     y = sgp(x)
-print('in', x.shape, 'out', y.shape)
+print(f'Output shape: {y.shape}')
+print('Shape conservation verified!' if x.shape == y.shape else 'Shape mismatch!')
 PY
 ```
 
@@ -285,7 +342,10 @@ PY
 
 ## 7. 调试与验证建议
 
-1. **模块单测**：在 `models/sgp_vrt.py` 中添加随机张量单元测试，确认 `SGPBlock` 保持张量形状 `(B_, N, C)` 不变。
+1. **模块单测**：在 `models/blocks/sgp.py` 中添加随机张量单元测试，确认：
+   - `SGPWrapper` 保持5D形状 `[B,D,H,W,C]` 不变
+   - `SGPBlock` 保持3D形状 `[B*H*W, C, D]` 不变
+   - 内部重塑过程：`[B,D,H,W,C]` → `[B*H*W, D, C]` → `[B*H*W, C, D]` → `[B*H*W, D, C]` → `[B,D,H,W,C]`
 2. **已存在的测试（参考）**：本仓库包含丰富的 pytest 用例（`tests/models/test_sgp_integration.py`），覆盖：
    - `SGPWrapper` 只接受 5D 输入并保持输出形状；  
    - `SGPBlock` 的 phi/psi 分支计算与图结构一致；  
@@ -298,4 +358,5 @@ PY
 ---
 
 如需进一步扩展（例如引入可学习 `sgp_k` 或与多尺度 attention 混合），建议在本文件中补充实验记录与设计思路，保持文档与代码一致。
+
 
