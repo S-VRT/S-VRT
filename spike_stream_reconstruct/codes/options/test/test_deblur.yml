@@ -1,0 +1,41 @@
+#### general settings
+name: 65_xv4k # experiment params. support debug.
+model: SpikeDeblur
+gpu_ids: [2]
+
+#### description
+description: "65_xv4k"
+
+#### datasets
+datasets:
+  train:
+    length_spike: 65
+
+  val:
+    d_name: X4K1000FPS
+    dataset_root: '/home/data10T/jyzhang/x4k1000fps/'
+    reduce_scale: 1
+    length_spike: 65
+
+    n_workers: 8
+    batch_size: 8
+    crop_size: 0
+
+  test:
+    d_name: X4K1000FPS
+    dataset_root: '/home/data10T/jyzhang/x4k1000fps/'
+    reduce_scale: 50
+    length_spike: 65
+
+    n_workers: 8
+    batch_size: 8
+    crop_size: 0
+
+#### path
+path:
+  pretrain_model: "xxx.pth"
+  strict_load: true
+
+#### training settings
+train:
+  manual_seed: 1314
