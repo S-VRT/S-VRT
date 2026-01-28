@@ -79,10 +79,6 @@ def sobel_l1_loss(pred, target):
         F.conv2d(target, sobel_x, padding=1) + F.conv2d(target, sobel_y, padding=1)
     )
 
-
-# ===============================
-# 3️⃣ SNN Residual Enhancer
-# ===============================
 class SNNResidualEnhancer(nn.Module):
     def __init__(self, beta=0.9):
         super().__init__()
@@ -106,9 +102,6 @@ class SNNResidualEnhancer(nn.Module):
             x, mem2 = self.lif2(x, mem2)
         return self.conv3(x)
 
-# ===============================
-# 4️⃣ Training
-# ===============================
 def train(root_spike, root_gt, epochs=20, batch_size=1, lr=2e-4):
     dataset = GoProSpikeSNNDataset(root_spike, root_gt)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -138,9 +131,6 @@ def train(root_spike, root_gt, epochs=20, batch_size=1, lr=2e-4):
         print(f"[Epoch {ep:03d}] Loss {loss_sum/len(loader):.6f}")
         torch.save(model.state_dict(), f"checkpoints/snn_epoch_{ep}.pth")
 
-# ===============================
-# 5️⃣ Inference
-# ===============================
 @torch.no_grad()
 def infer(dat_path, out_path):
     spike = load_vidar_dat(dat_path, width=W, height=H)
@@ -162,9 +152,6 @@ def infer(dat_path, out_path):
     cv2.imwrite(out_path, (out[0,0].cpu().numpy()*255).astype(np.uint8))
     print(f"✔ Saved {out_path}")
 
-# ===============================
-# 6️⃣ Main
-# ===============================
 if __name__ == "__main__":
     train(
         root_spike="GOPRO_Large_spike_seq/train",
