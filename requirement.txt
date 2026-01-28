@@ -13,3 +13,4 @@ wandb
 swanlab
 matplotlib
 flash-attn>=2.8.0
+snntorch
