@@ -214,6 +214,6 @@ if __name__ == "__main__":
     result(
         "GOPRO_Large_spike_seq/train/",
         "output",
-         save_image=True, 
-         return_result=False
+         save_image=False, 
+         return_result=True
     )
