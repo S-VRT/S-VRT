@@ -79,6 +79,7 @@ def sobel_l1_loss(pred, target):
         F.conv2d(target, sobel_x, padding=1) + F.conv2d(target, sobel_y, padding=1)
     )
 
+
 class SNNResidualEnhancer(nn.Module):
     def __init__(self, beta=0.9):
         super().__init__()
@@ -102,7 +103,8 @@ class SNNResidualEnhancer(nn.Module):
             x, mem2 = self.lif2(x, mem2)
         return self.conv3(x)
 
-def train(root_spike, root_gt, epochs=20, batch_size=1, lr=2e-4):
+def train(root_spike, root_gt, epochs=100, batch_size=1, lr=2e-4):
+    
     dataset = GoProSpikeSNNDataset(root_spike, root_gt)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
@@ -132,34 +134,82 @@ def train(root_spike, root_gt, epochs=20, batch_size=1, lr=2e-4):
         torch.save(model.state_dict(), f"checkpoints/snn_epoch_{ep}.pth")
 
 @torch.no_grad()
-def infer(dat_path, out_path):
-    spike = load_vidar_dat(dat_path, width=W, height=H)
-    center = spike.shape[0] // 2
-
-    spike_window = spike[center - SPIKE_WIN//2 : center + SPIKE_WIN//2]
-    spike_window = torch.from_numpy(spike_window).float().unsqueeze(0).to(device)
-
-    tfp = middleTFP(spike, center)
-    tfp = (tfp - tfp.min()) / (tfp.max() - tfp.min() + 1e-6)
-    tfp = torch.from_numpy(tfp).float().unsqueeze(0).unsqueeze(0).to(device)
+@torch.no_grad()
+def result(root_spike_seq, out_root=None, save_image=False, return_result=False):
 
     model = SNNResidualEnhancer().to(device)
-    model.load_state_dict(torch.load("checkpoints/snn_epoch_20.pth", map_location=device))
+    model.load_state_dict(
+        torch.load("checkpoints/snn_epoch_100.pth", map_location=device)
+    )
     model.eval()
 
-    out = torch.clamp(tfp + model(spike_window), 0, 1)
-    os.makedirs("output", exist_ok=True)
-    cv2.imwrite(out_path, (out[0,0].cpu().numpy()*255).astype(np.uint8))
-    print(f"✔ Saved {out_path}")
+    results_list = []
+
+    if save_image and out_root is not None:
+        os.makedirs(out_root, exist_ok=True)
+
+    for seq in sorted(os.listdir(root_spike_seq)):
+        spike_dir = os.path.join(root_spike_seq, seq, "spike")
+        if not os.path.isdir(spike_dir):
+            continue
+
+        out_seq_dir = os.path.join(out_root, seq) if out_root else None
+        if save_image and out_seq_dir:
+            os.makedirs(out_seq_dir, exist_ok=True)
+
+        for fname in sorted(os.listdir(spike_dir)):
+            if not fname.endswith(".dat"):
+                continue
+
+            dat_path = os.path.join(spike_dir, fname)
+
+            spike = load_vidar_dat(dat_path, width=W, height=H)
+            center = spike.shape[0] // 2
+            spike_window = spike[
+                center - SPIKE_WIN // 2 : center + SPIKE_WIN // 2
+            ]
+            if spike_window.shape[0] < SPIKE_WIN:
+                spike_window = np.pad(
+                    spike_window,
+                    ((0, SPIKE_WIN - spike_window.shape[0]), (0, 0), (0, 0))
+                )
+            spike_window = torch.from_numpy(spike_window).float().unsqueeze(0).to(device)
+
+            tfp = middleTFP(spike, center)
+            tfp = (tfp - tfp.min()) / (tfp.max() - tfp.min() + 1e-6)
+            tfp = torch.from_numpy(tfp).float().unsqueeze(0).unsqueeze(0).to(device)
+
+            out = torch.clamp(tfp + model(spike_window), 0, 1)
+        
+            if save_image and out_seq_dir:
+                out_img = (out[0, 0].cpu().numpy() * 255).astype(np.uint8)
+                out_path = os.path.join(out_seq_dir, fname.replace(".dat", ".png"))
+                cv2.imwrite(out_path, out_img)
+
+            if return_result:
+                results_list.append({
+                    "seq": seq,
+                    "name": fname.replace(".dat", ""),
+                    "pred": out.detach()  # [1,1,H,W]
+                })
+
+    if not return_result:
+        print("finished")
+
+    if return_result:
+        return results_list
+
 
 if __name__ == "__main__":
     train(
         root_spike="GOPRO_Large_spike_seq/train",
         root_gt="GOPRO_Large/train",
-        epochs=20
-    )
+        epochs=100
+     )
 
-    infer(
-        "GOPRO_Large_spike_seq/train/GOPR0884_11_00/spike/000226.dat",
-        "output/snn_enhanced.png"
+    result(
+        "GOPRO_Large_spike_seq/train/",
+        "output",
+         save_image=True, 
+         return_result=False
     )
