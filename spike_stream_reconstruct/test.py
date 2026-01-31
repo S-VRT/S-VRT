@@ -134,7 +134,6 @@ def train(root_spike, root_gt, epochs=100, batch_size=1, lr=2e-4):
         torch.save(model.state_dict(), f"checkpoints/snn_epoch_{ep}.pth")
 
 @torch.no_grad()
-@torch.no_grad()
 def result(root_spike_seq, out_root=None, save_image=False, return_result=False):
 
     model = SNNResidualEnhancer().to(device)
