@@ -42,14 +42,8 @@ def edge_loss(pred, gt):
 
     return F.l1_loss(pred_edge, gt_edge)
 
-
-# -------------------------
-# Dataset-level evaluation
-# -------------------------
 def eval_tfp_dataset(root_spike, root_gt, save_vis=False):
-    l1_sum = edge_sum = loss_sum = 0.0
-    psnr_sum = ssim_sum = 0.0
-    cnt = 0
+    seq_metrics = {}  # 存储每个序列指标
 
     for seq in sorted(os.listdir(root_spike)):
         spike_dir = os.path.join(root_spike, seq, "spike")
@@ -57,6 +51,10 @@ def eval_tfp_dataset(root_spike, root_gt, save_vis=False):
 
         if not os.path.isdir(spike_dir):
             continue
+
+        l1_sum = edge_sum = loss_sum = 0.0
+        psnr_sum = ssim_sum = 0.0
+        cnt = 0
 
         for fname in sorted(os.listdir(spike_dir)):
             if not fname.endswith(".dat"):
@@ -93,7 +91,7 @@ def eval_tfp_dataset(root_spike, root_gt, save_vis=False):
             gt_np  = gt[0, 0].detach().cpu().numpy()
 
             tfp_np = np.clip(tfp_np, 0, 1)
-            gt_np  = np.clip(gt_np,  0, 1)
+            gt_np  = np.clip(gt_np, 0, 1)
 
             psnr_val = psnr(gt_np, tfp_np, data_range=1.0)
             ssim_val = ssim(gt_np, tfp_np, data_range=1.0)
@@ -113,23 +111,32 @@ def eval_tfp_dataset(root_spike, root_gt, save_vis=False):
                 os.makedirs("tfp_vis", exist_ok=True)
                 cv2.imwrite(f"tfp_vis/{seq}_{fname[:-4]}.png", vis)
 
-    # -------- Final report --------
-    print("========== TFP Dataset Evaluation ==========")
-    print(f"Samples     : {cnt}")
-    print(f"L1 Loss     : {l1_sum / cnt:.6f}")
-    print(f"Edge Loss   : {edge_sum / cnt:.6f}")
-    print(f"Total Loss  : {loss_sum / cnt:.6f}")
-    print(f"PSNR        : {psnr_sum / cnt:.2f} dB")
-    print(f"SSIM        : {ssim_sum / cnt:.4f}")
-    print("============================================")
+        if cnt > 0:
+            seq_metrics[seq] = {
+                "l1": l1_sum / cnt,
+                "edge": edge_sum / cnt,
+                "total": loss_sum / cnt,
+                "psnr": psnr_sum / cnt,
+                "ssim": ssim_sum / cnt,
+                "count": cnt
+            }
 
+    # -------- Find best sequence --------
+    best_psnr_seq = max(seq_metrics.items(), key=lambda x: x[1]["psnr"])
+    best_ssim_seq = max(seq_metrics.items(), key=lambda x: x[1]["ssim"])
 
-# -------------------------
-# Run
-# -------------------------
+    # -------- Report --------
+    print("========== TFP Sequence Evaluation ==========")
+    for seq, m in seq_metrics.items():
+        print(f"{seq} | PSNR: {m['psnr']:.2f} | SSIM: {m['ssim']:.4f} | Total Loss: {m['total']:.6f}")
+
+    print("\n===== Best Sequences =====")
+    print(f"Best PSNR sequence: {best_psnr_seq[0]} -> PSNR: {best_psnr_seq[1]['psnr']:.2f}")
+    print(f"Best SSIM sequence: {best_ssim_seq[0]} -> SSIM: {best_ssim_seq[1]['ssim']:.4f}")
+
 if __name__ == "__main__":
     eval_tfp_dataset(
         root_spike="GOPRO_Large_spike_seq/train",
         root_gt="GOPRO_Large/train",
-        save_vis=False   # True 就会保存 TFP 可视化
+        save_vis=False  
     )
