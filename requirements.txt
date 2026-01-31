@@ -19,5 +19,6 @@ basicsr>=1.4.2
 torch
 torchvision
 psutil>=5.9
+snntorch
 
 
