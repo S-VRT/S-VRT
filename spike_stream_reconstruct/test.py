@@ -19,7 +19,12 @@ def set_seed(seed=42):
 set_seed(42)
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-H, W = 360, 640
+'''
+After calculation, to obtain correct spike binary images, the GoPro Spike streams obtained from the official source should have a width W of 640 and a height H that is a multiple of 360, 
+resulting in data with the shape [T × H × W].
+'''
+H, W = 360, 640 # Gopro spike streams
+
 SPIKE_WIN = 8  # SNN windows
 
 class GoProSpikeSNNDataset(Dataset):
