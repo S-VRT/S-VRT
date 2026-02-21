@@ -84,9 +84,9 @@
     "train": {
       // 数据集名称：用于标识数据集
       "name": "train_dataset"
-      // 数据集类型：VideoRecurrentTrainDataset 表示支持 RGB 数据的视频循环训练数据集
+      // 数据集类型：TrainDataset 表示支持 RGB 数据的视频循环训练数据集
       ,
-      "dataset_type": "VideoRecurrentTrainDataset"
+      "dataset_type": "TrainDataset"
       // 真实标签（Ground Truth）数据路径：清晰视频帧的存储路径
       ,
       "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/train_GT"
@@ -155,9 +155,9 @@
     "test": {
       // 数据集名称：用于标识测试数据集
       "name": "test_dataset"
-      // 数据集类型：VideoRecurrentTestDataset 表示视频循环测试数据集
+      // 数据集类型：TestDataset 表示视频循环测试数据集
       ,
-      "dataset_type": "VideoRecurrentTestDataset"
+      "dataset_type": "TestDataset"
       // 真实标签数据路径：测试集的清晰视频帧路径
       ,
       "dataroot_gt": "/media/mallm/hd4t/modelrepostore/datasets/gopro_small/GOPRO_Large/test_GT"
@@ -274,8 +274,6 @@
     ]
     // SPyNet 光流网络路径：null 表示自动下载预训练的 SpyNet 模型
     // 如果指定路径但文件不存在，会自动从 GitHub 下载
-    ,
-    "spynet_path": "model_zoo/vrt/spynet_sintel_final-3d2a1287.pth"
     // 光流模块配置：可选值 'spynet' 或 'sea_raft'。若指定 checkpoint 路径且文件不存在，部分实现会尝试下载或使用随机初始化。
     ,
     "optical_flow": {

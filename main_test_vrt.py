@@ -23,8 +23,8 @@ import gc  # 垃圾回收
 
 from models.architectures.vrt import VRT as net
 from utils import utils_image as util
-from data.dataset_video_test import VideoRecurrentTestDataset, \
-    SingleVideoRecurrentTestDataset
+from data.dataset_video_test import TestDataset, \
+    SingleTestDataset
 from data.select_dataset import define_Dataset
 
 
@@ -268,10 +268,10 @@ def main():
             })
             test_set = define_Dataset(dataset_opt)
         else:
-            test_set = VideoRecurrentTestDataset({'dataroot_gt':args.folder_gt, 'dataroot_lq':args.folder_lq,
+            test_set = TestDataset({'dataroot_gt':args.folder_gt, 'dataroot_lq':args.folder_lq,
                                                   'sigma':args.sigma, 'num_frame':-1, 'cache_data': False})
     else:
-        test_set = SingleVideoRecurrentTestDataset({'dataroot_gt':args.folder_gt, 'dataroot_lq':args.folder_lq,
+        test_set = SingleTestDataset({'dataroot_gt':args.folder_gt, 'dataroot_lq':args.folder_lq,
                                               'sigma':args.sigma, 'num_frame':-1, 'cache_data': False})
 
     mem_after_dataset = log_memory_stage('After creating test dataset', rank)
@@ -588,8 +588,7 @@ def prepare_model_dataset(args):
                    indep_reconsts=netG_cfg.get('indep_reconsts', []),
                    embed_dims=netG_cfg['embed_dims'],
                    num_heads=netG_cfg['num_heads'],
-                   spynet_path=netG_cfg.get('spynet_path'),
-                   optical_flow=netG_cfg.get('optical_flow', None),  # Add optical_flow config
+                   optical_flow=netG_cfg['optical_flow'],
                    pa_frames=netG_cfg.get('pa_frames', 2),
                    deformable_groups=netG_cfg.get('deformable_groups', 16),
                    nonblind_denoising=netG_cfg.get('nonblind_denoising', False),

@@ -38,7 +38,7 @@ class TestVRTStaticGraphCompatibility:
             },
             'datasets': {
                 'train': {
-                    'dataset_type': 'VideoRecurrentTrainDataset',
+                    'dataset_type': 'TrainDataset',
                     'dataroot_gt': '/tmp/test/data',
                     'dataroot_lq': '/tmp/test/data',
                     'meta_info_file': None,
@@ -387,7 +387,7 @@ class TestVRTStaticGraphCompatibility:
             },
             'datasets': {
                 'train': {
-                    'dataset_type': 'VideoRecurrentTrainDataset',
+                    'dataset_type': 'TrainDataset',
                     'dataroot_gt': '/tmp/test/data',
                     'dataroot_lq': '/tmp/test/data',
                     'meta_info_file': None,

@@ -35,7 +35,7 @@
 
 #### 2.1 Spike 数据加载器
 
-**文件**: `utils/spike_loader.py`
+**文件**: `data/spike_recc/spikecv_loader.py`
 
 - 实现了简化的 spike .dat 文件加载器
 - 移除了 SpikeCV 的在线相机依赖
@@ -230,7 +230,7 @@ print(f"GT shape: {sample['H'].shape}")  # (6, 3, 224, 224)
 ## 文件清单
 
 ### 新增文件
-1. ✅ `utils/spike_loader.py` - Spike 数据加载器
+1. ✅ `data/spike_recc/spikecv_loader.py` - Spike 数据加载器
 2. ✅ `data/dataset_video_train_rgbspike.py` - RGB+Spike Dataset
 3. ✅ `options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json` - 训练配置
 4. ✅ `trainsets/gopro_spike/GOPRO_Large_spike_seq/config.yaml` - Spike 数据配置

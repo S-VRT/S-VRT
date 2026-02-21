@@ -7,6 +7,28 @@ from models.registry import register_model
 def build_vrt(**kwargs):
     return VRT(**kwargs)
 
-__all__ = ['compute_flows_2frames', 'VRT', 'build_vrt']
+# Import SNN functionality
+from .snn import (
+    SNNResidualEnhancer,
+    GoProSpikeSNNDataset,
+    train as train_snn,
+    test as test_snn,
+    evaluate as evaluate_snn,
+    sobel_l1_loss,
+    edge_loss
+)
+
+__all__ = [
+    'compute_flows_2frames', 
+    'VRT', 
+    'build_vrt',
+    'SNNResidualEnhancer',
+    'GoProSpikeSNNDataset',
+    'train_snn',
+    'test_snn',
+    'evaluate_snn',
+    'sobel_l1_loss',
+    'edge_loss'
+]
 
 

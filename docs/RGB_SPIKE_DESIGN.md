@@ -724,7 +724,7 @@ def get_flow_2frames(self, x):
   - `datasets.train.spike_channels`: 4（TFP 体素化通道数）
 
 ### 工具函数
-- **`utils/spike_loader.py`**: Spike 数据加载和 TFP 体素化
+- **`data/spike_recc/spikecv_loader.py`**: Spike 数据加载和 TFP 体素化
   - `voxelize_spikes_tfp`: TFP 体素化函数
 
 ### 训练/测试脚本

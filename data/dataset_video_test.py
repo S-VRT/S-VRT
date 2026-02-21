@@ -9,10 +9,12 @@ from PIL import Image
 import cv2
 
 import utils.utils_video as utils_video
-from utils.spike_loader import SpikeStreamSimple, voxelize_spikes_tfp
+from data.spike_recc import SpikeStream, voxelize_spikes_tfp
+from data.spike_recc.middle_tfp.reconstructor import MiddleTFPReconstructor
+from data.spike_recc.snn.reconstructor import SNNReconstructor
 
 
-class VideoRecurrentTestDataset(data.Dataset):
+class TestDataset(data.Dataset):
     """Video test dataset for recurrent architectures, which takes LR video
     frames as input and output corresponding HR video frames. Modified from
     https://github.com/xinntao/BasicSR/blob/master/basicsr/data/reds_dataset.py
@@ -48,7 +50,7 @@ class VideoRecurrentTestDataset(data.Dataset):
     """
 
     def __init__(self, opt):
-        super(VideoRecurrentTestDataset, self).__init__()
+        super(TestDataset, self).__init__()
         self.opt = opt
         self.cache_data = opt['cache_data']
         self.gt_root, self.lq_root = opt['dataroot_gt'], opt['dataroot_lq']
@@ -134,11 +136,11 @@ class VideoRecurrentTestDataset(data.Dataset):
         return len(self.folders)
 
 
-class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
+class TrainDatasetRGBSpike(data.Dataset):
     """Video test dataset that concatenates RGB frames with Spike data channels."""
 
     def __init__(self, opt):
-        super(VideoRecurrentTestDatasetRGBSpike, self).__init__()
+        super(TrainDatasetRGBSpike, self).__init__()
         self.opt = opt
         self.cache_data = opt['cache_data']
         self.gt_root, self.lq_root = opt['dataroot_gt'], opt['dataroot_lq']
@@ -148,16 +150,49 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
         self.spike_root = opt['dataroot_spike']
         self.spike_h = opt.get('spike_h', 250)
         self.spike_w = opt.get('spike_w', 400)
-        self.spike_channels = opt.get('spike_channels', 1)
+        self.spike_channels = opt.get('spike_channels', 4)  # Default updated to 4 for TFP
         self.spike_flipud = opt.get('spike_flipud', True)
         self.spike_folder = opt.get('spike_folder_name', 'spike')
         self.spike_ext = opt.get('spike_filename_ext', 'dat')
         self.tfp_half_win_length = opt.get('tfp_half_win_length', 20)
+        spike_reconstruction_cfg = opt.get('spike_reconstruction', 'spikecv_tfp')
+        if isinstance(spike_reconstruction_cfg, dict):
+            self.spike_reconstruction = str(spike_reconstruction_cfg.get('type', 'spikecv_tfp')).strip().lower()
+            self.middle_tfp_center = int(spike_reconstruction_cfg.get('middle_tfp_center', 44))
+        else:
+            self.spike_reconstruction = str(spike_reconstruction_cfg).strip().lower()
+            self.middle_tfp_center = int(opt.get('middle_tfp_center', 44))
+        
         requested_tfp_device = str(opt.get('tfp_device', 'cpu'))
         if requested_tfp_device.startswith('cuda') and not torch.cuda.is_available():
             print("Requested CUDA device for TFP but CUDA is unavailable. Falling back to CPU.")
             requested_tfp_device = 'cpu'
         self.tfp_device = requested_tfp_device
+        
+        # Initialize spike reconstructors
+        self._middle_tfp_reconstructor = None
+        self._snn_reconstructor = None
+        
+        if self.spike_reconstruction in {'middle_tfp', 'middle-tfp'}:
+            if self.spike_channels != 1:
+                self.spike_channels = 1
+            self._middle_tfp_reconstructor = MiddleTFPReconstructor(
+                spike_h=self.spike_h,
+                spike_w=self.spike_w,
+                center=self.middle_tfp_center,
+            )
+        elif self.spike_reconstruction == 'snn':
+            if self.spike_channels != 1:
+                self.spike_channels = 1
+            snn_cfg = spike_reconstruction_cfg if isinstance(spike_reconstruction_cfg, dict) else {}
+            # Use device from config or fallback to tfp_device
+            snn_device = snn_cfg.get('device', self.tfp_device if self.tfp_device else 'cpu')
+            self._snn_reconstructor = SNNReconstructor(
+                checkpoint_path=snn_cfg.get('checkpoint_path', 'checkpoints/snn_epoch_100.pth'),
+                spike_win=snn_cfg.get('spike_win', 8),
+                center=self.middle_tfp_center,
+                device=snn_device
+            )
         self.rgb_norm_stats = self._build_norm_stats(opt.get('rgb_normalize', None), num_channels=3, preset='imagenet')
         self.spike_norm_stats = self._build_norm_stats(opt.get('spike_normalize', None), num_channels=self.spike_channels)
         self.expected_lq_channels = 3 + self.spike_channels
@@ -203,7 +238,7 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
             self.spike_paths[subfolder_name] = spike_paths
 
             if self.cache_data:
-                print(f'Cache {subfolder_name} for VideoTestDatasetRGBSpike...')
+                print(f'Cache {subfolder_name} for VideoTrainDatasetRGBSpike...')
                 self.imgs_lq[subfolder_name] = utils_video.read_img_seq(img_paths_lq)
                 self.imgs_gt[subfolder_name] = utils_video.read_img_seq(img_paths_gt)
             else:
@@ -214,7 +249,7 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
         
         # 诊断：打印数据集初始化时找到的文件夹
         print(f'\n{"="*80}')
-        print(f'[Dataset Initialization - VideoRecurrentTestDatasetRGBSpike]')
+        print(f'[Dataset Initialization - TrainDatasetRGBSpike]')
         print(f'  Found {len(self.folders)} folders: {self.folders}')
         print(f'  Total samples (frames): {len(self.data_info["folder"])}')
         print(f'  LQ root: {self.lq_root}')
@@ -240,7 +275,7 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
         imgs_lq = torch.cat([imgs_lq, spike_seq], dim=1)
         if imgs_lq.size(1) != self.expected_lq_channels:
             raise ValueError(
-                f"[VideoRecurrentTestDatasetRGBSpike] Expected {self.expected_lq_channels} channels "
+                f"[TrainDatasetRGBSpike] Expected {self.expected_lq_channels} channels "
                 f"but found {imgs_lq.size(1)} for folder {folder}."
             )
         imgs_lq = self._apply_channel_normalization(imgs_lq)
@@ -274,23 +309,34 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
     def _load_spike_voxel(self, spike_path):
         if os.path.exists(spike_path):
             try:
-                spike_stream = SpikeStreamSimple(
-                    spike_path,
+                spike_stream = SpikeStream(
+                    offline=True,
+                    filepath=spike_path,
                     spike_h=self.spike_h,
                     spike_w=self.spike_w,
                     print_dat_detail=False
                 )
-                spike_matrix = spike_stream.get_spike_matrix(flipud=self.spike_flipud)
-                spike_voxel = voxelize_spikes_tfp(
-                    spike_matrix,
-                    num_channels=self.spike_channels,
-                    device=self.tfp_device,
-                    half_win_length=self.tfp_half_win_length,
-                )
+                spike_matrix = spike_stream.get_spike_matrix(flipud=self.spike_flipud)  # (T, H, W)
+                
+                if self.spike_reconstruction in {'middle_tfp', 'middle-tfp'}:
+                    spike_frame = self._middle_tfp_reconstructor(spike_matrix)  # (H, W)
+                    spike_voxel = spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+                elif self.spike_reconstruction == 'snn':
+                    spike_frame = self._snn_reconstructor(spike_matrix)  # (H, W)
+                    spike_voxel = spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+                else:
+                    spike_voxel = voxelize_spikes_tfp(
+                        spike_matrix,
+                        num_channels=self.spike_channels,
+                        device=self.tfp_device,
+                        half_win_length=self.tfp_half_win_length,
+                    )  # (S, H, W)
             except Exception as err:
                 print(f'Failed to load spike data {spike_path}: {err}. Using zeros.')
+                # Use correct channel count based on reconstruction method
                 spike_voxel = np.zeros((self.spike_channels, self.spike_h, self.spike_w), dtype=np.float32)
         else:
+            # Use correct channel count based on reconstruction method
             spike_voxel = np.zeros((self.spike_channels, self.spike_h, self.spike_w), dtype=np.float32)
         return spike_voxel.astype(np.float32)
 
@@ -343,7 +389,7 @@ class VideoRecurrentTestDatasetRGBSpike(data.Dataset):
         return tensor
 
 
-class SingleVideoRecurrentTestDataset(data.Dataset):
+class SingleTestDataset(data.Dataset):
     """Single video test dataset for recurrent architectures, which takes LR video
     frames as input and output corresponding HR video frames (only input LQ path).
 
@@ -377,7 +423,7 @@ class SingleVideoRecurrentTestDataset(data.Dataset):
     """
 
     def __init__(self, opt):
-        super(SingleVideoRecurrentTestDataset, self).__init__()
+        super(SingleTestDataset, self).__init__()
         self.opt = opt
         self.cache_data = opt['cache_data']
         self.lq_root = opt['dataroot_lq']

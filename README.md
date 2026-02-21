@@ -267,7 +267,8 @@ S-VRT/
 ├── data/                          # 数据加载
 │   └── dataset_video_train_rgbspike.py  # RGB+Spike数据集
 ├── utils/                         # 工具函数
-│   ├── spike_loader.py            # Spike数据加载器
+│   ├── spike_recc/            # Spike数据加载与重建 (Spike Reconstruction)
+│   │   ├── spikecv_loader.py  # 基于SpikeCV的加载器
 │   └── ...
 ├── scripts/                       # 脚本工具
 │   └── data_preparation/          # 数据准备脚本
@@ -280,12 +281,12 @@ S-VRT/
 
 - **格式**：二进制文件，包含时间序列的spike事件
 - **分辨率**：默认250×400（可在配置文件中修改）
-- **加载**：使用 `utils/spike_loader.py` 中的工具加载
+- **加载**：使用 `data/spike_recc/spikecv_loader.py` 中的工具加载
 
 ### Spike数据加载示例
 
 ```python
-from utils.spike_loader import SpikeStreamSimple
+from data.spike_recc import SpikeStreamSimple
 
 # 加载Spike数据
 spike_stream = SpikeStreamSimple(

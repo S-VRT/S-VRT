@@ -26,7 +26,7 @@ torchrun --nproc_per_node=3 --master_port=4321 main_train_vrt.py \
 
 ### 测试 Spike 加载器
 ```bash
-python utils/spike_loader.py
+python data/spike_recc/spikecv_loader.py
 ```
 
 **预期输出**:

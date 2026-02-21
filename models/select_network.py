@@ -31,8 +31,7 @@ def define_G(opt):
                    indep_reconsts=opt_net['indep_reconsts'],
                    embed_dims=opt_net['embed_dims'],
                    num_heads=opt_net['num_heads'],
-                   spynet_path=opt_net['spynet_path'],
-                   optical_flow=opt_net.get('optical_flow', None),
+                   optical_flow=opt_net['optical_flow'],
                    pa_frames=opt_net['pa_frames'],
                    deformable_groups=opt_net['deformable_groups'],
                    nonblind_denoising=opt_net['nonblind_denoising'],
@@ -65,7 +64,7 @@ def define_G(opt):
                    embed_dims=opt_net['embed_dims'],
                    num_heads=opt_net['num_heads'],
                    inputconv_groups=opt_net['inputconv_groups'],
-                   spynet_path=opt_net['spynet_path'],
+
                    deformable_groups=opt_net['deformable_groups'],
                    attention_heads=opt_net['attention_heads'],
                    attention_window=opt_net['attention_window'],

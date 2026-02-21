@@ -15,30 +15,14 @@ def define_Dataset(dataset_opt):
     # -----------------------------------------
     # video restoration
     # -----------------------------------------
-    if dataset_type in ['videorecurrenttraindataset']:
-        from data.dataset_video_train import VideoRecurrentTrainDataset as D
-    elif dataset_type in ['videorecurrenttrainnonblinddenoisingdataset']:
-        from data.dataset_video_train import VideoRecurrentTrainNonblindDenoisingDataset as D
-    elif dataset_type in ['videorecurrenttrainvimeodataset']:
-        from data.dataset_video_train import VideoRecurrentTrainVimeoDataset as D
-    elif dataset_type in ['videorecurrenttrainvimeovfidataset']:
-        from data.dataset_video_train import VideoRecurrentTrainVimeoVFIDataset as D
-    elif dataset_type in ['videorecurrenttraindatasetrgbspike']:
-        from data.dataset_video_train_rgbspike import VideoRecurrentTrainDatasetRGBSpike as D
-    elif dataset_type in ['videorecurrenttestdataset']:
-        from data.dataset_video_test import VideoRecurrentTestDataset as D
-    elif dataset_type in ['videorecurrenttestdatasetrgbspike']:
-        from data.dataset_video_test import VideoRecurrentTestDatasetRGBSpike as D
-    elif dataset_type in ['singlevideorecurrenttestdataset']:
-        from data.dataset_video_test import SingleVideoRecurrentTestDataset as D
-    elif dataset_type in ['videotestvimeo90kdataset']:
-        from data.dataset_video_test import VideoTestVimeo90KDataset as D
-    elif dataset_type in ['vfi_davis']:
-        from data.dataset_video_test import VFI_DAVIS as D
-    elif dataset_type in ['vfi_ucf101']:
-        from data.dataset_video_test import VFI_UCF101 as D
-    elif dataset_type in ['vfi_vid4']:
-        from data.dataset_video_test import VFI_Vid4 as D
+    if dataset_type in ['TrainDataset']:
+        from data.dataset_video_train import TrainDataset as D
+    elif dataset_type in ['TrainDatasetRGBSpike']:
+        from data.dataset_video_train_rgbspike import TrainDatasetRGBSpike as D
+    elif dataset_type in ['TestDataset']:
+        from data.dataset_video_test import TestDataset as D
+    elif dataset_type in ['singleTestDataset']:
+        from data.dataset_video_test import SingleTestDataset as D
 
     else:
         raise NotImplementedError('Dataset [{:s}] is not found.'.format(dataset_type))

@@ -71,7 +71,7 @@ class VRT(nn.Module):
         qk_scale (float): Override default qk scale of head_dim ** -0.5 if set.
         drop_path_rate (float): Stochastic depth rate. Default: 0.2.
         norm_layer (obj): Normalization layer. Default: nn.LayerNorm.
-        spynet_path (str): Pretrained SpyNet model path.
+        optical_flow (dict): Configuration for the optical flow module.
         pa_frames (float): Number of warpped frames. Default: 2.
         deformable_groups (float): Number of deformable groups. Default: 16.
         recal_all_flows (bool): If True, derive (t,t+2) and (t,t+3) flows from (t,t+1). Default: False.
@@ -101,7 +101,6 @@ class VRT(nn.Module):
                  qk_scale=None,
                  drop_path_rate=0.2,
                  norm_layer=nn.LayerNorm,
-                 spynet_path=None,
                  optical_flow=None,
                  pa_frames=2,
                  deformable_groups=16,
@@ -145,10 +144,10 @@ class VRT(nn.Module):
 
         if self.pa_frames:
             # Instantiate a pluggable optical-flow backend via factory.
-            # Accept configuration from `optical_flow` dict (from options) or fall back to spynet defaults.
+            # Accept configuration from `optical_flow` dict (from options).
             of_cfg = optical_flow or {}
             module_name = of_cfg.get('module', 'spynet')
-            checkpoint_path = of_cfg.get('checkpoint', spynet_path)
+            checkpoint_path = of_cfg.get('checkpoint')
             params = of_cfg.get('params', {})
             # create optical flow module but do NOT move it to a specific device here;
             # upper layers (training script / select_network) are responsible for device placement.
@@ -458,6 +457,3 @@ class VRT(nn.Module):
 
 
 __all__ = ['VRT']
-
-
-

@@ -8,13 +8,15 @@ from torch.utils.data import get_worker_info
 import cv2
 
 import utils.utils_video as utils_video
-from utils.spike_loader import SpikeStreamSimple, voxelize_spikes_tfp
+from data.spike_recc import SpikeStream, voxelize_spikes_tfp
+from data.spike_recc.middle_tfp.reconstructor import MiddleTFPReconstructor
+from data.spike_recc.snn.reconstructor import SNNReconstructor
 
 
-class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
+class TrainDatasetRGBSpike(data.Dataset):
     """Video dataset for training recurrent networks with RGB + Spike data.
 
-    This dataset extends VideoRecurrentTrainDataset to support loading both
+    This dataset extends TrainDataset to support loading both
     RGB frames and corresponding Spike camera data, then concatenates them
     as input channels.
 
@@ -65,7 +67,7 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
     """
 
     def __init__(self, opt):
-        super(VideoRecurrentTrainDatasetRGBSpike, self).__init__()
+        super(TrainDatasetRGBSpike, self).__init__()
         self.opt = opt
         self.scale = opt.get('scale', 4)
         self.gt_size = opt.get('gt_size', 256)
@@ -81,11 +83,45 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         self.spike_channels = opt.get('spike_channels', 4) # Default updated to 4 for TFP
         self.spike_flipud = opt.get('spike_flipud', True)
         self.tfp_half_win_length = opt.get('tfp_half_win_length', 20)
+        spike_reconstruction_cfg = opt.get('spike_reconstruction', 'spikecv_tfp')
+        if isinstance(spike_reconstruction_cfg, dict):
+            self.spike_reconstruction = str(spike_reconstruction_cfg.get('type', 'spikecv_tfp')).strip().lower()
+            self.middle_tfp_center = int(spike_reconstruction_cfg.get('middle_tfp_center', 44))
+        else:
+            self.spike_reconstruction = str(spike_reconstruction_cfg).strip().lower()
+            self.middle_tfp_center = int(opt.get('middle_tfp_center', 44))
+
+        self._middle_tfp_reconstructor = None
+        self._snn_reconstructor = None
+
+        # Initialize TFP device settings before using them
         self._tfp_device_pool = self._normalize_tfp_device_pool(opt.get('tfp_devices', None))
         self.tfp_device = self._normalize_single_tfp_device(opt.get('tfp_device', 'cpu'))
         if self._tfp_device_pool:
             # Multi-device mode takes precedence over single-device mode.
             self.tfp_device = None
+
+        # Initialize spike reconstructors
+        if self.spike_reconstruction in {'middle_tfp', 'middle-tfp'}:
+            if self.spike_channels != 1:
+                self.spike_channels = 1
+            self._middle_tfp_reconstructor = MiddleTFPReconstructor(
+                spike_h=self.spike_h,
+                spike_w=self.spike_w,
+                center=self.middle_tfp_center,
+            )
+        elif self.spike_reconstruction == 'snn':
+            if self.spike_channels != 1:
+                self.spike_channels = 1
+            snn_cfg = spike_reconstruction_cfg if isinstance(spike_reconstruction_cfg, dict) else {}
+            # Use device from config or fallback to tfp_device
+            snn_device = snn_cfg.get('device', self.tfp_device if self.tfp_device else 'cpu')
+            self._snn_reconstructor = SNNReconstructor(
+                checkpoint_path=snn_cfg.get('checkpoint_path', 'checkpoints/snn_epoch_100.pth'),
+                spike_win=snn_cfg.get('spike_win', 8),
+                center=self.middle_tfp_center,
+                device=snn_device
+            )
         self.rgb_norm_stats = self._build_norm_stats(opt.get('rgb_normalize', None), num_channels=3, preset='imagenet')
         self.spike_norm_stats = self._build_norm_stats(opt.get('spike_normalize', None), num_channels=self.spike_channels)
         self.expected_lq_channels = 3 + self.spike_channels
@@ -230,7 +266,7 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         img_lqs = torch.stack(img_results[:len(img_lqs_with_spike) // 2], dim=0)
         if img_lqs.size(1) != self.expected_lq_channels:
             raise ValueError(
-                f"[VideoRecurrentTrainDatasetRGBSpike] Expected {self.expected_lq_channels} channels "
+                f"[TrainDatasetRGBSpike] Expected {self.expected_lq_channels} channels "
                 f"but received {img_lqs.size(1)} (tensor shape: {img_lqs.shape}). "
                 "Double-check spike voxel stacking and augmentation."
             )
@@ -279,19 +315,27 @@ class VideoRecurrentTrainDatasetRGBSpike(data.Dataset):
         # get Spike data
         spike_file = self.spike_root / clip_name / 'spike' / f'{neighbor:{self.filename_tmpl}}.dat'
         if spike_file.exists():
-            spike_stream = SpikeStreamSimple(
-                str(spike_file),
+            spike_stream = SpikeStream(
+                offline=True,
+                filepath=str(spike_file),
                 spike_h=self.spike_h,
                 spike_w=self.spike_w,
-                print_dat_detail=False
+                print_dat_detail=False,
             )
             spike_matrix = spike_stream.get_spike_matrix(flipud=self.spike_flipud)  # (T, H, W)
-            spike_voxel = voxelize_spikes_tfp(
-                spike_matrix,
-                num_channels=self.spike_channels,
-                device=self._select_tfp_device(),
-                half_win_length=self.tfp_half_win_length,
-            )  # (S, H, W)
+            if self.spike_reconstruction in {'middle_tfp', 'middle-tfp'}:
+                spike_frame = self._middle_tfp_reconstructor(spike_matrix)  # (H, W)
+                spike_voxel = spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+            elif self.spike_reconstruction == 'snn':
+                spike_frame = self._snn_reconstructor(spike_matrix)  # (H, W)
+                spike_voxel = spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+            else:
+                spike_voxel = voxelize_spikes_tfp(
+                    spike_matrix,
+                    num_channels=self.spike_channels,
+                    device=self._select_tfp_device(),
+                    half_win_length=self.tfp_half_win_length,
+                )  # (S, H, W)
         else:
             # If spike file doesn't exist, create zeros
             spike_voxel = np.zeros((self.spike_channels, self.spike_h, self.spike_w), dtype=np.float32)

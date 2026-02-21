@@ -117,7 +117,8 @@ def test_vrt_forward_shape():
         embed_dims=[16, 16, 16, 16, 16, 16, 16, 16],
         num_heads=[1] * 8,
         pa_frames=2,
-        spynet_path=None,
+        optical_flow={"module": "spynet", "checkpoint": null, "params": {}},
+
     )
     model.eval()
     # input: (N, D, C, H, W)

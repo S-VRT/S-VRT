@@ -84,8 +84,8 @@ DEFAULT_SPIKE_ROOT = ENV_SPIKE_ROOT or (
 
 SPIKE_CONFIG_FILENAME = "config.yaml"
 DEFAULT_SPIKE_CONFIG = {
-    "spike_h": 250,
-    "spike_w": 400,
+    "spike_h": 360,
+    "spike_w": 640,
     "is_labeled": False,
     "labeled_data_type": [0],
 }
