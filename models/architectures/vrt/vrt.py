@@ -12,6 +12,7 @@ from models.architectures.vrt.stages import Stage, RTMSA
 from models.blocks.mlp import Mlp_GEGLU
 from models.utils.flow import flow_warp
 from models.utils.init import trunc_normal_
+from models.spk_encoder import PixelAdaptiveSpikeEncoder
 
 
 class Upsample(nn.Sequential):
@@ -132,6 +133,23 @@ class VRT(nn.Module):
         self.dcn_config = dcn_config or {}
         self.dcn_type = self.dcn_config.get('type', 'DCNv2')
         self.dcn_apply_softmax = self.dcn_config.get('apply_softmax', False)
+
+        spike_encoder_cfg = ((opt or {}).get('netG', {}) or {}).get('spike_encoder', {})
+        self.spike_encoder_enabled = bool(spike_encoder_cfg.get('enable', False))
+        self.spike_encoder_type = str(spike_encoder_cfg.get('type', 'pase')).lower()
+        self.spike_encoder = None
+        if self.spike_encoder_enabled:
+            if self.spike_encoder_type == 'pase':
+                pase_params = spike_encoder_cfg.get('params', {}) or {}
+                self.spike_encoder = PixelAdaptiveSpikeEncoder(
+                    in_chans=in_chans,
+                    out_chans=in_chans,
+                    kernel_size=pase_params.get('kernel_size', 3),
+                    hidden_chans=pase_params.get('hidden_chans', 32),
+                    normalize_kernel=pase_params.get('normalize_kernel', True),
+                )
+            else:
+                raise ValueError(f"Unsupported spike encoder type: {self.spike_encoder_type}")
 
         if self.pa_frames:
             if self.nonblind_denoising:
@@ -280,7 +298,14 @@ class VRT(nn.Module):
             else:
                 x_backward, x_forward = self.get_aligned_image_2frames(x,  flows_backward[0], flows_forward[0])
 
-            x = torch.cat([x, x_backward, x_forward], 2)
+            if self.spike_encoder_enabled:
+                if self.spike_encoder is None:
+                    raise RuntimeError("Spike encoder is enabled but not initialized.")
+                b, d, c, h, w = x.shape
+                x_encoded = self.spike_encoder(x.reshape(b * d, c, h, w)).reshape(b, d, c, h, w)
+                x = torch.cat([x_encoded, x_backward, x_forward], 2)
+            else:
+                x = torch.cat([x, x_backward, x_forward], 2)
 
             if self.nonblind_denoising:
                 x = torch.cat([x, noise_level_map], 2)
@@ -358,10 +383,19 @@ class VRT(nn.Module):
 
     def get_flow_2frames(self, x):
         b, n, c, h, w = x.size()
-        x_flow = self.extract_rgb(x)
-        c_flow = x_flow.size(2)
-        x_1 = x_flow[:, :-1, :, :, :].reshape(-1, c_flow, h, w)
-        x_2 = x_flow[:, 1:, :, :, :].reshape(-1, c_flow, h, w)
+        
+        # Check if we should use spike inputs for optical flow (e.g., SCFlow)
+        if getattr(self.spynet, 'input_type', 'rgb') == 'spike':
+            # Assuming x contains spike sequences if SCFlow is used.
+            x_flow = x 
+            c_flow = x_flow.size(2)
+            x_1 = x_flow[:, :-1, ...].reshape(-1, c_flow, h, w)
+            x_2 = x_flow[:, 1:, ...].reshape(-1, c_flow, h, w)
+        else:
+            x_flow = self.extract_rgb(x)
+            c_flow = x_flow.size(2)
+            x_1 = x_flow[:, :-1, :, :, :].reshape(-1, c_flow, h, w)
+            x_2 = x_flow[:, 1:, :, :, :].reshape(-1, c_flow, h, w)
 
         flows_backward = self.spynet(x_1, x_2)
         flows_backward = [flow.view(b, n-1, 2, h // (2 ** i), w // (2 ** i)) for flow, i in zip(flows_backward, range(4))]

@@ -42,7 +42,7 @@ ENV/
 
 # Model files and data
 *.pt
-*.pth
+# *.pth
 *.ckpt
 *.safetensors
 *.h5

@@ -11,6 +11,7 @@ class OpticalFlowModule(nn.Module):
     """
     def __init__(self):
         super().__init__()
+        self.input_type = 'rgb'  # Default to 'rgb', can be overridden by subclasses (e.g., 'spike')
 
     @staticmethod
     def preprocess_frames(frame1: torch.Tensor, frame2: torch.Tensor, target_format='rgb'):

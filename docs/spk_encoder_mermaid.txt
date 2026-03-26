@@ -1,0 +1,68 @@
+flowchart LR
+  %% =========================
+  %% Input
+  %% =========================
+  S0["Spike Stream<br/>H × W × L"]
+
+  %% =========================
+  %% Zoom-in (dashed): Pixel-Adaptive Convolution at pixel (x,y)
+  %% Covers: K×K×L patch, K×K×L kernel, dot product, output pixel, output map H×W×1
+  %% =========================
+  subgraph Z["Zoom-in: Pixel-Adaptive Convolution at pixel (x,y)"]
+    direction LR
+
+    Pxy["Spike Patch<br/>centered at (x,y)<br/>K × K × L"]
+    Kxy["Predicted Kernel<br/>at (x,y)<br/>K × K × L"]
+    DP["Dot Product ⊗<br/>(x,y)"]
+    yxy["Output y(x,y)<br/>scalar"]
+    O1["Output Map<br/>H × W × 1<br/>(contains y(x,y))"]
+
+    Pxy --> DP
+    Kxy --> DP
+    DP --> yxy --> O1
+  end
+  style Z stroke-dasharray: 6 4
+
+  %% How zoom-in relates to the tensors
+  S0 -. "crop K×K×L neighborhood at (x,y)" .-> Pxy
+
+  %% =========================
+  %% PASE main: C parallel branches (Kernel Predictor -> Conv Kernel Tensor -> Conv -> Feature Map)
+  %% Covers: Kernel Predictor, Kernel 1 / Kernel C, Conv, feature maps H×W×1, stack to H×W×C
+  %% =========================
+  subgraph PASE["Pixel-Adaptive Spike Encoder (PASE)"]
+    direction TB
+
+    subgraph B1["Branch 1"]
+      direction LR
+      KP1["Kernel Predictor"] --> K1["Kernel 1"]
+      K1 --> KT1["Conv Kernel Tensor<br/>H × W × L × K × K"]
+      S0 -->|signal| Conv1["Conv<br/>(pixel-adaptive)"]
+      KT1 -->|per-pixel kernels| Conv1
+      Conv1 --> Y1["Feature Map 1<br/>H × W × 1"]
+    end
+
+    dots_mid["⋮"]:::ghost
+
+    subgraph BC["Branch C"]
+      direction LR
+      KPC["Kernel Predictor"] --> KC["Kernel C"]
+      KC --> KTC["Conv Kernel Tensor<br/>H × W × L × K × K"]
+      S0 -->|signal| ConvC["Conv<br/>(pixel-adaptive)"]
+      KTC -->|per-pixel kernels| ConvC
+      ConvC --> YC["Feature Map C<br/>H × W × 1"]
+    end
+
+    Y1 --> STACK["Stack / Concatenate<br/>H × W × C"]
+    YC --> STACK
+  end
+
+  %% Same spike stream feeds kernel predictors (as in the figure)
+  S0 --> KP1
+  S0 --> KPC
+
+  %% Link zoom-in kernel selection to an example branch's kernel tensor
+  %% (zoom-in depicts the per-pixel operation implied by each branch)
+  KT1 -. "index/reshape at (x,y)" .-> Kxy
+
+  classDef ghost fill:none,stroke:none,color:#666;

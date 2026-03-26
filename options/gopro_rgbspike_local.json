@@ -367,11 +367,23 @@
       6,
       6
     ]
-    // 光流模块配置：可选值 'spynet' 或 'sea_raft'。若指定 checkpoint 路径且文件不存在，部分实现会尝试下载或使用随机初始化。
+    // 光流模块配置：可选值 'spynet'、'sea_raft' 或 'scflow'。
     ,
     "optical_flow": {
-      "module": "spynet",
-      "checkpoint": "weights/optical_flow/spynet/spynet_sintel_final-3d2a1287.pth",
+      "module": "scflow",
+      "checkpoint": "weights/optical_flow/dt10_e40.pth",
+      "params": {}
+    }
+    // Spike Encoder 配置：用于控制是否启用 Spike 编码器，以及可扩展支持不同编码器
+    // enable: 是否启用 Spike Encoder
+    // type: 编码器类型（例如 "pase"，后续可扩展为其他编码器）
+    // checkpoint: 预训练权重路径，null 表示不加载
+    // params: 编码器专属参数，按不同 type 扩展
+    ,
+    "spike_encoder": {
+      "enable": true,
+      "type": "pase",
+      "checkpoint": null,
       "params": {}
     }
     // 并行对齐帧数：用于对齐的并行帧数量（支持 2、4、6）
