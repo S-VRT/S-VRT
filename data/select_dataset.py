@@ -15,13 +15,13 @@ def define_Dataset(dataset_opt):
     # -----------------------------------------
     # video restoration
     # -----------------------------------------
-    if dataset_type in ['TrainDataset']:
+    if dataset_type in ['traindataset']:
         from data.dataset_video_train import TrainDataset as D
-    elif dataset_type in ['TrainDatasetRGBSpike']:
+    elif dataset_type in ['traindatasetrgbspike']:
         from data.dataset_video_train_rgbspike import TrainDatasetRGBSpike as D
-    elif dataset_type in ['TestDataset']:
+    elif dataset_type in ['testdataset']:
         from data.dataset_video_test import TestDataset as D
-    elif dataset_type in ['singleTestDataset']:
+    elif dataset_type in ['singletestdataset']:
         from data.dataset_video_test import SingleTestDataset as D
 
     else:

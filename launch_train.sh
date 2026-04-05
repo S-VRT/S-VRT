@@ -38,7 +38,7 @@
 DEFAULT_CONFIG="options/gopro_rgbspike_local.json"
 DEFAULT_GOPRO_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large"
 DEFAULT_SPIKE_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large_spike_seq"
-DEFAULT_GPU_COUNT=3
+DEFAULT_GPU_COUNT=1
 
 # Parse arguments
 GPU_COUNT=""
@@ -201,6 +201,46 @@ handle_error() {
     fi
 }
 
+# Ensure optional runtime deps required by selected configs are available.
+ensure_python_package() {
+    local import_name="$1"
+    local pip_name="$2"
+
+    if python -c "import ${import_name}" >/dev/null 2>&1; then
+        echo "Dependency check: ${pip_name} already installed."
+        return 0
+    fi
+
+    echo "Dependency check: ${pip_name} missing, installing..."
+    python -m pip install "${pip_name}"
+}
+
+ensure_dcnv4_module() {
+    if python -c "from models.op.dcnv4 import DCNv4; from DCNv4 import ext" >/dev/null 2>&1; then
+        echo "Dependency check: DCNv4 module already available."
+        return 0
+    fi
+
+    if [[ ! -d "models/op/dcnv4" ]]; then
+        echo "Warning: models/op/dcnv4 not found, skip DCNv4 build."
+        return 0
+    fi
+
+    echo "Dependency check: DCNv4 module missing, building with setup.py develop..."
+    # Important: setup.py declares packages as models.op.dcnv4.*, so it must
+    # be executed from repo root instead of models/op/dcnv4 directory.
+    python models/op/dcnv4/setup.py develop
+    local dcn_exit_code=$?
+    if [[ $dcn_exit_code -ne 0 ]]; then
+        handle_error $dcn_exit_code "DCNv4 构建失败，请检查上面的错误信息。"
+    fi
+
+    # Post-build sanity check: ensure extension can be imported in current env.
+    if ! python -c "from models.op.dcnv4 import DCNv4; from DCNv4 import ext" >/dev/null 2>&1; then
+        handle_error 1 "DCNv4 扩展导入失败（DCNv4.ext 不可用），请检查编译环境与 Python 环境是否一致。"
+    fi
+}
+
 echo "=========================================="
 echo "VRT Training Launch Script"
 echo "=========================================="
@@ -271,6 +311,17 @@ if [[ "$PREPARE_DATA" == true ]]; then
     # Brief pause to let user see the summary
     sleep 2
 fi
+
+# ================================================================================
+# Dependency Preparation
+# ================================================================================
+echo "=========================================="
+echo "Dependency Preparation"
+echo "=========================================="
+ensure_python_package "snntorch" "snntorch"
+ensure_python_package "swanlab" "swanlab"
+ensure_dcnv4_module
+echo ""
 
 # ================================================================================
 # Training Phase

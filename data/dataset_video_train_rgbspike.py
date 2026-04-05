@@ -78,8 +78,8 @@ class TrainDatasetRGBSpike(data.Dataset):
         self.num_frame = opt['num_frame']
 
         # Spike configuration
-        self.spike_h = opt.get('spike_h', 250)
-        self.spike_w = opt.get('spike_w', 400)
+        self.spike_h = opt.get('spike_h', 360)
+        self.spike_w = opt.get('spike_w', 640)
         self.spike_channels = opt.get('spike_channels', 4) # Default updated to 4 for TFP
         self.spike_flipud = opt.get('spike_flipud', True)
         self.tfp_half_win_length = opt.get('tfp_half_win_length', 20)
