@@ -227,6 +227,16 @@ ensure_dcnv4_module() {
     fi
 
     echo "Dependency check: DCNv4 module missing, building with setup.py develop..."
+    # setup.py builds extension name "DCNv4.ext" and copies it into a top-level
+    # "DCNv4/" directory. Ensure this destination exists to avoid:
+    # "could not create 'DCNv4/ext....so': No such file or directory".
+    mkdir -p DCNv4
+    if [[ ! -f "DCNv4/__init__.py" ]]; then
+        cat > DCNv4/__init__.py <<'PYINIT'
+from . import ext
+PYINIT
+    fi
+
     # Important: setup.py declares packages as models.op.dcnv4.*, so it must
     # be executed from repo root instead of models/op/dcnv4 directory.
     python models/op/dcnv4/setup.py develop
