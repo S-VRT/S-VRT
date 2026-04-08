@@ -44,16 +44,16 @@ def test_pase_operator_constructs():
 
 
 def test_mamba_operator_missing_dep_raises_runtime():
-    op = create_fusion_operator(
-        operator_name='mamba',
-        rgb_chans=3,
-        spike_chans=8,
-        out_chans=3,
-        operator_params={},
-    )
     try:
         import mamba_ssm  # noqa: F401
     except (ImportError, ModuleNotFoundError):
+        op = create_fusion_operator(
+            operator_name='mamba',
+            rgb_chans=3,
+            spike_chans=8,
+            out_chans=3,
+            operator_params={},
+        )
         with pytest.raises(RuntimeError, match='mamba_ssm is required'):
             op(torch.randn(1, 2, 3, 8, 8), torch.randn(1, 2, 8, 8, 8))
     else:
