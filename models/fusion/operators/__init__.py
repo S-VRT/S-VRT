@@ -11,14 +11,15 @@ def build_operator(
     out_chans: int,
     operator_params: dict,
 ):
-    if operator_name == 'concat':
+    normalized_name = str(operator_name).lower().strip()
+    if normalized_name == 'concat':
         return ConcatFusionOperator(
             rgb_chans=rgb_chans,
             spike_chans=spike_chans,
             out_chans=out_chans,
             operator_params=operator_params,
         )
-    if operator_name == 'gated':
+    if normalized_name == 'gated':
         return GatedFusionOperator(
             rgb_chans=rgb_chans,
             spike_chans=spike_chans,
