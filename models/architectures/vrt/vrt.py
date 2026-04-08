@@ -209,7 +209,11 @@ class VRT(nn.Module):
                     f"Fusion early out_chans ({early_out_chans}) must match in_chans ({self.in_chans}) "
                     f"for placement={fusion_placement}."
                 )
-            if fusion_placement in {'early', 'hybrid'} and bool(early_cfg.get('expand_to_full_t', False)):
+            full_t_required = (
+                fusion_placement == 'hybrid'
+                or (fusion_placement == 'early' and bool(early_cfg.get('expand_to_full_t', False)))
+            )
+            if full_t_required:
                 recon_cfg = (((opt or {}).get('datasets', {}) or {}).get('train', {}) or {}).get(
                     'spike_reconstruction',
                     None,
