@@ -158,15 +158,22 @@ class VRT(nn.Module):
         self.fusion_operator = None
         self.fusion_adapter = None
         if self.fusion_enabled:
+            fusion_placement = str(fusion_cfg.get('placement', 'early'))
+            fusion_out_chans = int(fusion_cfg.get('out_chans', 3))
+            if fusion_placement in {'early', 'hybrid'} and fusion_out_chans != self.in_chans:
+                raise ValueError(
+                    f"Fusion out_chans ({fusion_out_chans}) must match in_chans ({self.in_chans}) "
+                    f"for placement={fusion_placement}."
+                )
             self.fusion_operator = create_fusion_operator(
                 operator_name=fusion_cfg.get('operator', 'concat'),
                 rgb_chans=3,
                 spike_chans=1,
-                out_chans=int(fusion_cfg.get('out_chans', 3)),
+                out_chans=fusion_out_chans,
                 operator_params=fusion_cfg.get('operator_params', {}),
             )
             self.fusion_adapter = create_fusion_adapter(
-                placement=fusion_cfg.get('placement', 'early'),
+                placement=fusion_placement,
                 operator=self.fusion_operator,
                 mode=fusion_cfg.get('mode', 'replace'),
                 inject_stages=fusion_cfg.get('inject_stages', []),
@@ -307,7 +314,10 @@ class VRT(nn.Module):
             x_lq = x.clone()
             x_lq_rgb = self.extract_rgb(x_lq)
 
-            if self.fusion_enabled and self.fusion_cfg.get('placement', 'early') in {'early', 'hybrid'}:
+            fusion_placement = self.fusion_cfg.get('placement', 'early')
+            if (self.fusion_enabled
+                    and fusion_placement in {'early', 'hybrid'}
+                    and callable(self.fusion_adapter)):
                 rgb = x[:, :, :3, :, :]
                 spike = x[:, :, 3:, :, :]
                 x = self.fusion_adapter(rgb=rgb, spike=spike)

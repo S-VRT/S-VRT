@@ -10,7 +10,7 @@ def test_vrt_builds_with_fusion_config():
                 "enable": True,
                 "placement": "early",
                 "operator": "concat",
-                "out_chans": 3,
+                "out_chans": 4,
                 "operator_params": {},
             }
         }
@@ -18,7 +18,7 @@ def test_vrt_builds_with_fusion_config():
 
     model = VRT(
         upscale=1,
-        in_chans=3,
+        in_chans=4,
         out_chans=3,
         img_size=[2, 8, 8],
         window_size=[2, 4, 4],
@@ -26,8 +26,9 @@ def test_vrt_builds_with_fusion_config():
         indep_reconsts=[],
         embed_dims=[16] * 8,
         num_heads=[1] * 8,
-        pa_frames=0,
+        pa_frames=2,
         use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
         opt=opt,
     )
 
@@ -38,3 +39,7 @@ def test_vrt_builds_with_fusion_config():
     assert model.fusion_operator is not None
     assert hasattr(model, "fusion_adapter")
     assert model.fusion_adapter is not None
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 1, 8, 8)
+    fused = model.fusion_adapter(rgb=rgb, spike=spike)
+    assert fused.shape == (1, 2, 4, 8, 8)
