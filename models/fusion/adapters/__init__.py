@@ -1,6 +1,7 @@
 from typing import Any
 
 from ..base import validate_mode
+from .early import EarlyFusionAdapter
 
 
 class IdentityFusionAdapter:
@@ -30,6 +31,13 @@ def build_adapter(
     if placement not in known_placements:
         raise ValueError(f"Unknown fusion placement: {placement}")
     canonical_mode = validate_mode(mode)
+    if placement == 'early':
+        return EarlyFusionAdapter(
+            operator=operator,
+            mode=canonical_mode,
+            inject_stages=inject_stages,
+            **kwargs,
+        )
     return IdentityFusionAdapter(
         placement=placement,
         operator=operator,
@@ -39,4 +47,4 @@ def build_adapter(
     )
 
 
-__all__ = ['build_adapter', 'IdentityFusionAdapter']
+__all__ = ['build_adapter', 'IdentityFusionAdapter', 'EarlyFusionAdapter']
