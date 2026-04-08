@@ -1,3 +1,4 @@
+import pytest
 import torch
 import torch.nn as nn
 
@@ -124,7 +125,7 @@ def test_vrt_builds_with_middle_fusion_adapter():
                 "enable": True,
                 "placement": "middle",
                 "operator": "concat",
-                "out_chans": 8,
+                "out_chans": 16,
                 "inject_stages": [1],
                 "operator_params": {},
             }
@@ -158,6 +159,7 @@ def test_vrt_builds_with_hybrid_fusion_adapter():
                 "placement": "hybrid",
                 "operator": "concat",
                 "out_chans": 4,
+                "middle": {"out_chans": 16},
                 "inject_stages": [1],
                 "operator_params": {},
             }
@@ -183,6 +185,10 @@ def test_vrt_builds_with_hybrid_fusion_adapter():
     assert isinstance(model.fusion_adapter, HybridFusionAdapter)
     assert hasattr(model.fusion_adapter, "early_adapter")
     assert hasattr(model.fusion_adapter, "middle_adapter")
+    assert model.fusion_adapter.early_adapter.operator is not model.fusion_adapter.middle_adapter.operator
+    assert model.fusion_adapter.early_adapter.operator.rgb_chans == 3
+    assert model.fusion_adapter.middle_adapter.operator.rgb_chans == 16
+    assert model.fusion_adapter.middle_adapter.operator.spike_chans == 1
 
 
 def test_vrt_forward_features_passes_fusion_hook_for_middle():
@@ -192,7 +198,7 @@ def test_vrt_forward_features_passes_fusion_hook_for_middle():
                 "enable": True,
                 "placement": "middle",
                 "operator": "concat",
-                "out_chans": 8,
+                "out_chans": 16,
                 "inject_stages": [],
                 "operator_params": {},
             }
@@ -253,3 +259,67 @@ def test_vrt_forward_features_passes_fusion_hook_for_middle():
     assert dummy_stages[0].called["fusion_hook"] is model.fusion_adapter
     assert dummy_stages[0].called["stage_idx"] == 1
     assert dummy_stages[0].called["spike_ctx"] is spike_ctx
+
+
+def test_vrt_middle_out_chans_mismatch_raises():
+    opt = {
+        "netG": {
+            "fusion": {
+                "enable": True,
+                "placement": "middle",
+                "operator": "concat",
+                "out_chans": 8,
+                "inject_stages": [1],
+                "operator_params": {},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="out_chans"):
+        VRT(
+            upscale=1,
+            in_chans=4,
+            out_chans=3,
+            img_size=[2, 8, 8],
+            window_size=[2, 4, 4],
+            depths=[1] * 8,
+            indep_reconsts=[],
+            embed_dims=[16] * 8,
+            num_heads=[1] * 8,
+            pa_frames=2,
+            use_flash_attn=False,
+            optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+            opt=opt,
+        )
+
+
+def test_vrt_middle_inject_stages_mixed_dims_raises():
+    opt = {
+        "netG": {
+            "fusion": {
+                "enable": True,
+                "placement": "middle",
+                "operator": "concat",
+                "out_chans": 16,
+                "inject_stages": [1, 2],
+                "operator_params": {},
+            }
+        }
+    }
+
+    with pytest.raises(ValueError, match="multiple feature dims"):
+        VRT(
+            upscale=1,
+            in_chans=4,
+            out_chans=3,
+            img_size=[2, 8, 8],
+            window_size=[2, 4, 4],
+            depths=[1] * 8,
+            indep_reconsts=[],
+            embed_dims=[16, 32, 16, 16, 16, 16, 16, 16],
+            num_heads=[1] * 8,
+            pa_frames=2,
+            use_flash_attn=False,
+            optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+            opt=opt,
+        )

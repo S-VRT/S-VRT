@@ -159,25 +159,111 @@ class VRT(nn.Module):
         self.fusion_adapter = None
         if self.fusion_enabled:
             fusion_placement = str(fusion_cfg.get('placement', 'early'))
+            fusion_mode = fusion_cfg.get('mode', 'replace')
             fusion_out_chans = int(fusion_cfg.get('out_chans', 3))
-            if fusion_placement in {'early', 'hybrid'} and fusion_out_chans != self.in_chans:
+            inject_stages = fusion_cfg.get('inject_stages', [])
+            early_cfg = (fusion_cfg.get('early', {}) or {})
+            middle_cfg = (fusion_cfg.get('middle', {}) or {})
+            early_out_chans = int(early_cfg.get('out_chans', fusion_out_chans))
+            middle_out_chans = int(middle_cfg.get('out_chans', fusion_out_chans))
+
+            middle_rgb_chans = None
+            middle_spike_chans = None
+            if fusion_placement in {'middle', 'hybrid'}:
+                spike_input_chans = self.in_chans - 3
+                if spike_input_chans <= 0:
+                    raise ValueError(
+                        f"Fusion placement={fusion_placement} requires spike channels in input "
+                        f"(in_chans must be > 3, got {self.in_chans})."
+                    )
+                if inject_stages:
+                    if not isinstance(inject_stages, (list, tuple)):
+                        raise ValueError("Fusion inject_stages must be a list of stage indices.")
+                    invalid_stages = [
+                        stage for stage in inject_stages
+                        if not isinstance(stage, int) or isinstance(stage, bool) or stage < 1 or stage > 7
+                    ]
+                    if invalid_stages:
+                        raise ValueError(
+                            f"Fusion inject_stages must be integers in [1, 7], got {invalid_stages}."
+                        )
+                    stage_dims = [embed_dims[stage - 1] for stage in inject_stages]
+                    unique_dims = sorted(set(stage_dims))
+                    if len(unique_dims) > 1:
+                        raise ValueError(
+                            "Fusion inject_stages span multiple feature dims; "
+                            f"got dims {unique_dims} for stages {sorted(set(inject_stages))}."
+                        )
+                    middle_rgb_chans = unique_dims[0]
+                    if middle_out_chans != middle_rgb_chans:
+                        raise ValueError(
+                            "Fusion middle out_chans must match injected stage dim. "
+                            f"Got out_chans={middle_out_chans}, expected {middle_rgb_chans}."
+                        )
+                else:
+                    middle_rgb_chans = embed_dims[0]
+                middle_spike_chans = 1 if fusion_placement == 'hybrid' else spike_input_chans
+
+            if fusion_placement in {'early', 'hybrid'} and early_out_chans != self.in_chans:
                 raise ValueError(
-                    f"Fusion out_chans ({fusion_out_chans}) must match in_chans ({self.in_chans}) "
+                    f"Fusion early out_chans ({early_out_chans}) must match in_chans ({self.in_chans}) "
                     f"for placement={fusion_placement}."
                 )
-            self.fusion_operator = create_fusion_operator(
-                operator_name=fusion_cfg.get('operator', 'concat'),
-                rgb_chans=3,
-                spike_chans=1,
-                out_chans=fusion_out_chans,
-                operator_params=fusion_cfg.get('operator_params', {}),
-            )
-            self.fusion_adapter = create_fusion_adapter(
-                placement=fusion_placement,
-                operator=self.fusion_operator,
-                mode=fusion_cfg.get('mode', 'replace'),
-                inject_stages=fusion_cfg.get('inject_stages', []),
-            )
+
+            operator_name = fusion_cfg.get('operator', 'concat')
+            operator_params = fusion_cfg.get('operator_params', {})
+            if fusion_placement == 'early':
+                self.fusion_operator = create_fusion_operator(
+                    operator_name=operator_name,
+                    rgb_chans=3,
+                    spike_chans=1,
+                    out_chans=early_out_chans,
+                    operator_params=operator_params,
+                )
+                self.fusion_adapter = create_fusion_adapter(
+                    placement=fusion_placement,
+                    operator=self.fusion_operator,
+                    mode=fusion_mode,
+                    inject_stages=inject_stages,
+                )
+            elif fusion_placement == 'middle':
+                self.fusion_operator = create_fusion_operator(
+                    operator_name=operator_name,
+                    rgb_chans=middle_rgb_chans,
+                    spike_chans=middle_spike_chans,
+                    out_chans=middle_out_chans,
+                    operator_params=operator_params,
+                )
+                self.fusion_adapter = create_fusion_adapter(
+                    placement=fusion_placement,
+                    operator=self.fusion_operator,
+                    mode=fusion_mode,
+                    inject_stages=inject_stages,
+                )
+            else:
+                early_operator = create_fusion_operator(
+                    operator_name=operator_name,
+                    rgb_chans=3,
+                    spike_chans=1,
+                    out_chans=early_out_chans,
+                    operator_params=operator_params,
+                )
+                middle_operator = create_fusion_operator(
+                    operator_name=operator_name,
+                    rgb_chans=middle_rgb_chans,
+                    spike_chans=middle_spike_chans,
+                    out_chans=middle_out_chans,
+                    operator_params=operator_params,
+                )
+                self.fusion_operator = early_operator
+                self.fusion_adapter = create_fusion_adapter(
+                    placement=fusion_placement,
+                    operator=early_operator,
+                    early_operator=early_operator,
+                    middle_operator=middle_operator,
+                    mode=fusion_mode,
+                    inject_stages=inject_stages,
+                )
 
         if self.pa_frames:
             if self.nonblind_denoising:

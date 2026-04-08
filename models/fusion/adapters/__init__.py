@@ -47,8 +47,13 @@ def build_adapter(
             inject_stages=inject_stages,
             **kwargs,
         )
+    early_operator = kwargs.pop('early_operator', None)
+    middle_operator = kwargs.pop('middle_operator', None)
+    if early_operator is None or middle_operator is None:
+        raise ValueError("Hybrid fusion requires both early_operator and middle_operator.")
     return HybridFusionAdapter(
-        operator=operator,
+        early_operator=early_operator,
+        middle_operator=middle_operator,
         mode=canonical_mode,
         inject_stages=inject_stages,
         **kwargs,

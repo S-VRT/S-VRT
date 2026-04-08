@@ -9,20 +9,21 @@ from .middle import MiddleFusionAdapter
 class HybridFusionAdapter(nn.Module):
     def __init__(
         self,
-        operator: nn.Module,
+        early_operator: nn.Module,
+        middle_operator: nn.Module,
         mode: str = "replace",
         inject_stages: Optional[list] = None,
         **kwargs: Any,
     ):
         super().__init__()
         self.early_adapter = EarlyFusionAdapter(
-            operator=operator,
+            operator=early_operator,
             mode=mode,
             inject_stages=inject_stages,
             **kwargs,
         )
         self.middle_adapter = MiddleFusionAdapter(
-            operator=operator,
+            operator=middle_operator,
             mode=mode,
             inject_stages=inject_stages,
             **kwargs,
