@@ -315,9 +315,7 @@ class VRT(nn.Module):
             x_lq_rgb = self.extract_rgb(x_lq)
 
             fusion_placement = self.fusion_cfg.get('placement', 'early')
-            if (self.fusion_enabled
-                    and fusion_placement in {'early', 'hybrid'}
-                    and callable(self.fusion_adapter)):
+            if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
                 rgb = x[:, :, :3, :, :]
                 spike = x[:, :, 3:, :, :]
                 x = self.fusion_adapter(rgb=rgb, spike=spike)

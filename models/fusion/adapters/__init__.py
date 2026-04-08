@@ -31,7 +31,7 @@ def build_adapter(
     if placement not in known_placements:
         raise ValueError(f"Unknown fusion placement: {placement}")
     canonical_mode = validate_mode(mode)
-    if placement == 'early':
+    if placement in {'early', 'hybrid'}:
         return EarlyFusionAdapter(
             operator=operator,
             mode=canonical_mode,
