@@ -13,6 +13,9 @@ class ConcatFusionOperator:
         self.out_chans = out_chans
         self.operator_params = operator_params
 
+    def __call__(self, rgb_feat, spike_feat):
+        return rgb_feat
+
 
 def build_operator(
     operator_name: str,

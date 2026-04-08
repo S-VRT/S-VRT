@@ -11,6 +11,7 @@ def test_create_fusion_operator_concat():
         out_chans=3,
         operator_params={},
     )
+    assert callable(op)
     assert op is not None
 
 
