@@ -1,6 +1,9 @@
 import torch
+import torch.nn as nn
 
 from models.architectures.vrt.vrt import VRT
+from models.fusion.adapters.hybrid import HybridFusionAdapter
+from models.fusion.adapters.middle import MiddleFusionAdapter
 
 
 def test_vrt_builds_with_fusion_config():
@@ -112,3 +115,141 @@ def test_vrt_forward_triggers_early_fusion(monkeypatch):
 
     assert called["adapter"] is True
     assert out.shape == (1, 2, 3, 8, 8)
+
+
+def test_vrt_builds_with_middle_fusion_adapter():
+    opt = {
+        "netG": {
+            "fusion": {
+                "enable": True,
+                "placement": "middle",
+                "operator": "concat",
+                "out_chans": 8,
+                "inject_stages": [1],
+                "operator_params": {},
+            }
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=4,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert isinstance(model.fusion_adapter, MiddleFusionAdapter)
+
+
+def test_vrt_builds_with_hybrid_fusion_adapter():
+    opt = {
+        "netG": {
+            "fusion": {
+                "enable": True,
+                "placement": "hybrid",
+                "operator": "concat",
+                "out_chans": 4,
+                "inject_stages": [1],
+                "operator_params": {},
+            }
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=4,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert isinstance(model.fusion_adapter, HybridFusionAdapter)
+    assert hasattr(model.fusion_adapter, "early_adapter")
+    assert hasattr(model.fusion_adapter, "middle_adapter")
+
+
+def test_vrt_forward_features_passes_fusion_hook_for_middle():
+    opt = {
+        "netG": {
+            "fusion": {
+                "enable": True,
+                "placement": "middle",
+                "operator": "concat",
+                "out_chans": 8,
+                "inject_stages": [],
+                "operator_params": {},
+            }
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=4,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    class DummyStage(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.called = None
+
+        def forward(self, x, flows_backward, flows_forward, fusion_hook=None, stage_idx=None, spike_ctx=None):
+            self.called = {
+                "fusion_hook": fusion_hook,
+                "stage_idx": stage_idx,
+                "spike_ctx": spike_ctx,
+            }
+            return x
+
+    dummy_stages = [DummyStage() for _ in range(7)]
+    model.stage1, model.stage2, model.stage3, model.stage4, model.stage5, model.stage6, model.stage7 = dummy_stages
+    model.stage8 = nn.ModuleList([nn.Identity()])
+
+    x = torch.randn(1, 16, 2, 8, 8)
+    spike_ctx = torch.randn_like(x)
+    dummy_flows = [
+        torch.zeros(1, 1, 2, 8, 8),
+        torch.zeros(1, 1, 2, 4, 4),
+        torch.zeros(1, 1, 2, 2, 2),
+        torch.zeros(1, 1, 2, 1, 1),
+    ]
+
+    model.forward_features(
+        x,
+        dummy_flows,
+        dummy_flows,
+        fusion_hook=model.fusion_adapter,
+        spike_ctx=spike_ctx,
+    )
+
+    assert dummy_stages[0].called is not None
+    assert dummy_stages[0].called["fusion_hook"] is model.fusion_adapter
+    assert dummy_stages[0].called["stage_idx"] == 1
+    assert dummy_stages[0].called["spike_ctx"] is spike_ctx

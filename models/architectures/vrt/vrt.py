@@ -299,6 +299,19 @@ class VRT(nn.Module):
     def extract_rgb(self, x, channels=3):
         return x[:, :, :min(channels, x.size(2)), :, :]
 
+    def build_spike_context(self, x, expand_to_full_t=False):
+        if x.dim() != 5:
+            return None
+        if x.size(2) <= 3:
+            return None
+        spike = x[:, :, 3:, :, :]
+        if spike.numel() == 0:
+            return None
+        if expand_to_full_t:
+            bsz, steps, time_dim, height, width = spike.shape
+            spike = spike.reshape(bsz, steps * time_dim, 1, height, width)
+        return spike.transpose(1, 2)
+
     def set_timer(self, timer):
         """Inject a Timer instance for optional timing measurement."""
         self.timer = timer
@@ -307,6 +320,16 @@ class VRT(nn.Module):
         # x: (N, D, C, H, W)
         timer = getattr(self, 'timer', None)
 
+        fusion_placement = self.fusion_cfg.get('placement', 'early')
+        fusion_hook = None
+        spike_ctx = None
+        if self.fusion_enabled and fusion_placement in {'middle', 'hybrid'}:
+            spike_ctx = self.build_spike_context(
+                x,
+                expand_to_full_t=(fusion_placement == 'hybrid'),
+            )
+            fusion_hook = self.fusion_adapter
+
         if self.pa_frames:
             if self.nonblind_denoising:
                 x, noise_level_map = x[:, :, :self.in_chans, :, :], x[:, :, self.in_chans:, :, :]
@@ -314,7 +337,6 @@ class VRT(nn.Module):
             x_lq = x.clone()
             x_lq_rgb = self.extract_rgb(x_lq)
 
-            fusion_placement = self.fusion_cfg.get('placement', 'early')
             if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
                 rgb = x[:, :, :3, :, :]
                 spike = x[:, :, 3:, :, :]
@@ -352,14 +374,28 @@ class VRT(nn.Module):
                     with timer.timer('conv_first'):
                         x = self.conv_first(x.transpose(1, 2))
                     with timer.timer('forward_features'):
-                        x_features = self.forward_features(x, flows_backward, flows_forward)
+                        x_features = self.forward_features(
+                            x,
+                            flows_backward,
+                            flows_forward,
+                            fusion_hook=fusion_hook,
+                            spike_ctx=spike_ctx,
+                        )
                     with timer.timer('conv_after_body'):
                         x = x + self.conv_after_body(x_features.transpose(1, 4)).transpose(1, 4)
                     with timer.timer('conv_last'):
                         x = self.conv_last(x).transpose(1, 2)
                 else:
                     x = self.conv_first(x.transpose(1, 2))
-                    x = x + self.conv_after_body(self.forward_features(x, flows_backward, flows_forward).transpose(1, 4)).transpose(1, 4)
+                    x = x + self.conv_after_body(
+                        self.forward_features(
+                            x,
+                            flows_backward,
+                            flows_forward,
+                            fusion_hook=fusion_hook,
+                            spike_ctx=spike_ctx,
+                        ).transpose(1, 4)
+                    ).transpose(1, 4)
                     x = self.conv_last(x).transpose(1, 2)
                 return x + x_lq_rgb
             else:
@@ -367,14 +403,28 @@ class VRT(nn.Module):
                     with timer.timer('conv_first'):
                         x = self.conv_first(x.transpose(1, 2))
                     with timer.timer('forward_features'):
-                        x_features = self.forward_features(x, flows_backward, flows_forward)
+                        x_features = self.forward_features(
+                            x,
+                            flows_backward,
+                            flows_forward,
+                            fusion_hook=fusion_hook,
+                            spike_ctx=spike_ctx,
+                        )
                     with timer.timer('conv_after_body'):
                         x = x + self.conv_after_body(x_features.transpose(1, 4)).transpose(1, 4)
                     with timer.timer('upsample'):
                         x = self.conv_last(self.upsample(self.conv_before_upsample(x))).transpose(1, 2)
                 else:
                     x = self.conv_first(x.transpose(1, 2))
-                    x = x + self.conv_after_body(self.forward_features(x, flows_backward, flows_forward).transpose(1, 4)).transpose(1, 4)
+                    x = x + self.conv_after_body(
+                        self.forward_features(
+                            x,
+                            flows_backward,
+                            flows_forward,
+                            fusion_hook=fusion_hook,
+                            spike_ctx=spike_ctx,
+                        ).transpose(1, 4)
+                    ).transpose(1, 4)
                     x = self.conv_last(self.upsample(self.conv_before_upsample(x))).transpose(1, 2)
                 _, _, C, H, W = x.shape
                 x_lq_rgb = torch.nn.functional.interpolate(
@@ -387,12 +437,26 @@ class VRT(nn.Module):
                 with timer.timer('conv_first'):
                     x = self.conv_first(x.transpose(1, 2))
                 with timer.timer('forward_features'):
-                    x_features = self.forward_features(x, [], [])
+                    x_features = self.forward_features(
+                        x,
+                        [],
+                        [],
+                        fusion_hook=fusion_hook,
+                        spike_ctx=spike_ctx,
+                    )
                 with timer.timer('conv_after_body'):
                     x = x + self.conv_after_body(x_features.transpose(1, 4)).transpose(1, 4)
             else:
                 x = self.conv_first(x.transpose(1, 2))
-                x = x + self.conv_after_body(self.forward_features(x, [], []).transpose(1, 4)).transpose(1, 4)
+                x = x + self.conv_after_body(
+                    self.forward_features(
+                        x,
+                        [],
+                        [],
+                        fusion_hook=fusion_hook,
+                        spike_ctx=spike_ctx,
+                    ).transpose(1, 4)
+                ).transpose(1, 4)
 
             x = torch.cat(torch.unbind(x , 2) , 1)
             x = self.conv_last(self.reflection_pad2d(F.leaky_relu(self.linear_fuse(x), 0.2), pad=3))
@@ -505,14 +569,63 @@ class VRT(nn.Module):
 
         return [x_backward, x_forward]
 
-    def forward_features(self, x, flows_backward, flows_forward):
-        x1 = self.stage1(x, flows_backward[0::4], flows_forward[0::4])
-        x2 = self.stage2(x1, flows_backward[1::4], flows_forward[1::4])
-        x3 = self.stage3(x2, flows_backward[2::4], flows_forward[2::4])
-        x4 = self.stage4(x3, flows_backward[3::4], flows_forward[3::4])
-        x = self.stage5(x4, flows_backward[2::4], flows_forward[2::4])
-        x = self.stage6(x + x3, flows_backward[1::4], flows_forward[1::4])
-        x = self.stage7(x + x2, flows_backward[0::4], flows_forward[0::4])
+    def forward_features(self, x, flows_backward, flows_forward, fusion_hook=None, spike_ctx=None):
+        x1 = self.stage1(
+            x,
+            flows_backward[0::4],
+            flows_forward[0::4],
+            fusion_hook=fusion_hook,
+            stage_idx=1,
+            spike_ctx=spike_ctx,
+        )
+        x2 = self.stage2(
+            x1,
+            flows_backward[1::4],
+            flows_forward[1::4],
+            fusion_hook=fusion_hook,
+            stage_idx=2,
+            spike_ctx=spike_ctx,
+        )
+        x3 = self.stage3(
+            x2,
+            flows_backward[2::4],
+            flows_forward[2::4],
+            fusion_hook=fusion_hook,
+            stage_idx=3,
+            spike_ctx=spike_ctx,
+        )
+        x4 = self.stage4(
+            x3,
+            flows_backward[3::4],
+            flows_forward[3::4],
+            fusion_hook=fusion_hook,
+            stage_idx=4,
+            spike_ctx=spike_ctx,
+        )
+        x = self.stage5(
+            x4,
+            flows_backward[2::4],
+            flows_forward[2::4],
+            fusion_hook=fusion_hook,
+            stage_idx=5,
+            spike_ctx=spike_ctx,
+        )
+        x = self.stage6(
+            x + x3,
+            flows_backward[1::4],
+            flows_forward[1::4],
+            fusion_hook=fusion_hook,
+            stage_idx=6,
+            spike_ctx=spike_ctx,
+        )
+        x = self.stage7(
+            x + x2,
+            flows_backward[0::4],
+            flows_forward[0::4],
+            fusion_hook=fusion_hook,
+            stage_idx=7,
+            spike_ctx=spike_ctx,
+        )
         x = x + x1
 
         for layer in self.stage8:
