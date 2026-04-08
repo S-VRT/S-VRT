@@ -7,9 +7,9 @@ class FusionOperator(Protocol):
 
 
 def validate_mode(mode: str) -> str:
-    normalized = mode.lower().strip()
+    normalized = str(mode).lower().strip()
     if normalized not in ('replace', 'residual'):
-        raise ValueError(f"Unsupported fusion mode: {mode}")
+        raise ValueError(f"Unsupported fusion mode: {normalized}")
     return normalized
 
 

@@ -17,10 +17,10 @@ def test_create_fusion_operator_concat():
 def test_create_fusion_operator_unknown():
     with pytest.raises(ValueError, match='Unknown fusion operator'):
         create_fusion_operator(
-            operator_name='missing',
+            operator_name='unknown',
             rgb_chans=3,
-            spike_chans=2,
-            out_chans=5,
+            spike_chans=8,
+            out_chans=3,
             operator_params={},
         )
 
