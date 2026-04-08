@@ -32,6 +32,29 @@ def test_create_fusion_operator_unknown():
         )
 
 
+def test_pase_operator_constructs():
+    op = create_fusion_operator(
+        operator_name='pase',
+        rgb_chans=3,
+        spike_chans=8,
+        out_chans=3,
+        operator_params={},
+    )
+    assert op is not None
+
+
+def test_mamba_operator_missing_dep_raises_runtime():
+    op = create_fusion_operator(
+        operator_name='mamba',
+        rgb_chans=3,
+        spike_chans=8,
+        out_chans=3,
+        operator_params={},
+    )
+    with pytest.raises(RuntimeError, match='mamba_ssm is required'):
+        op(torch.randn(1, 2, 3, 8, 8), torch.randn(1, 2, 8, 8, 8))
+
+
 def test_create_fusion_adapter_unknown_placement():
     with pytest.raises(ValueError, match='Unknown fusion placement'):
         create_fusion_adapter(
