@@ -29,6 +29,8 @@ ENV/
 
 # IDEs
 .vscode/
+.codex/
+.cursor/
 .idea/
 *.swp
 *.swo
@@ -92,6 +94,9 @@ wandb/
 .pytest_cache/
 .coverage
 htmlcov/
+.playwright-cli/
+.runtime/
+.worktrees/
 
 # OS
 Thumbs.db
