@@ -26,7 +26,7 @@ def build_adapter(
     inject_stages: list,
     **kwargs: Any,
 ):
-    known_placements = {'pre', 'post', 'replace', 'residual'}
+    known_placements = {'early', 'middle', 'hybrid'}
     if placement not in known_placements:
         raise ValueError(f"Unknown fusion placement: {placement}")
     validate_mode(mode)
