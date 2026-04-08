@@ -13,6 +13,7 @@ from models.blocks.mlp import Mlp_GEGLU
 from models.utils.flow import flow_warp
 from models.utils.init import trunc_normal_
 from models.spk_encoder import PixelAdaptiveSpikeEncoder
+from models.fusion.factory import create_fusion_operator, create_fusion_adapter
 
 
 class Upsample(nn.Sequential):
@@ -151,6 +152,26 @@ class VRT(nn.Module):
             else:
                 raise ValueError(f"Unsupported spike encoder type: {self.spike_encoder_type}")
 
+        fusion_cfg = ((opt or {}).get('netG', {}) or {}).get('fusion', {})
+        self.fusion_enabled = bool(fusion_cfg.get('enable', False))
+        self.fusion_cfg = fusion_cfg
+        self.fusion_operator = None
+        self.fusion_adapter = None
+        if self.fusion_enabled:
+            self.fusion_operator = create_fusion_operator(
+                operator_name=fusion_cfg.get('operator', 'concat'),
+                rgb_chans=3,
+                spike_chans=1,
+                out_chans=int(fusion_cfg.get('out_chans', 3)),
+                operator_params=fusion_cfg.get('operator_params', {}),
+            )
+            self.fusion_adapter = create_fusion_adapter(
+                placement=fusion_cfg.get('placement', 'early'),
+                operator=self.fusion_operator,
+                mode=fusion_cfg.get('mode', 'replace'),
+                inject_stages=fusion_cfg.get('inject_stages', []),
+            )
+
         if self.pa_frames:
             if self.nonblind_denoising:
                 conv_first_in_chans = in_chans * 9 + 1
@@ -285,6 +306,11 @@ class VRT(nn.Module):
 
             x_lq = x.clone()
             x_lq_rgb = self.extract_rgb(x_lq)
+
+            if self.fusion_enabled and self.fusion_cfg.get('placement', 'early') in {'early', 'hybrid'}:
+                rgb = x[:, :, :3, :, :]
+                spike = x[:, :, 3:, :, :]
+                x = self.fusion_adapter(rgb=rgb, spike=spike)
 
             if timer is not None:
                 with timer.timer('flow_estimation'):
