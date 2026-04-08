@@ -7,9 +7,10 @@ class FusionOperator(Protocol):
 
 
 def validate_mode(mode: str) -> str:
-    if mode not in ('replace', 'residual'):
-        raise ValueError(f"Unknown fusion placement: {mode}")
-    return mode
+    normalized = mode.lower().strip()
+    if normalized not in ('replace', 'residual'):
+        raise ValueError(f"Unsupported fusion mode: {mode}")
+    return normalized
 
 
 __all__ = ['FusionOperator', 'validate_mode']
