@@ -16,7 +16,7 @@ def create_fusion_operator(
         rgb_chans=rgb_chans,
         spike_chans=spike_chans,
         out_chans=out_chans,
-        operator_params=operator_params,
+        operator_params=operator_params or {},
     )
 
 

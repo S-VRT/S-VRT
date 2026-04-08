@@ -1,8 +1,10 @@
-from typing import Any, Protocol
+from typing import Protocol
+
+import torch
 
 
 class FusionOperator(Protocol):
-    def __call__(self, *inputs: Any, **kwargs: Any) -> Any:
+    def __call__(self, rgb_feat: torch.Tensor, spike_feat: torch.Tensor) -> torch.Tensor:
         ...
 
 

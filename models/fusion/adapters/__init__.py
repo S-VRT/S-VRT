@@ -29,11 +29,11 @@ def build_adapter(
     known_placements = {'early', 'middle', 'hybrid'}
     if placement not in known_placements:
         raise ValueError(f"Unknown fusion placement: {placement}")
-    validate_mode(mode)
+    canonical_mode = validate_mode(mode)
     return IdentityFusionAdapter(
         placement=placement,
         operator=operator,
-        mode=mode,
+        mode=canonical_mode,
         inject_stages=inject_stages,
         **kwargs,
     )
