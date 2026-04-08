@@ -323,3 +323,42 @@ def test_vrt_middle_inject_stages_mixed_dims_raises():
             optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
             opt=opt,
         )
+
+
+def test_full_t_rejects_non_spikecv_tfp():
+    opt = {
+        "netG": {
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "concat",
+                "out_chans": 11,
+                "early": {"expand_to_full_t": True},
+                "operator_params": {},
+            }
+        },
+        "datasets": {
+            "train": {
+                "spike_reconstruction": {
+                    "type": "middle_tfp",
+                }
+            }
+        },
+    }
+
+    with pytest.raises(ValueError, match="full-T early fusion requires spikecv_tfp"):
+        VRT(
+            upscale=1,
+            in_chans=11,
+            out_chans=3,
+            img_size=[2, 8, 8],
+            window_size=[2, 4, 4],
+            depths=[1] * 8,
+            indep_reconsts=[],
+            embed_dims=[16] * 8,
+            num_heads=[1] * 8,
+            pa_frames=2,
+            use_flash_attn=False,
+            optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+            opt=opt,
+        )

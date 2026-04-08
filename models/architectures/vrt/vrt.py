@@ -209,6 +209,28 @@ class VRT(nn.Module):
                     f"Fusion early out_chans ({early_out_chans}) must match in_chans ({self.in_chans}) "
                     f"for placement={fusion_placement}."
                 )
+            if fusion_placement in {'early', 'hybrid'} and bool(early_cfg.get('expand_to_full_t', False)):
+                recon_cfg = (((opt or {}).get('datasets', {}) or {}).get('train', {}) or {}).get(
+                    'spike_reconstruction',
+                    None,
+                )
+                if recon_cfg is None:
+                    recon_cfg = (((opt or {}).get('datasets', {}) or {}).get('test', {}) or {}).get(
+                        'spike_reconstruction',
+                        None,
+                    )
+                if recon_cfg is None:
+                    recon_cfg = ((opt or {}).get('netG', {}) or {}).get('spike_reconstruction', None)
+                if recon_cfg is None:
+                    recon_cfg = (opt or {}).get('spike_reconstruction', None)
+                if isinstance(recon_cfg, dict):
+                    recon_type = recon_cfg.get('type', 'spikecv_tfp')
+                elif recon_cfg is None:
+                    recon_type = 'spikecv_tfp'
+                else:
+                    recon_type = recon_cfg
+                if str(recon_type).strip().lower() != 'spikecv_tfp':
+                    raise ValueError("full-T early fusion requires spikecv_tfp")
 
             operator_name = fusion_cfg.get('operator', 'concat')
             operator_params = fusion_cfg.get('operator_params', {})

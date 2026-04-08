@@ -373,6 +373,17 @@
     ,
     // 当使用DCNv4时，启用DCNv4 + Softmax（更接近DCNv2行为）
     "dcn_apply_softmax": false
+    // Temporal fusion 配置（示例：middle placement）
+    ,
+    "fusion": {
+      "enable": true,
+      "placement": "middle",
+      "operator": "gated",
+      "mode": "replace",
+      "inject_stages": [1, 3, 5],
+      "out_chans": 11,
+      "operator_params": {}
+    }
     // 可变形卷积组数：可变形对齐模块的组数
     ,
     "deformable_groups": 16
