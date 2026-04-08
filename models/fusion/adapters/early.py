@@ -25,12 +25,12 @@ class EarlyFusionAdapter(nn.Module):
         if spike.dim() != 5:
             raise ValueError("spike must be 5D tensor [B, N, T, H, W] or [B, N, C, H, W]")
         bsz, steps, rgb_chans, height, width = rgb.shape
-        time_dim = spike.size(2)
+        spike_bsz, spike_steps, time_dim, spike_height, spike_width = spike.shape
+        if (bsz, steps, height, width) != (spike_bsz, spike_steps, spike_height, spike_width):
+            raise ValueError("rgb and spike must share batch, steps, height, and width")
         rgb_rep = rgb.unsqueeze(2).expand(bsz, steps, time_dim, rgb_chans, height, width)
         rgb_rep = rgb_rep.reshape(bsz, steps * time_dim, rgb_chans, height, width)
         spk = spike.reshape(bsz, steps * time_dim, 1, height, width)
-        if spk.size(2) != 1:
-            spk = spk.mean(dim=2, keepdim=True)
         return self.operator(rgb_rep, spk)
 
 
