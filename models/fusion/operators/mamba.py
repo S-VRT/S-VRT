@@ -21,7 +21,7 @@ class MambaFusionOperator(nn.Module):
         self.spike_proj = nn.Conv2d(spike_chans, out_chans, kernel_size=1)
         try:
             from mamba_ssm import Mamba  # type: ignore
-        except Exception:
+        except (ImportError, ModuleNotFoundError):
             self.mamba = None
             return
         d_state = int(operator_params.get('d_state', 16))
