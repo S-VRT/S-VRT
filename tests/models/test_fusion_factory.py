@@ -1,4 +1,5 @@
 import pytest
+import torch
 
 from models.fusion.factory import create_fusion_operator, create_fusion_adapter
 
@@ -13,6 +14,11 @@ def test_create_fusion_operator_concat():
     )
     assert callable(op)
     assert op is not None
+    rgb_feat = torch.randn(2, 3, 8, 8)
+    spike_feat = torch.randn(2, 8, 8, 8)
+    out = op(rgb_feat, spike_feat)
+    assert isinstance(out, torch.Tensor)
+    assert out.shape == rgb_feat.shape
 
 
 def test_create_fusion_operator_unknown():

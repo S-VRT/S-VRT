@@ -1,5 +1,7 @@
 from typing import Any
 
+import torch
+
 class ConcatFusionOperator:
     def __init__(
         self,
@@ -13,7 +15,7 @@ class ConcatFusionOperator:
         self.out_chans = out_chans
         self.operator_params = operator_params
 
-    def __call__(self, rgb_feat, spike_feat):
+    def __call__(self, rgb_feat: torch.Tensor, spike_feat: torch.Tensor) -> torch.Tensor:
         return rgb_feat
 
 
