@@ -28,7 +28,7 @@ class EarlyFusionAdapter(nn.Module):
         time_dim = spike.size(2)
         rgb_rep = rgb.unsqueeze(2).expand(bsz, steps, time_dim, rgb_chans, height, width)
         rgb_rep = rgb_rep.reshape(bsz, steps * time_dim, rgb_chans, height, width)
-        spk = spike.reshape(bsz, steps * time_dim, spike.size(2), height, width)
+        spk = spike.reshape(bsz, steps * time_dim, 1, height, width)
         if spk.size(2) != 1:
             spk = spk.mean(dim=2, keepdim=True)
         return self.operator(rgb_rep, spk)
