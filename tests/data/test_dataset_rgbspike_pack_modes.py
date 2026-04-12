@@ -113,6 +113,25 @@ def test_dual_pack_mode_can_drop_legacy_L(tmp_path):
     assert {"L_rgb", "L_spike", "H", "key"} == set(sample.keys())
 
 
+def test_dual_pack_mode_defaults_to_keep_legacy_l(tmp_path):
+    dataset = _build_dataset(tmp_path, input_pack_mode="dual")
+    sample = dataset[0]
+    assert "L" in sample
+    assert {"L", "L_rgb", "L_spike", "H", "key"} == set(sample.keys())
+
+
+def test_concat_pack_mode_ignores_keep_legacy_flag(tmp_path):
+    dataset = _build_dataset(tmp_path, input_pack_mode="concat", keep_legacy_l=False)
+    sample = dataset[0]
+    assert set(sample.keys()) == {"L", "H", "key"}
+
+
+def test_input_pack_mode_normalizes_whitespace_and_case(tmp_path):
+    dataset = _build_dataset(tmp_path, input_pack_mode=" DuAl ")
+    sample = dataset[0]
+    assert {"L", "L_rgb", "L_spike", "H", "key"} == set(sample.keys())
+
+
 def test_invalid_input_pack_mode_raises(tmp_path):
     opt = _build_opt(tmp_path, input_pack_mode="invalid")
     with pytest.raises(ValueError, match="input_pack_mode must be one of"):
