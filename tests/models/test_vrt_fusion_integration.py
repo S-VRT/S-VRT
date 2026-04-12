@@ -79,13 +79,13 @@ def test_vrt_forward_triggers_early_fusion(monkeypatch):
     )
 
     called = {"adapter": False}
-    original_adapter = model.fusion_adapter
+    original_forward = model.fusion_adapter.forward
 
     def _adapter_wrapper(*args, **kwargs):
         called["adapter"] = True
-        return original_adapter(*args, **kwargs)
+        return original_forward(*args, **kwargs)
 
-    model.fusion_adapter = _adapter_wrapper
+    monkeypatch.setattr(model.fusion_adapter, "forward", _adapter_wrapper)
 
     dummy_flows = [
         torch.zeros(1, 1, 2, 8, 8),
@@ -402,3 +402,4 @@ def test_full_t_hybrid_rejects_non_spikecv_tfp_from_test_dataset():
             optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
             opt=opt,
         )
+

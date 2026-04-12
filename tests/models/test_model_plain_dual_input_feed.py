@@ -21,6 +21,7 @@ class _DummyTimer:
 class _MarkerNet:
     def __init__(self):
         self.last_marker = None
+        self.training = True
 
     def set_input_path_marker(self, marker):
         self.last_marker = marker
@@ -99,6 +100,7 @@ def test_build_model_input_invalid_mode_raises():
 
 def test_feed_data_enforces_channel_assert_after_dual_concat():
     model = _build_stub_model("dual", in_chans=8)
+    model.netG = _MarkerNet()
     l_rgb = torch.randn(1, 2, 3, 8, 8)
     l_spike = torch.randn(1, 2, 4, 8, 8)
     with pytest.raises(ValueError, match="Channel Mismatch"):
@@ -137,3 +139,4 @@ def test_feed_data_dual_fallback_still_enforces_channel_assert():
     model.netG = _MarkerNet()
     with pytest.raises(ValueError, match="Channel Mismatch"):
         model.feed_data({"L": torch.randn(1, 2, 7, 8, 8), "H": torch.randn(1, 2, 3, 8, 8)})
+

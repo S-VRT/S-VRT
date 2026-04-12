@@ -141,7 +141,7 @@ def test_invalid_input_pack_mode_raises(tmp_path):
 def test_dual_mode_spike_channel_mismatch_raises(tmp_path):
     dataset = _build_dataset(tmp_path, input_pack_mode="dual", spike_channels=2)
     dataset._load_raw_frame = types.MethodType(_fake_loader(spike_channels=3), dataset)
-    with pytest.raises(ValueError, match="spike channels mismatch"):
+    with pytest.raises(ValueError, match="Spike channels mismatch"):
         _ = dataset[0]
 
 
@@ -154,7 +154,7 @@ def test_dual_mode_spatial_mismatch_raises(tmp_path, monkeypatch):
         return np.zeros((bad_h, bad_w), dtype=src.dtype)
 
     monkeypatch.setattr(cv2, "resize", _bad_resize)
-    with pytest.raises(ValueError, match="spatial shape mismatch"):
+    with pytest.raises(ValueError, match="matching spatial shape"):
         _ = dataset[0]
 
 
@@ -178,3 +178,4 @@ def test_conflicting_nested_and_legacy_reconstruction_raises(tmp_path):
     )
     with pytest.raises(ValueError, match="Conflicting reconstruction types"):
         TrainDatasetRGBSpike(opt)
+
