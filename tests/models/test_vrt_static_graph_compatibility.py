@@ -363,13 +363,14 @@ class TestVRTStaticGraphCompatibility:
         # Add required training flag
         config['is_train'] = True
 
-        # Verify the config has the problematic combination
-        assert config.get('dist', False) == True, "Config should have DDP enabled"
+        # Parser auto-detects dist from environment. Force DDP path for this compatibility test.
+        assert 'dist' in config, "Config should expose dist flag"
+        config['dist'] = True
         assert config.get('use_static_graph', False) == True, "Config should have static graph enabled"
         assert config.get('train', {}).get('fix_iter', 0) > 0, "Config should have parameter freezing"
         assert len(config.get('train', {}).get('fix_keys', [])) > 0, "Config should have freeze keys"
 
-        print("✓ Loaded problematic config: DDP=True, static_graph=True, fix_iter>0, fix_keys present")
+        print("✓ Loaded problematic config: static_graph=True, fix_iter>0, fix_keys present; forcing dist=True for test")
 
         # Create a minimal config for testing (avoid full dataset loading)
         test_config = {
@@ -508,3 +509,5 @@ class TestVRTStaticGraphCompatibility:
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+

@@ -89,7 +89,10 @@ class TestDCNv4Integration:
             sgp_w=1,
             sgp_k=3,
             sgp_reduction=8,
-            opt=config
+            dcn_config={
+                'type': config['netG']['dcn_type'],
+                'apply_softmax': config['netG'].get('dcn_apply_softmax', False),
+            }
         )
 
         assert stage is not None
@@ -125,7 +128,10 @@ class TestDCNv4Integration:
             sgp_w=1,
             sgp_k=3,
             sgp_reduction=8,
-            opt=config
+            dcn_config={
+                'type': config['netG']['dcn_type'],
+                'apply_softmax': config['netG'].get('dcn_apply_softmax', False),
+            }
         )
 
         assert stage is not None
@@ -162,7 +168,10 @@ class TestDCNv4Integration:
             sgp_w=1,
             sgp_k=3,
             sgp_reduction=8,
-            opt=config
+            dcn_config={
+                'type': config['netG']['dcn_type'],
+                'apply_softmax': config['netG'].get('dcn_apply_softmax', False),
+            }
         ).cuda()
 
         # 创建测试输入 (VRT Stage期望格式: [num_frames, channels, depth, height, width])
@@ -187,18 +196,27 @@ class TestDCNv4Integration:
         # 测试DCNv2
         config = minimal_vrt_config.copy()
         config['netG']['dcn_type'] = 'DCNv2'
-        DCNv2Class = get_deformable_module(config)
-        assert DCNv2Class.__name__ == 'DCNv2PackFlowGuided'
+        dcnv2_creator = get_deformable_module(config)
+        dcnv2_module = dcnv2_creator(
+            32, 32, 3, padding=1, deformable_groups=4, max_residue_magnitude=10, pa_frames=2
+        )
+        assert dcnv2_module.__class__.__name__ == 'DCNv2PackFlowGuided'
 
         # 测试DCNv4
         config['netG']['dcn_type'] = 'DCNv4'
-        DCNv4Class = get_deformable_module(config)
-        assert DCNv4Class.__name__ == 'DCNv4PackFlowGuided'
+        dcnv4_creator = get_deformable_module(config)
+        dcnv4_module = dcnv4_creator(
+            32, 32, 3, padding=1, deformable_groups=4, max_residue_magnitude=10, pa_frames=2
+        )
+        assert dcnv4_module.__class__.__name__ == 'DCNv4PackFlowGuided'
 
         # 测试默认值
         config['netG'].pop('dcn_type', None)
-        DefaultClass = get_deformable_module(config)
-        assert DefaultClass.__name__ == 'DCNv2PackFlowGuided'
+        default_creator = get_deformable_module(config)
+        default_module = default_creator(
+            32, 32, 3, padding=1, deformable_groups=4, max_residue_magnitude=10, pa_frames=2
+        )
+        assert default_module.__class__.__name__ == 'DCNv2PackFlowGuided'
 
     def test_config_file_parsing(self):
         """测试配置文件中的dcn_type字段"""
@@ -234,3 +252,5 @@ class TestDCNv4Integration:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+
