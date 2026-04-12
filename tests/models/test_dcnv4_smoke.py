@@ -13,6 +13,14 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _require_dcnv4_or_skip():
+    """Skip tests that require compiled DCNv4 extension when unavailable."""
+    try:
+        from models.op.dcnv4 import DCNv4  # noqa: F401
+    except Exception as exc:
+        pytest.skip(f"DCNv4 extension unavailable: {exc}")
+
+
 @pytest.mark.smoke
 class TestDCNv4Integration:
     """DCNv4集成测试类"""
@@ -101,6 +109,7 @@ class TestDCNv4Integration:
 
     def test_dcnv4_stage_creation(self, minimal_vrt_config):
         """测试DCNv4 Stage创建"""
+        _require_dcnv4_or_skip()
         from models.architectures.vrt.stages import Stage
 
         config = minimal_vrt_config.copy()
@@ -141,6 +150,7 @@ class TestDCNv4Integration:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_dcnv4_stage_forward(self, minimal_vrt_config):
         """测试DCNv4 Stage前向传播（需要CUDA）"""
+        _require_dcnv4_or_skip()
         from models.architectures.vrt.stages import Stage
 
         config = minimal_vrt_config.copy()
@@ -202,14 +212,6 @@ class TestDCNv4Integration:
         )
         assert dcnv2_module.__class__.__name__ == 'DCNv2PackFlowGuided'
 
-        # 测试DCNv4
-        config['netG']['dcn_type'] = 'DCNv4'
-        dcnv4_creator = get_deformable_module(config)
-        dcnv4_module = dcnv4_creator(
-            32, 32, 3, padding=1, deformable_groups=4, max_residue_magnitude=10, pa_frames=2
-        )
-        assert dcnv4_module.__class__.__name__ == 'DCNv4PackFlowGuided'
-
         # 测试默认值
         config['netG'].pop('dcn_type', None)
         default_creator = get_deformable_module(config)
@@ -217,6 +219,15 @@ class TestDCNv4Integration:
             32, 32, 3, padding=1, deformable_groups=4, max_residue_magnitude=10, pa_frames=2
         )
         assert default_module.__class__.__name__ == 'DCNv2PackFlowGuided'
+
+        # 测试DCNv4（环境未安装扩展时跳过）
+        _require_dcnv4_or_skip()
+        config['netG']['dcn_type'] = 'DCNv4'
+        dcnv4_creator = get_deformable_module(config)
+        dcnv4_module = dcnv4_creator(
+            32, 32, 3, padding=1, deformable_groups=4, max_residue_magnitude=10, pa_frames=2
+        )
+        assert dcnv4_module.__class__.__name__ == 'DCNv4PackFlowGuided'
 
     def test_config_file_parsing(self):
         """测试配置文件中的dcn_type字段"""
