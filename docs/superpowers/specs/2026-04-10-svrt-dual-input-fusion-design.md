@@ -174,3 +174,30 @@
    - `dual + middle`
    - `dual + hybrid`
    - `dual + early(expand_to_full_t=true)`（标记为实验模式，仅验证可运行与日志标识，不纳入默认主结果）
+
+## 11. 实现状态（2026-04-11）
+
+### 已完成
+
+1. 数据集双打包契约已落地：`concat` / `dual`、`keep_legacy_l`、形状与通道校验、兼容迁移读取（含 `spike.reconstruction` 与 legacy 字段一致性检查）。
+2. 模型入口已统一：`ModelPlain/ModelVRT` 支持 `input_mode=concat|dual`，dual 路径优先 `L_rgb+L_spike`，并支持 legacy `L` 回退。
+3. VRT 已支持 `input_mode` 语义、输入路径生效日志（`concat_path` / `dual_path` / `dual_fallback_to_concat_path`）、dual+fusion 约束检查。
+4. 配置样例已收敛：
+   - `options/006_train_vrt_videodeblurring_gopro_rgbspike.json` 作为 `concat baseline`
+   - `options/gopro_rgbspike_local_debug.json` 作为 `dual + fusion` 调试样例
+5. 测试文件已补齐：
+   - `tests/data/test_dataset_rgbspike_pack_modes.py`
+   - `tests/models/test_model_plain_dual_input_feed.py`
+   - `tests/models/test_vrt_dual_input_priority.py`
+   - `tests/models/test_vrt_fusion_integration.py`（沿用并与新契约兼容）
+
+### 未完成（环境限制）
+
+1. 本机无法安装/运行 `pytest`，以下命令未在当前环境执行：
+   - `pytest tests/data/test_dataset_rgbspike_pack_modes.py tests/models/test_model_plain_dual_input_feed.py tests/models/test_vrt_dual_input_priority.py tests/models/test_vrt_fusion_integration.py -v`
+2. smoke 命令未执行：
+   - `python main_train_vrt.py --opt options/gopro_rgbspike_local_debug.json`
+
+### 备注
+
+当前状态为“代码与配置完成、静态审查通过、待可运行环境做动态回归验证”。

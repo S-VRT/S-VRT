@@ -50,11 +50,17 @@
       , "spike_h": 250
       , "spike_w": 400
       , "spike_channels": 4
+      , "input_pack_mode": "concat"
+      , "keep_legacy_l": true
       , "spike_flipud": true
-      , "spike_reconstruction": "spikecv_tfp"
-      , "middle_tfp_center": 44
-      , "spike_reconstruction": "spikecv_tfp"
-      , "middle_tfp_center": 44
+      , "spike": {
+        "reconstruction": {
+          "type": "spikecv_tfp"
+          , "num_bins": 4
+          , "middle_tfp_center": 44
+        }
+      }
+      // Backward-compatible legacy fields (transition period)
       , "spike_reconstruction": "spikecv_tfp"
       , "middle_tfp_center": 44
       , "rgb_normalize": "imagenet"
@@ -96,6 +102,7 @@
   , "netG": {
     "net_type": "vrt"
     , "in_chans": 7
+    , "input_mode": "concat"
     , "upscale": 1
     , "img_size": [6,224,224]
     , "window_size": [6,8,8]

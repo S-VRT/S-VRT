@@ -116,6 +116,23 @@
       // Spike 数据通道数：4 表示 TFP 体素 (RGB+Spike=7)
       ,
       "spike_channels": 8
+      // 输入打包模式：concat=仅输出 L；dual=输出 L_rgb/L_spike（可选保留 L）
+      ,
+      "input_pack_mode": "dual"
+      ,
+      "keep_legacy_l": true
+      // 新分层 Spike 重建配置（推荐）
+      // 说明：以 spike.reconstruction 为主，legacy 字段仅作兼容镜像，修改时需保持一致
+      ,
+      "spike": {
+        "reconstruction": {
+          "type": "spikecv_tfp",
+          "num_bins": 8
+        }
+      }
+      // 旧字段保留兼容（过渡期）
+      ,
+      "spike_reconstruction": "spikecv_tfp"
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
@@ -218,6 +235,20 @@
       // Spike 数据通道数：4 表示 TFP 体素 (RGB+Spike=7)
       ,
       "spike_channels": 8
+      ,
+      "input_pack_mode": "dual"
+      ,
+      "keep_legacy_l": true
+      ,
+      "spike": {
+        // 说明：以 spike.reconstruction 为主，legacy 字段仅作兼容镜像，修改时需保持一致
+        "reconstruction": {
+          "type": "spikecv_tfp",
+          "num_bins": 8
+        }
+      }
+      ,
+      "spike_reconstruction": "spikecv_tfp"
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
@@ -254,9 +285,17 @@
       "io_backend": {
         "type": "lmdb"
       }
-      // 输入帧数：-1 表示使用所有可用帧
+      // 输入帧数：与训练保持一致，便于 dual+fusion 调试
       ,
-      "num_frame": -1
+      "num_frame": 6
+      ,
+      "meta_info_file": "data/meta_info/meta_info_GoPro_train_GT.txt"
+      ,
+      "test_mode": false
+      ,
+      "use_hflip": false
+      ,
+      "use_rot": false
       // 数据加载器是否打乱：测试/验证通常不打乱
       ,
       "dataloader_shuffle": false
@@ -275,6 +314,8 @@
   "netG": {
     // 网络类型：指定为 "vrt" (Video Restoration Transformer)
     "net_type": "vrt"
+    ,
+    "input_mode": "dual"
     // 输入通道数：7 表示 RGB (3) + Spike TFP (4) 通道拼接
     // 当 pa_frames>0 且使用 nearest4 对齐时，conv_first 实际接收 in_chans * 9 = 63 通道
     ,

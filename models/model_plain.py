@@ -41,6 +41,72 @@ class ModelPlain(ModelBase):
                 f"(e.g., RGB 3 + Spike 4 = 7) before feeding them to netG."
             )
 
+    def _resolve_input_mode(self):
+        raw_mode = self.opt.get('netG', {}).get('input_mode', 'concat')
+        mode = str(raw_mode).strip().lower()
+        if mode not in {'concat', 'dual'}:
+            raise ValueError(
+                f"Unsupported netG.input_mode={raw_mode!r}; expected 'concat' or 'dual'."
+            )
+        return mode
+
+    def _build_model_input_tensor(self, data):
+        mode = self._resolve_input_mode()
+        self._mark_net_input_path('concat_path' if mode == 'concat' else 'dual_path')
+        if mode == 'concat':
+            if 'L' not in data:
+                raise KeyError("input_mode=concat requires data['L'].")
+            return data['L']
+
+        has_rgb = 'L_rgb' in data
+        has_spike = 'L_spike' in data
+        has_dual = has_rgb and has_spike
+        if has_dual:
+            self._validate_dual_input_tensors(data['L_rgb'], data['L_spike'])
+            return torch.cat([data['L_rgb'], data['L_spike']], dim=2)
+        if has_rgb != has_spike:
+            missing_key = "L_spike" if has_rgb else "L_rgb"
+            raise KeyError(
+                f"input_mode=dual received partial dual payload; missing data['{missing_key}']."
+            )
+        if 'L' in data:
+            self._mark_net_input_path('dual_fallback_to_concat_path')
+            print("[ModelPlain] input_mode=dual but L_rgb/L_spike missing; fallback to legacy data['L'].")
+            return data['L']
+        raise KeyError(
+            "input_mode=dual requires both data['L_rgb'] and data['L_spike'], "
+            "or legacy fallback data['L']."
+        )
+
+    def _validate_dual_input_tensors(self, l_rgb, l_spike):
+        if l_rgb.ndim != 5 or l_spike.ndim != 5:
+            raise ValueError(
+                "input_mode=dual expects L_rgb and L_spike shaped [B,T,C,H,W]. "
+                f"Got L_rgb ndim={l_rgb.ndim}, L_spike ndim={l_spike.ndim}."
+            )
+        if l_rgb.size(2) != 3:
+            raise ValueError(
+                f"input_mode=dual expects L_rgb channels=3, got {l_rgb.size(2)}."
+            )
+        if (
+            l_rgb.size(0) != l_spike.size(0)
+            or l_rgb.size(1) != l_spike.size(1)
+            or l_rgb.size(3) != l_spike.size(3)
+            or l_rgb.size(4) != l_spike.size(4)
+        ):
+            raise ValueError(
+                f"input_mode=dual requires matching [B,T,H,W] between L_rgb {tuple(l_rgb.shape)} "
+                f"and L_spike {tuple(l_spike.shape)}."
+            )
+
+    def _mark_net_input_path(self, marker):
+        net = self.get_bare_model(self.netG) if hasattr(self, 'netG') else None
+        if net is not None:
+            if hasattr(net, "set_input_path_marker"):
+                net.set_input_path_marker(marker)
+            else:
+                setattr(net, "_input_path_marker", marker)
+
     """
     # ----------------------------------------
     # Preparation before training with data
@@ -168,7 +234,7 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     def feed_data(self, data, need_H=True):
         with self.timer.timer('data_load'):
-            self.L = data['L'].to(self.device)
+            self.L = self._build_model_input_tensor(data).to(self.device)
             self._assert_lq_channels(self.L, 'Training Feed Data')
 
             if need_H:
