@@ -74,6 +74,9 @@ class TestVRTStaticGraphCompatibility:
                 'net_type': 'vrt',
                 'in_chans': 11,
                 'upscale': 1,
+                'init_type': 'default',
+                'init_bn_type': 'uniform',
+                'init_gain': 1,
                 'img_size': [6, 64, 64],
                 'window_size': [6, 8, 8],
                 'depths': [2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1],
@@ -82,7 +85,9 @@ class TestVRTStaticGraphCompatibility:
                 'num_heads': [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2],
                 'spynet_path': None,
                 'optical_flow': None,
-                'pa_frames': 0,  # Disable parallel alignment frames to avoid optical flow
+                'pa_frames': 0,
+                'dcn_type': 'DCNv4',
+                'dcn_apply_softmax': False,
                 'deformable_groups': 8,
                 'nonblind_denoising': False,
                 'use_checkpoint_attn': False,
@@ -412,6 +417,9 @@ class TestVRTStaticGraphCompatibility:
                 'net_type': 'vrt',
                 'in_chans': 11,
                 'upscale': 1,
+                'init_type': 'default',
+                'init_bn_type': 'uniform',
+                'init_gain': 1,
                 'img_size': [6, 64, 64],
                 'window_size': [6, 8, 8],
                 'depths': [2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1],
@@ -421,6 +429,8 @@ class TestVRTStaticGraphCompatibility:
                 'spynet_path': None,
                 'optical_flow': None,
                 'pa_frames': 0,
+                'dcn_type': 'DCNv4',
+                'dcn_apply_softmax': False,
                 'deformable_groups': 8,
                 'nonblind_denoising': False,
                 'use_checkpoint_attn': False,
@@ -509,5 +519,7 @@ class TestVRTStaticGraphCompatibility:
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
+
 
 
