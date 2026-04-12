@@ -459,6 +459,9 @@ class TestVRTStaticGraphCompatibility:
         assert original_static_graph == True, \
             "Original config should have had static graph enabled"
 
+        # Instantiate in single-process mode; distributed init is outside this test scope.
+        test_config['dist'] = False
+
         # Now try to create the actual model (this will test if the model can be initialized)
         try:
             print("Creating VRT model with modified config...")
@@ -519,6 +522,7 @@ class TestVRTStaticGraphCompatibility:
 
 if __name__ == "__main__":
     pytest.main([__file__])
+
 
 
 
