@@ -10,7 +10,6 @@ import cv2
 import utils.utils_video as utils_video
 from data.spike_recc import SpikeStream, voxelize_spikes_tfp
 from data.spike_recc.middle_tfp.reconstructor import MiddleTFPReconstructor
-from data.spike_recc.snn.reconstructor import SNNReconstructor
 
 
 class TrainDatasetRGBSpike(data.Dataset):
@@ -152,6 +151,13 @@ class TrainDatasetRGBSpike(data.Dataset):
             if self.spike_channels != 1:
                 self.spike_channels = 1
             snn_cfg = spike_reconstruction_cfg if isinstance(spike_reconstruction_cfg, dict) else {}
+            try:
+                from data.spike_recc.snn.reconstructor import SNNReconstructor
+            except ModuleNotFoundError as exc:
+                raise ModuleNotFoundError(
+                    "[TrainDatasetRGBSpike] spike_reconstruction='snn' requires optional dependency "
+                    "'snntorch'. Install it before using SNN reconstruction."
+                ) from exc
             # Use device from config or fallback to tfp_device
             snn_device = snn_cfg.get('device', self.tfp_device if self.tfp_device else 'cpu')
             self._snn_reconstructor = SNNReconstructor(
