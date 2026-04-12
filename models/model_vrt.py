@@ -21,6 +21,10 @@ class ModelVRT(ModelPlain):
         self.fix_keys = self.opt_train.get('fix_keys', [])
         self.fix_unflagged = True
 
+    def feed_data(self, data, need_H=True):
+        # Keep VRT data ingress aligned with ModelPlain dual/concat input routing.
+        super(ModelVRT, self).feed_data(data, need_H=need_H)
+
     # ----------------------------------------
     # define optimizer
     # ----------------------------------------

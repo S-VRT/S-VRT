@@ -1,4 +1,4 @@
-
+import logging
 import math
 import torch
 import torch.nn as nn
@@ -14,6 +14,11 @@ from models.utils.flow import flow_warp
 from models.utils.init import trunc_normal_
 from models.spk_encoder import PixelAdaptiveSpikeEncoder
 from models.fusion.factory import create_fusion_operator, create_fusion_adapter
+
+LOGGER = logging.getLogger(__name__)
+INPUT_PATH_CONCAT = "concat_path"
+INPUT_PATH_DUAL = "dual_path"
+INPUT_PATH_DUAL_FALLBACK = "dual_fallback_to_concat_path"
 
 
 class Upsample(nn.Sequential):
@@ -129,6 +134,12 @@ class VRT(nn.Module):
         self.nonblind_denoising = nonblind_denoising
         self.use_sgp = use_sgp
         self.use_flash_attn = use_flash_attn
+        raw_input_mode = ((opt or {}).get('netG', {}) or {}).get('input_mode', 'concat')
+        self.input_mode = str(raw_input_mode).strip().lower()
+        if self.input_mode not in {'concat', 'dual'}:
+            raise ValueError(
+                f"[VRT] Unsupported netG.input_mode={raw_input_mode!r}; expected 'concat' or 'dual'."
+            )
 
         # Parse DCN configuration
         self.dcn_config = dcn_config or {}
@@ -169,12 +180,16 @@ class VRT(nn.Module):
 
             middle_rgb_chans = None
             middle_spike_chans = None
+            if self.input_mode == 'dual' and self.in_chans <= 3:
+                raise ValueError(
+                    f"[VRT] input_mode=dual requires in_chans>3 (rgb+spike), got in_chans={self.in_chans}."
+                )
             if fusion_placement in {'middle', 'hybrid'}:
                 spike_input_chans = self.in_chans - 3
                 if spike_input_chans <= 0:
                     raise ValueError(
-                        f"Fusion placement={fusion_placement} requires spike channels in input "
-                        f"(in_chans must be > 3, got {self.in_chans})."
+                        f"[VRT] input_mode={self.input_mode}, placement={fusion_placement} "
+                        f"requires spike channels in input (in_chans>3). Got in_chans={self.in_chans}."
                     )
                 if inject_stages:
                     if not isinstance(inject_stages, (list, tuple)):
@@ -197,7 +212,8 @@ class VRT(nn.Module):
                     middle_rgb_chans = unique_dims[0]
                     if middle_out_chans != middle_rgb_chans:
                         raise ValueError(
-                            "Fusion middle out_chans must match injected stage dim. "
+                            f"[VRT] input_mode={self.input_mode}, placement={fusion_placement} "
+                            "requires middle out_chans to match injected stage dim. "
                             f"Got out_chans={middle_out_chans}, expected {middle_rgb_chans}."
                         )
                 else:
@@ -206,23 +222,24 @@ class VRT(nn.Module):
 
             if fusion_placement in {'early', 'hybrid'} and early_out_chans != self.in_chans:
                 raise ValueError(
-                    f"Fusion early out_chans ({early_out_chans}) must match in_chans ({self.in_chans}) "
-                    f"for placement={fusion_placement}."
+                    f"[VRT] input_mode={self.input_mode}, placement={fusion_placement} requires "
+                    f"early out_chans ({early_out_chans}) to match in_chans ({self.in_chans})."
                 )
             full_t_required = (
                 fusion_placement == 'hybrid'
                 or (fusion_placement == 'early' and bool(early_cfg.get('expand_to_full_t', False)))
             )
             if full_t_required:
-                recon_cfg = (((opt or {}).get('datasets', {}) or {}).get('train', {}) or {}).get(
-                    'spike_reconstruction',
-                    None,
-                )
+                datasets_cfg = ((opt or {}).get('datasets', {}) or {})
+                train_cfg = (datasets_cfg.get('train', {}) or {})
+                test_cfg = (datasets_cfg.get('test', {}) or {})
+                train_nested_recon = ((train_cfg.get('spike', {}) or {}).get('reconstruction', None))
+                test_nested_recon = ((test_cfg.get('spike', {}) or {}).get('reconstruction', None))
+                recon_cfg = train_nested_recon or test_nested_recon
                 if recon_cfg is None:
-                    recon_cfg = (((opt or {}).get('datasets', {}) or {}).get('test', {}) or {}).get(
-                        'spike_reconstruction',
-                        None,
-                    )
+                    recon_cfg = train_cfg.get('spike_reconstruction', None)
+                if recon_cfg is None:
+                    recon_cfg = test_cfg.get('spike_reconstruction', None)
                 if recon_cfg is None:
                     recon_cfg = ((opt or {}).get('netG', {}) or {}).get('spike_reconstruction', None)
                 if recon_cfg is None:
@@ -428,9 +445,25 @@ class VRT(nn.Module):
         """Inject a Timer instance for optional timing measurement."""
         self.timer = timer
 
+    def set_input_path_marker(self, marker):
+        valid = {INPUT_PATH_CONCAT, INPUT_PATH_DUAL, INPUT_PATH_DUAL_FALLBACK}
+        if marker not in valid:
+            raise ValueError(f"[VRT] Unsupported input path marker {marker!r}, expected one of {sorted(valid)}.")
+        self._input_path_marker = marker
+
+    def _resolve_input_path_marker(self):
+        marker = getattr(self, "_input_path_marker", None)
+        if marker in {INPUT_PATH_CONCAT, INPUT_PATH_DUAL, INPUT_PATH_DUAL_FALLBACK}:
+            return marker
+        return INPUT_PATH_DUAL if self.input_mode == "dual" else INPUT_PATH_CONCAT
+
     def forward(self, x):
         # x: (N, D, C, H, W)
         timer = getattr(self, 'timer', None)
+        path_marker = self._resolve_input_path_marker()
+        LOGGER.info("[VRT] input_path=%s", path_marker)
+        if hasattr(self, "_input_path_marker"):
+            delattr(self, "_input_path_marker")
 
         fusion_placement = self.fusion_cfg.get('placement', 'early')
         fusion_hook = None

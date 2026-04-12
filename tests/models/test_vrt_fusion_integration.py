@@ -104,7 +104,7 @@ def test_vrt_forward_triggers_early_fusion(monkeypatch):
             torch.zeros(bsz, steps, model.in_chans * 4, height, width),
         ]
 
-    def _fake_forward_features(_x, _fb, _ff):
+    def _fake_forward_features(_x, _fb, _ff, fusion_hook=None, spike_ctx=None):
         return torch.zeros_like(_x)
 
     monkeypatch.setattr(model, "get_flows", _fake_get_flows)

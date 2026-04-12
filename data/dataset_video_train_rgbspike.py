@@ -17,8 +17,11 @@ class TrainDatasetRGBSpike(data.Dataset):
     """Video dataset for training recurrent networks with RGB + Spike data.
 
     This dataset extends TrainDataset to support loading both
-    RGB frames and corresponding Spike camera data, then concatenates them
-    as input channels.
+    RGB frames and corresponding Spike camera data, with configurable
+    input packing:
+      - concat: return combined tensor in key `L`
+      - dual: return split tensors in keys `L_rgb` and `L_spike`
+        and optionally keep legacy `L` when `keep_legacy_l=True`
 
     The keys are generated from a meta info txt file.
     basicsr/data/meta_info/meta_info_XXX_GT.txt
@@ -60,6 +63,10 @@ class TrainDatasetRGBSpike(data.Dataset):
             spike_h (int): Spike camera height. Default: 250.
             spike_w (int): Spike camera width. Default: 400.
             spike_channels (int): Number of spike channels after voxelization. Default: 1.
+            input_pack_mode (str): Input packing mode. One of ['concat', 'dual'].
+                Default: 'concat'.
+            keep_legacy_l (bool): In dual mode, whether to keep legacy `L`.
+                Default: True.
             spike_flipud (bool): Whether to flip spike data vertically. Default: True.
             tfp_half_win_length (int): Half window length fed into TFP. Default: 20.
             tfp_device (str): Torch device string for TFP reconstruction. Default: 'cpu'.
@@ -80,13 +87,44 @@ class TrainDatasetRGBSpike(data.Dataset):
         # Spike configuration
         self.spike_h = opt.get('spike_h', 360)
         self.spike_w = opt.get('spike_w', 640)
-        self.spike_channels = opt.get('spike_channels', 4) # Default updated to 4 for TFP
+        spike_cfg = opt.get('spike', {}) if isinstance(opt.get('spike', {}), dict) else {}
+        spike_reconstruction_nested = spike_cfg.get('reconstruction', {})
+        if not isinstance(spike_reconstruction_nested, dict):
+            spike_reconstruction_nested = {}
+        nested_num_bins = spike_reconstruction_nested.get('num_bins', None)
+        legacy_reconstruction = opt.get('spike_reconstruction', None)
+        if spike_reconstruction_nested and legacy_reconstruction is not None:
+            nested_type = str(spike_reconstruction_nested.get('type', 'spikecv_tfp')).strip().lower()
+            legacy_type = str(legacy_reconstruction).strip().lower()
+            if nested_type != legacy_type:
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] Conflicting reconstruction types: "
+                    f"spike.reconstruction.type={nested_type!r} vs spike_reconstruction={legacy_type!r}."
+                )
+        legacy_middle_center = opt.get('middle_tfp_center', None)
+        if spike_reconstruction_nested and legacy_middle_center is not None and 'middle_tfp_center' in spike_reconstruction_nested:
+            nested_center = int(spike_reconstruction_nested['middle_tfp_center'])
+            if nested_center != int(legacy_middle_center):
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] Conflicting middle_tfp_center values: "
+                    f"spike.reconstruction.middle_tfp_center={nested_center} vs "
+                    f"middle_tfp_center={int(legacy_middle_center)}."
+                )
+        default_spike_channels = int(nested_num_bins) if nested_num_bins is not None else 4
+        self.spike_channels = int(opt.get('spike_channels', default_spike_channels))
+        if nested_num_bins is not None and 'spike_channels' in opt and int(opt['spike_channels']) != int(nested_num_bins):
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] Conflicting channel settings: spike_channels={int(opt['spike_channels'])} "
+                f"vs spike.reconstruction.num_bins={int(nested_num_bins)}."
+            )
         self.spike_flipud = opt.get('spike_flipud', True)
         self.tfp_half_win_length = opt.get('tfp_half_win_length', 20)
-        spike_reconstruction_cfg = opt.get('spike_reconstruction', 'spikecv_tfp')
+        spike_reconstruction_cfg = spike_reconstruction_nested or opt.get('spike_reconstruction', 'spikecv_tfp')
         if isinstance(spike_reconstruction_cfg, dict):
             self.spike_reconstruction = str(spike_reconstruction_cfg.get('type', 'spikecv_tfp')).strip().lower()
-            self.middle_tfp_center = int(spike_reconstruction_cfg.get('middle_tfp_center', 44))
+            self.middle_tfp_center = int(
+                spike_reconstruction_cfg.get('middle_tfp_center', opt.get('middle_tfp_center', 44))
+            )
         else:
             self.spike_reconstruction = str(spike_reconstruction_cfg).strip().lower()
             self.middle_tfp_center = int(opt.get('middle_tfp_center', 44))
@@ -124,8 +162,20 @@ class TrainDatasetRGBSpike(data.Dataset):
             )
         self.rgb_norm_stats = self._build_norm_stats(opt.get('rgb_normalize', None), num_channels=3, preset='imagenet')
         self.spike_norm_stats = self._build_norm_stats(opt.get('spike_normalize', None), num_channels=self.spike_channels)
+        raw_input_pack_mode = opt.get('input_pack_mode', 'concat')
+        if raw_input_pack_mode is None:
+            raw_input_pack_mode = 'concat'
+        normalized_input_pack_mode = str(raw_input_pack_mode).strip().lower()
+        supported_pack_modes = {'concat', 'dual'}
+        if normalized_input_pack_mode not in supported_pack_modes:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] input_pack_mode must be one of {supported_pack_modes}, got '{raw_input_pack_mode}'."
+            )
+        self.input_pack_mode = normalized_input_pack_mode
+        self.keep_legacy_l = bool(opt.get('keep_legacy_l', True))
+        self._dual_mode = self.input_pack_mode == 'dual'
+        # Both concat and dual modes rely on the combined tensor holding 3 + spike_channels.
         self.expected_lq_channels = 3 + self.spike_channels
-
         keys = []
         total_num_frames = [] # some clips may not have 100 frames
         start_frames = [] # some clips may not start from 00000
@@ -234,6 +284,15 @@ class TrainDatasetRGBSpike(data.Dataset):
         cropped_h, cropped_w = img_lqs[0].shape[:2]
         spike_voxels_resized = []
         for spike_voxel in spike_voxels:
+            if spike_voxel.ndim != 3:
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] Spike voxel must be [S,H,W], got shape {spike_voxel.shape}."
+                )
+            if spike_voxel.shape[0] != self.spike_channels:
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] Spike channels mismatch before resize: "
+                    f"expected {self.spike_channels}, got {spike_voxel.shape[0]}."
+                )
             # spike_voxel: (S, H, W)
             spike_voxel_resized = []
             for ch in range(self.spike_channels):
@@ -246,13 +305,14 @@ class TrainDatasetRGBSpike(data.Dataset):
         # Concatenate RGB and Spike channels
         # Channel Order: 
         #   0~2: RGB (0-1 float)
-        #   3~6: Spike TFP Voxels (0-1 float, 4 channels)
-        # Total: 7 channels
+        #   3~(3+S-1): Spike voxels (0-1 float, S=self.spike_channels)
+        # Total: 3 + self.spike_channels
         img_lqs_with_spike = []
         for img_lq, spike_voxel in zip(img_lqs, spike_voxels_resized):
             # img_lq: (H, W, 3), spike_voxel: (S, H, W)
             # Convert spike_voxel to (H, W, S)
             spike_voxel_hwc = np.transpose(spike_voxel, (1, 2, 0))  # (H, W, S)
+            self._validate_raw_rgb_spike_pair(img_lq, spike_voxel_hwc)
             # Concatenate along channel dimension
             img_lq_with_spike = np.concatenate([img_lq, spike_voxel_hwc], axis=2)  # (H, W, 3+S)
             img_lqs_with_spike.append(img_lq_with_spike)
@@ -272,10 +332,18 @@ class TrainDatasetRGBSpike(data.Dataset):
             )
         img_lqs = self._apply_channel_normalization(img_lqs)
 
-        # img_lqs: (t, c, h, w) where c = 3 + spike_channels
-        # img_gts: (t, c, h, w) where c = 3
-        # key: str
-        return {'L': img_lqs, 'H': img_gts, 'key': key}
+        sample = {'H': img_gts, 'key': key}
+        if self._dual_mode:
+            L_rgb = img_lqs[:, :3, :, :]
+            L_spike = img_lqs[:, 3:, :, :]
+            self._validate_dual_tensor_contract(L_rgb, L_spike)
+            sample['L_rgb'] = L_rgb
+            sample['L_spike'] = L_spike
+            if self.keep_legacy_l:
+                sample['L'] = img_lqs
+        else:
+            sample['L'] = img_lqs
+        return sample
 
     def __len__(self):
         return len(self.keys)
@@ -346,6 +414,44 @@ class TrainDatasetRGBSpike(data.Dataset):
             'spike': spike_voxel,
             'gt_path': img_gt_path,
         }
+
+    def _validate_raw_rgb_spike_pair(self, rgb_hwc, spike_hwc):
+        if rgb_hwc.ndim != 3 or spike_hwc.ndim != 3:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] Raw rgb/spike tensors must be HWC. "
+                f"Got rgb ndim={rgb_hwc.ndim}, spike ndim={spike_hwc.ndim}."
+            )
+        if rgb_hwc.shape[:2] != spike_hwc.shape[:2]:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] dual pack mode requires matching spatial shape before concat: "
+                f"rgb={rgb_hwc.shape[:2]}, spike={spike_hwc.shape[:2]}."
+            )
+        if spike_hwc.shape[2] != self.spike_channels:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] dual spike channels mismatch before concat: "
+                f"expected {self.spike_channels}, got {spike_hwc.shape[2]}."
+            )
+
+    def _validate_dual_tensor_contract(self, l_rgb, l_spike):
+        if l_rgb.ndim != 4 or l_spike.ndim != 4:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] dual tensors must be [T,C,H,W], got "
+                f"L_rgb ndim={l_rgb.ndim}, L_spike ndim={l_spike.ndim}."
+            )
+        if l_rgb.size(1) != 3:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] dual RGB tensor should have 3 channels, got {l_rgb.size(1)}."
+            )
+        if l_spike.size(1) != self.spike_channels:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] dual spike channels mismatch: "
+                f"expected {self.spike_channels}, got {l_spike.size(1)}."
+            )
+        if l_rgb.shape[0] != l_spike.shape[0] or l_rgb.shape[2:] != l_spike.shape[2:]:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] dual temporal/spatial mismatch between L_rgb {l_rgb.shape} "
+                f"and L_spike {l_spike.shape}."
+            )
 
     def _normalize_single_tfp_device(self, device_value):
         """Normalize a single TFP device specification."""
