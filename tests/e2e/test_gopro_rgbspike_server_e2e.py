@@ -4,14 +4,21 @@ import pytest
 import torch
 
 
-@pytest.mark.e2e
-@pytest.mark.slow
-def test_server_option_e2e_minimal_forward(server_option, require_paths_or_skip_fn):
+def _run_server_option_minimal_forward(
+    server_option,
+    require_paths_or_skip_fn,
+    *,
+    force_dual_pack_mode=False,
+):
     from data.dataset_video_train_rgbspike import TrainDatasetRGBSpike
     from models.architectures.vrt.vrt import VRT
 
     opt = copy.deepcopy(server_option)
     train_opt = opt.get("datasets", {}).get("train", {})
+
+    if force_dual_pack_mode:
+        train_opt["input_pack_mode"] = "dual"
+        train_opt["keep_legacy_l"] = False
 
     require_paths_or_skip_fn(
         [
@@ -25,12 +32,19 @@ def test_server_option_e2e_minimal_forward(server_option, require_paths_or_skip_
     dataset = TrainDatasetRGBSpike(train_opt)
     sample = dataset[0]
 
-    if "L" in sample:
-        x = sample["L"].unsqueeze(0)
-    else:
+    if force_dual_pack_mode:
+        assert "L" not in sample
+        assert "L_rgb" in sample and "L_spike" in sample
         x_rgb = sample["L_rgb"]
         x_spike = sample["L_spike"]
         x = torch.cat([x_rgb, x_spike], dim=1).unsqueeze(0)
+    else:
+        if "L" in sample:
+            x = sample["L"].unsqueeze(0)
+        else:
+            x_rgb = sample["L_rgb"]
+            x_spike = sample["L_spike"]
+            x = torch.cat([x_rgb, x_spike], dim=1).unsqueeze(0)
 
     net_cfg = opt.get("netG", {})
     depths = net_cfg.get("depths") or [1] * 8
@@ -64,3 +78,27 @@ def test_server_option_e2e_minimal_forward(server_option, require_paths_or_skip_
     assert y.size(0) == 1
     assert y.size(1) == x.size(1)
     assert y.size(2) == 3
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+def test_server_option_e2e_minimal_forward(server_option, require_paths_or_skip_fn):
+    _run_server_option_minimal_forward(
+        server_option,
+        require_paths_or_skip_fn,
+        force_dual_pack_mode=False,
+    )
+
+
+@pytest.mark.e2e
+@pytest.mark.slow
+def test_server_option_e2e_minimal_forward_forced_dual_path(
+    server_option,
+    require_paths_or_skip_fn,
+):
+    _run_server_option_minimal_forward(
+        server_option,
+        require_paths_or_skip_fn,
+        force_dual_pack_mode=True,
+    )
+
