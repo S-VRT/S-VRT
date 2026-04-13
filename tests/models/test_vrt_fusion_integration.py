@@ -94,7 +94,7 @@ def test_vrt_forward_triggers_early_fusion(monkeypatch):
         torch.zeros(1, 1, 2, 1, 1),
     ]
 
-    def _fake_get_flows(_x):
+    def _fake_get_flows(_x, flow_spike=None):
         return dummy_flows, dummy_flows
 
     def _fake_aligned(_x, _fb, _ff):

@@ -178,6 +178,10 @@ class TestDCNModules:
 
     def test_factory_function_dcnv4(self):
         """Test factory function returns DCNv4 when configured."""
+        try:
+            from models.op.dcnv4 import DCNv4  # noqa: F401
+        except (ImportError, RuntimeError):
+            pytest.skip("DCNv4 CUDA extension not installed")
         opt = {'netG': {'dcn_type': 'DCNv4'}}
         dcn_factory = get_deformable_module(opt)
         # Test that the factory creates DCNv4PackFlowGuided
@@ -496,6 +500,10 @@ class TestDCNModules:
 
     def test_config_consistency_training_vs_testing(self):
         """Test that training and testing use consistent DCN configurations."""
+        try:
+            from models.op.dcnv4 import DCNv4  # noqa: F401
+        except (ImportError, RuntimeError):
+            pytest.skip("DCNv4 CUDA extension not installed")
         import json
         import tempfile
         import os

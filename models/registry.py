@@ -4,9 +4,15 @@ MODEL_REGISTRY: Dict[str, Callable[..., Any]] = {}
 
 
 def register_model(name: str):
-    """Decorator to register a model builder/class under a name."""
+    """Decorator to register a model builder/class under a name.
+
+    Re-registering the same name is allowed when the module is reloaded
+    (e.g. during testing with importlib.import_module after sys.modules.pop).
+    Registering a *different* callable under an already-registered name raises.
+    """
     def _register(cls_or_fn: Callable[..., Any]):
-        if name in MODEL_REGISTRY:
+        existing = MODEL_REGISTRY.get(name)
+        if existing is not None and existing.__qualname__ != cls_or_fn.__qualname__:
             raise KeyError(f"Model '{name}' is already registered.")
         MODEL_REGISTRY[name] = cls_or_fn
         return cls_or_fn
