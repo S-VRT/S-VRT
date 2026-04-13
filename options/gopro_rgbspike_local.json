@@ -122,6 +122,12 @@
       "spike_reconstruction": {
         "type": "spikecv_tfp"
       }
+      ,
+      "spike_flow": {
+        "representation": "encoding25",
+        "dt": 10,
+        "root": "auto"
+      }
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
@@ -225,6 +231,12 @@
       ,
       "spike_reconstruction": {
         "type": "spikecv_tfp"
+      }
+      ,
+      "spike_flow": {
+        "representation": "encoding25",
+        "dt": 10,
+        "root": "auto"
       }
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,

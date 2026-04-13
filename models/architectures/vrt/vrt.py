@@ -457,7 +457,7 @@ class VRT(nn.Module):
             return marker
         return INPUT_PATH_DUAL if self.input_mode == "dual" else INPUT_PATH_CONCAT
 
-    def forward(self, x):
+    def forward(self, x, flow_spike=None):
         # x: (N, D, C, H, W)
         timer = getattr(self, 'timer', None)
         path_marker = self._resolve_input_path_marker()
@@ -489,9 +489,9 @@ class VRT(nn.Module):
 
             if timer is not None:
                 with timer.timer('flow_estimation'):
-                    flows_backward, flows_forward = self.get_flows(x)
+                    flows_backward, flows_forward = self.get_flows(x, flow_spike=flow_spike)
             else:
-                flows_backward, flows_forward = self.get_flows(x)
+                flows_backward, flows_forward = self.get_flows(x, flow_spike=flow_spike)
 
             if timer is not None:
                 with timer.timer('flow_warp'):
@@ -608,29 +608,42 @@ class VRT(nn.Module):
             x = torch.stack(torch.split(x, dim=1, split_size_or_sections=3), 1)
             return x + self.extract_rgb(x_mean)
 
-    def get_flows(self, x):
+    def get_flows(self, x, flow_spike=None):
         if self.pa_frames == 2:
-            flows_backward, flows_forward = self.get_flow_2frames(x)
+            flows_backward, flows_forward = self.get_flow_2frames(x, flow_spike=flow_spike)
         elif self.pa_frames == 4:
-            flows_backward_2frames, flows_forward_2frames = self.get_flow_2frames(x)
+            flows_backward_2frames, flows_forward_2frames = self.get_flow_2frames(x, flow_spike=flow_spike)
             flows_backward_4frames, flows_forward_4frames = self.get_flow_4frames(flows_forward_2frames, flows_backward_2frames)
             flows_backward = flows_backward_2frames + flows_backward_4frames
             flows_forward = flows_forward_2frames + flows_forward_4frames
         elif self.pa_frames == 6:
-            flows_backward_2frames, flows_forward_2frames = self.get_flow_2frames(x)
+            flows_backward_2frames, flows_forward_2frames = self.get_flow_2frames(x, flow_spike=flow_spike)
             flows_backward_4frames, flows_forward_4frames = self.get_flow_4frames(flows_forward_2frames, flows_backward_2frames)
             flows_backward_6frames, flows_forward_6frames = self.get_flow_6frames(flows_forward_2frames, flows_backward_2frames, flows_forward_4frames, flows_backward_4frames)
             flows_backward = flows_backward_2frames + flows_backward_4frames + flows_backward_6frames
             flows_forward = flows_forward_2frames + flows_forward_4frames + flows_forward_6frames
         return flows_backward, flows_forward
 
-    def get_flow_2frames(self, x):
+    def get_flow_2frames(self, x, flow_spike=None):
         b, n, c, h, w = x.size()
         
         # Check if we should use spike inputs for optical flow (e.g., SCFlow)
         if getattr(self.spynet, 'input_type', 'rgb') == 'spike':
-            # Assuming x contains spike sequences if SCFlow is used.
-            x_flow = x 
+            if flow_spike is None:
+                raise ValueError("SCFlow requires flow_spike input [B,T,25,H,W].")
+            if flow_spike.ndim != 5:
+                raise ValueError(f"SCFlow requires flow_spike ndim=5 [B,T,25,H,W], got {tuple(flow_spike.shape)}")
+            if flow_spike.size(0) != b or flow_spike.size(1) != n:
+                raise ValueError(
+                    f"SCFlow requires flow_spike matching [B,T], got flow_spike={tuple(flow_spike.shape)} for x={tuple(x.shape)}"
+                )
+            if flow_spike.size(2) != 25:
+                raise ValueError(f"SCFlow requires flow_spike channels=25, got {flow_spike.size(2)}")
+            if flow_spike.size(3) != h or flow_spike.size(4) != w:
+                raise ValueError(
+                    f"SCFlow requires flow_spike spatial size {(h, w)}, got {(flow_spike.size(3), flow_spike.size(4))}"
+                )
+            x_flow = flow_spike
             c_flow = x_flow.size(2)
             x_1 = x_flow[:, :-1, ...].reshape(-1, c_flow, h, w)
             x_2 = x_flow[:, 1:, ...].reshape(-1, c_flow, h, w)

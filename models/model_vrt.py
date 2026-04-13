@@ -102,8 +102,14 @@ class ModelVRT(ModelPlain):
         if flip_seq:
             self.L = torch.cat([self.L, self.L.flip(1)], dim=1)
 
+        flow_spike = getattr(self, 'L_flow_spike', None)
+        if pad_seq and flow_spike is not None:
+            flow_spike = torch.cat([flow_spike, flow_spike[:, -1:, :, :, :]], dim=1)
+        if flip_seq and flow_spike is not None:
+            flow_spike = torch.cat([flow_spike, flow_spike.flip(1)], dim=1)
+
         with torch.no_grad():
-            self.E = self._test_video(self.L)
+            self.E = self._test_video(self.L, flow_spike=flow_spike)
 
         if flip_seq:
             output_1 = self.E[:, :n, :, :, :]
@@ -119,7 +125,7 @@ class ModelVRT(ModelPlain):
 
         self.netG.train()
 
-    def _test_video(self, lq):
+    def _test_video(self, lq, flow_spike=None):
         '''test the video as a whole or as clips (divided temporally). '''
 
         self._assert_lq_channels(lq, 'Test Video Input')
@@ -141,7 +147,8 @@ class ModelVRT(ModelPlain):
 
             for d_idx in d_idx_list:
                 lq_clip = lq[:, d_idx:d_idx+num_frame_testing, ...]
-                out_clip = self._test_clip(lq_clip)
+                flow_spike_clip = None if flow_spike is None else flow_spike[:, d_idx:d_idx+num_frame_testing, ...]
+                out_clip = self._test_clip(lq_clip, flow_spike=flow_spike_clip)
                 if E is None:
                     c_out = out_clip.size(2)
                     E = torch.zeros(b, d, c_out, h*sf, w*sf)
@@ -165,12 +172,14 @@ class ModelVRT(ModelPlain):
             d_old = lq.size(1)
             d_pad = (d_old// window_size[0]+1)*window_size[0] - d_old
             lq = torch.cat([lq, torch.flip(lq[:, -d_pad:, ...], [1])], 1)
-            output = self._test_clip(lq)
+            if flow_spike is not None:
+                flow_spike = torch.cat([flow_spike, torch.flip(flow_spike[:, -d_pad:, ...], [1])], 1)
+            output = self._test_clip(lq, flow_spike=flow_spike)
             output = output[:, :d_old, :, :, :]
 
         return output
 
-    def _test_clip(self, lq):
+    def _test_clip(self, lq, flow_spike=None):
         ''' test the clip as a whole or as patches. '''
 
         self._assert_lq_channels(lq, 'Test Clip Input')
@@ -198,10 +207,19 @@ class ModelVRT(ModelPlain):
             for h_idx in h_idx_list:
                 for w_idx in w_idx_list:
                     in_patch = lq[..., h_idx:h_idx+size_patch_testing, w_idx:w_idx+size_patch_testing]
+                    flow_patch = None
+                    if flow_spike is not None:
+                        flow_patch = flow_spike[..., h_idx:h_idx+size_patch_testing, w_idx:w_idx+size_patch_testing]
                     if hasattr(self, 'netE'):
-                        out_patch = self.netE(in_patch).detach().cpu()
+                        if flow_patch is not None:
+                            out_patch = self.netE(in_patch, flow_spike=flow_patch).detach().cpu()
+                        else:
+                            out_patch = self.netE(in_patch).detach().cpu()
                     else:
-                        out_patch = self.netG(in_patch).detach().cpu()
+                        if flow_patch is not None:
+                            out_patch = self.netG(in_patch, flow_spike=flow_patch).detach().cpu()
+                        else:
+                            out_patch = self.netG(in_patch).detach().cpu()
 
                     if E is None:
                         c_out = out_patch.size(2)
@@ -235,11 +253,20 @@ class ModelVRT(ModelPlain):
 
             lq = torch.cat([lq, torch.flip(lq[:, :, :, -h_pad:, :], [3])], 3)
             lq = torch.cat([lq, torch.flip(lq[:, :, :, :, -w_pad:], [4])], 4)
+            if flow_spike is not None:
+                flow_spike = torch.cat([flow_spike, torch.flip(flow_spike[:, :, :, -h_pad:, :], [3])], 3)
+                flow_spike = torch.cat([flow_spike, torch.flip(flow_spike[:, :, :, :, -w_pad:], [4])], 4)
 
             if hasattr(self, 'netE'):
-                output = self.netE(lq).detach().cpu()
+                if flow_spike is not None:
+                    output = self.netE(lq, flow_spike=flow_spike).detach().cpu()
+                else:
+                    output = self.netE(lq).detach().cpu()
             else:
-                output = self.netG(lq).detach().cpu()
+                if flow_spike is not None:
+                    output = self.netG(lq, flow_spike=flow_spike).detach().cpu()
+                else:
+                    output = self.netG(lq).detach().cpu()
 
             output = output[:, :, :, :h_old*sf, :w_old*sf]
 

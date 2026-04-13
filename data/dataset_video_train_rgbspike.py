@@ -10,6 +10,7 @@ import cv2
 import utils.utils_video as utils_video
 from data.spike_recc import SpikeStream, voxelize_spikes_tfp
 from data.spike_recc.middle_tfp.reconstructor import MiddleTFPReconstructor
+from data.spike_recc.encoding25 import validate_encoding25_tensor
 
 
 class TrainDatasetRGBSpike(data.Dataset):
@@ -80,6 +81,7 @@ class TrainDatasetRGBSpike(data.Dataset):
         self.gt_root, self.lq_root = Path(opt['dataroot_gt']), Path(opt['dataroot_lq'])
         self.spike_root = Path(opt['dataroot_spike'])
         self.filename_tmpl = opt.get('filename_tmpl', '08d')
+        self._parse_spike_flow_config(opt, optical_flow_module=self._flow_module_name_from_opt(opt))
         self.filename_ext = opt.get('filename_ext', 'png')
         self.num_frame = opt['num_frame']
 
@@ -273,7 +275,8 @@ class TrainDatasetRGBSpike(data.Dataset):
         img_lqs = []
         img_gts = []
         spike_voxels = []
-        
+        flow_spikes = []
+
         img_gt_path_reference = None
         for neighbor in neighbor_list:
             neighbor_key = f'{clip_name}/{neighbor:{self.filename_tmpl}}'
@@ -281,6 +284,8 @@ class TrainDatasetRGBSpike(data.Dataset):
             img_lqs.append(sample['lq'])
             img_gts.append(sample['gt'])
             spike_voxels.append(sample['spike'])
+            if self.use_encoding25_flow:
+                flow_spikes.append(self._load_encoded_flow_spike(clip_name, neighbor))
             img_gt_path_reference = sample['gt_path']
 
         # randomly crop RGB frames
@@ -308,6 +313,16 @@ class TrainDatasetRGBSpike(data.Dataset):
             spike_voxel_resized = np.stack(spike_voxel_resized, axis=0)  # (S, H, W)
             spike_voxels_resized.append(spike_voxel_resized)
 
+        flow_spikes_resized = []
+        if self.use_encoding25_flow:
+            for flow_spike in flow_spikes:
+                validate_encoding25_tensor(flow_spike)
+                flow_resized = []
+                for ch in range(flow_spike.shape[0]):
+                    flow_ch_resized = cv2.resize(flow_spike[ch], (cropped_w, cropped_h), interpolation=cv2.INTER_LINEAR)
+                    flow_resized.append(flow_ch_resized)
+                flow_spikes_resized.append(np.stack(flow_resized, axis=0).astype(np.float32))
+
         # Concatenate RGB and Spike channels
         # Channel Order: 
         #   0~2: RGB (0-1 float)
@@ -324,12 +339,18 @@ class TrainDatasetRGBSpike(data.Dataset):
             img_lqs_with_spike.append(img_lq_with_spike)
 
         # augmentation - flip, rotate
-        img_lqs_with_spike.extend(img_gts)
-        img_results = utils_video.augment(img_lqs_with_spike, self.opt['use_hflip'], self.opt['use_rot'])
+        flow_hwc_list = [np.transpose(arr, (1, 2, 0)) for arr in flow_spikes_resized] if self.use_encoding25_flow else []
+        merge_list = img_lqs_with_spike + flow_hwc_list + img_gts
+        img_results = utils_video.augment(merge_list, self.opt['use_hflip'], self.opt['use_rot'])
 
         img_results = utils_video.img2tensor(img_results, bgr2rgb=False)
-        img_gts = torch.stack(img_results[len(img_lqs_with_spike) // 2:], dim=0)
-        img_lqs = torch.stack(img_results[:len(img_lqs_with_spike) // 2], dim=0)
+        lq_count = len(img_lqs_with_spike)
+        flow_count = len(flow_hwc_list)
+        img_lqs = torch.stack(img_results[:lq_count], dim=0)
+        flow_tensor = None
+        if flow_count > 0:
+            flow_tensor = torch.stack(img_results[lq_count:lq_count + flow_count], dim=0)
+        img_gts = torch.stack(img_results[lq_count + flow_count:], dim=0)
         if img_lqs.size(1) != self.expected_lq_channels:
             raise ValueError(
                 f"[TrainDatasetRGBSpike] Expected {self.expected_lq_channels} channels "
@@ -349,6 +370,15 @@ class TrainDatasetRGBSpike(data.Dataset):
                 sample['L'] = img_lqs
         else:
             sample['L'] = img_lqs
+
+        if self.use_encoding25_flow:
+            if flow_tensor is None:
+                raise ValueError("SCFlow strict mode expected non-empty flow_tensor.")
+            if flow_tensor.ndim != 4 or flow_tensor.size(1) != 25:
+                raise ValueError(
+                    f"Expected L_flow_spike shape [T,25,H,W], got {tuple(flow_tensor.shape)}"
+                )
+            sample['L_flow_spike'] = flow_tensor.float()
         return sample
 
     def __len__(self):
@@ -437,6 +467,44 @@ class TrainDatasetRGBSpike(data.Dataset):
                 f"[TrainDatasetRGBSpike] dual spike channels mismatch before concat: "
                 f"expected {self.spike_channels}, got {spike_hwc.shape[2]}."
             )
+
+
+    def _flow_module_name_from_opt(self, opt):
+        netg = opt.get('netG', {}) if isinstance(opt, dict) else {}
+        if isinstance(netg, dict):
+            optical_flow = netg.get('optical_flow', {})
+            if isinstance(optical_flow, dict):
+                return str(optical_flow.get('module', '')).strip().lower()
+        return str(opt.get('optical_flow_module', '')).strip().lower() if isinstance(opt, dict) else ''
+
+    def _parse_spike_flow_config(self, opt, optical_flow_module=''):
+        spike_flow_cfg = opt.get('spike_flow', {}) if isinstance(opt.get('spike_flow', {}), dict) else {}
+        self.spike_flow_representation = str(spike_flow_cfg.get('representation', '')).strip().lower()
+        self.spike_flow_dt = int(spike_flow_cfg.get('dt', 10))
+        self.spike_flow_root = spike_flow_cfg.get('root', 'auto')
+        self.use_encoding25_flow = self.spike_flow_representation == 'encoding25'
+
+        flow_module = str(optical_flow_module or '').strip().lower()
+        if flow_module == 'spike_flow':
+            flow_module = 'scflow'
+        if flow_module == 'scflow' and self.spike_flow_representation != 'encoding25':
+            raise ValueError(
+                "SCFlow strict mode requires spike_flow.representation='encoding25'. "
+                f"Got {self.spike_flow_representation!r}."
+            )
+
+    def _load_encoded_flow_spike(self, clip_name, frame_idx):
+        flow_root = self.spike_root if str(self.spike_flow_root).strip().lower() == 'auto' else Path(self.spike_flow_root)
+        frame_name = f'{frame_idx:{self.filename_tmpl}}'
+        path = flow_root / clip_name / f'encoding25_dt{self.spike_flow_dt}' / f'{frame_name}.npy'
+        if not path.exists():
+            raise ValueError(
+                f"Missing encoding25 artifact: {path}. "
+                "Run scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py first."
+            )
+        arr = np.load(path).astype(np.float32)
+        validate_encoding25_tensor(arr)
+        return arr
 
     def _validate_dual_tensor_contract(self, l_rgb, l_spike):
         if l_rgb.ndim != 4 or l_spike.ndim != 4:

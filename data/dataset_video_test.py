@@ -12,6 +12,7 @@ import utils.utils_video as utils_video
 from data.spike_recc import SpikeStream, voxelize_spikes_tfp
 from data.spike_recc.middle_tfp.reconstructor import MiddleTFPReconstructor
 from data.spike_recc.snn.reconstructor import SNNReconstructor
+from data.spike_recc.encoding25 import validate_encoding25_tensor
 
 
 class TestDataset(data.Dataset):
@@ -148,6 +149,7 @@ class TrainDatasetRGBSpike(data.Dataset):
 
         # Spike-specific configuration
         self.spike_root = opt['dataroot_spike']
+        self._parse_spike_flow_config(opt, optical_flow_module=self._flow_module_name_from_opt(opt))
         self.spike_h = opt.get('spike_h', 250)
         self.spike_w = opt.get('spike_w', 400)
         self.spike_channels = opt.get('spike_channels', 4)  # Default updated to 4 for TFP
@@ -200,6 +202,8 @@ class TrainDatasetRGBSpike(data.Dataset):
         self.imgs_lq, self.imgs_gt = {}, {}
         self.spike_paths = {}
         self.spike_cache = {}
+        self.flow_spike_cache = {}
+        self.frame_basenames = {}
 
         if 'meta_info_file' in opt:
             with open(opt['meta_info_file'], 'r') as fin:
@@ -229,6 +233,8 @@ class TrainDatasetRGBSpike(data.Dataset):
                 border_l[i] = 1
                 border_l[max_idx - i - 1] = 1
             self.data_info['border'].extend(border_l)
+
+            self.frame_basenames[subfolder_name] = [osp.splitext(osp.basename(p))[0] for p in img_paths_lq]
 
             spike_folder = osp.join(self.spike_root, subfolder_name, self.spike_folder)
             spike_paths = []
@@ -273,6 +279,9 @@ class TrainDatasetRGBSpike(data.Dataset):
         t, _, h, w = imgs_lq.shape
         spike_seq = self._get_spike_sequence(folder, h, w, t)
         imgs_lq = torch.cat([imgs_lq, spike_seq], dim=1)
+        flow_seq = None
+        if self.use_encoding25_flow:
+            flow_seq = self._get_flow_spike_sequence(folder, h, w, t)
         if imgs_lq.size(1) != self.expected_lq_channels:
             raise ValueError(
                 f"[TrainDatasetRGBSpike] Expected {self.expected_lq_channels} channels "
@@ -280,12 +289,17 @@ class TrainDatasetRGBSpike(data.Dataset):
             )
         imgs_lq = self._apply_channel_normalization(imgs_lq)
 
-        return {
+        sample = {
             'L': imgs_lq,
             'H': imgs_gt,
             'folder': folder,
             'lq_path': self.imgs_lq[folder],
         }
+        if flow_seq is not None:
+            if flow_seq.ndim != 4 or flow_seq.size(1) != 25:
+                raise ValueError(f"Expected L_flow_spike [T,25,H,W], got {tuple(flow_seq.shape)}")
+            sample['L_flow_spike'] = flow_seq
+        return sample
 
     def _get_spike_sequence(self, folder, target_h, target_w, expected_len):
         if folder in self.spike_cache:
@@ -305,6 +319,63 @@ class TrainDatasetRGBSpike(data.Dataset):
         spike_seq = torch.stack(spike_tensors, dim=0)
         self.spike_cache[folder] = spike_seq
         return spike_seq
+
+
+    def _flow_module_name_from_opt(self, opt):
+        netg = opt.get('netG', {}) if isinstance(opt, dict) else {}
+        if isinstance(netg, dict):
+            optical_flow = netg.get('optical_flow', {})
+            if isinstance(optical_flow, dict):
+                return str(optical_flow.get('module', '')).strip().lower()
+        return str(opt.get('optical_flow_module', '')).strip().lower() if isinstance(opt, dict) else ''
+
+    def _parse_spike_flow_config(self, opt, optical_flow_module=''):
+        spike_flow_cfg = opt.get('spike_flow', {}) if isinstance(opt.get('spike_flow', {}), dict) else {}
+        self.spike_flow_representation = str(spike_flow_cfg.get('representation', '')).strip().lower()
+        self.spike_flow_dt = int(spike_flow_cfg.get('dt', 10))
+        self.spike_flow_root = spike_flow_cfg.get('root', 'auto')
+        self.use_encoding25_flow = self.spike_flow_representation == 'encoding25'
+
+        flow_module = str(optical_flow_module or '').strip().lower()
+        if flow_module == 'spike_flow':
+            flow_module = 'scflow'
+        if flow_module == 'scflow' and self.spike_flow_representation != 'encoding25':
+            raise ValueError(
+                "SCFlow strict mode requires spike_flow.representation='encoding25'. "
+                f"Got {self.spike_flow_representation!r}."
+            )
+
+    def _get_flow_spike_sequence(self, folder, target_h, target_w, expected_len):
+        if folder in self.flow_spike_cache:
+            return self.flow_spike_cache[folder]
+
+        flow_root = self.spike_root if str(self.spike_flow_root).strip().lower() == 'auto' else self.spike_flow_root
+        flow_clip_dir = os.path.join(flow_root, folder, f'encoding25_dt{self.spike_flow_dt}')
+
+        frame_names = self.frame_basenames.get(folder, [])
+        if frame_names and len(frame_names) != expected_len:
+            raise ValueError(f'Frame sequence length mismatch for {folder}: {len(frame_names)} vs {expected_len}')
+
+        flow_tensors = []
+        for frame_name in frame_names:
+            flow_path = os.path.join(flow_clip_dir, f'{frame_name}.npy')
+            if not os.path.exists(flow_path):
+                raise ValueError(
+                    f"Missing encoding25 artifact: {flow_path}. "
+                    "Run scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py first."
+                )
+            arr = np.load(flow_path).astype(np.float32)
+            validate_encoding25_tensor(arr)
+            resized = []
+            for ch in range(arr.shape[0]):
+                resized.append(cv2.resize(arr[ch], (target_w, target_h), interpolation=cv2.INTER_LINEAR))
+            flow_tensors.append(torch.from_numpy(np.stack(resized, axis=0).astype(np.float32)))
+
+        if not flow_tensors:
+            raise ValueError(f'No frame names available to build L_flow_spike for folder {folder}.')
+        flow_seq = torch.stack(flow_tensors, dim=0)
+        self.flow_spike_cache[folder] = flow_seq
+        return flow_seq
 
     def _load_spike_voxel(self, spike_path):
         if os.path.exists(spike_path):

@@ -26,6 +26,7 @@ class ModelPlain(ModelBase):
         self.netG = self.model_to_device(self.netG)
         if self.opt_train['E_decay'] > 0:
             self.netE = define_G(opt).to(self.device).eval()
+        self.L_flow_spike = None
 
     def _assert_lq_channels(self, tensor, tensor_name):
         """Validate that the incoming temporal tensor matches configured in_chans."""
@@ -40,6 +41,13 @@ class ModelPlain(ModelBase):
                 f"Hint: Ensure your dataset returns all expected channels "
                 f"(e.g., RGB 3 + Spike 4 = 7) before feeding them to netG."
             )
+
+
+    def _flow_module_name(self):
+        module = str(self.opt.get('netG', {}).get('optical_flow', {}).get('module', 'spynet')).strip().lower()
+        if module == 'spike_flow':
+            return 'scflow'
+        return module
 
     def _resolve_input_mode(self):
         raw_mode = self.opt.get('netG', {}).get('input_mode', 'concat')
@@ -237,6 +245,17 @@ class ModelPlain(ModelBase):
             self.L = self._build_model_input_tensor(data).to(self.device)
             self._assert_lq_channels(self.L, 'Training Feed Data')
 
+            if self._flow_module_name() == 'scflow':
+                if 'L_flow_spike' not in data:
+                    raise ValueError("module=scflow requires data['L_flow_spike'] with shape [B,T,25,H,W]")
+                self.L_flow_spike = data['L_flow_spike'].to(self.device)
+                if self.L_flow_spike.ndim != 5 or self.L_flow_spike.size(2) != 25:
+                    raise ValueError(
+                        f"module=scflow requires L_flow_spike shape [B,T,25,H,W], got {tuple(self.L_flow_spike.shape)}"
+                    )
+            else:
+                self.L_flow_spike = None
+
             if need_H:
                 self.H = data['H'].to(self.device)
 
@@ -245,7 +264,10 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     def netG_forward(self):
         with self.timer.timer('forward'):
-            self.E = self.netG(self.L)
+            if self.L_flow_spike is not None:
+                self.E = self.netG(self.L, flow_spike=self.L_flow_spike)
+            else:
+                self.E = self.netG(self.L)
 
     # ----------------------------------------
     # update parameters and get loss

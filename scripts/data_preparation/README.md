@@ -230,3 +230,19 @@ python scripts/data_preparation/prepare_gopro_spike_dataset.py --force --generat
 - `../../launch_train.sh`: Integrated training launcher with data preparation
 - `../../options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike_local.json`: Training configuration
 
+
+## SCFlow strict encoding25 preparation
+
+Use the dedicated script to generate strict 25-slice flow artifacts next to each clip:
+
+```bash
+python scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py \
+  --spike-root /path/to/GOPRO_Large_spike_seq/train \
+  --dt 10
+```
+
+Optional flags:
+
+- `--meta-info-file data/meta_info/meta_info_GoPro_train_GT.txt` to use explicit clip start frame mapping.
+- `--dry-run` to report what would be generated.
+- `--overwrite` to regenerate existing `.npy` files.
