@@ -57,24 +57,28 @@ def _build_stub_plain_model(flow_module="scflow"):
     return model
 
 
+@pytest.mark.unit
 def test_validate_encoding25_tensor_rejects_non_25_channels():
     bad = np.zeros((11, 16, 16), dtype=np.float32)
     with pytest.raises(ValueError, match="expected 25"):
         validate_encoding25_tensor(bad)
 
 
+@pytest.mark.unit
 def test_build_output_dir_uses_dataset_local_convention(tmp_path):
     clip_dir = tmp_path / "GOPR0001"
     out = build_output_dir(clip_dir, dt=10)
     assert out.name == "encoding25_dt10"
 
 
+@pytest.mark.unit
 def test_scflow_wrapper_rejects_non_25_channels():
     wrapper = SCFlowWrapper.__new__(SCFlowWrapper)
     with pytest.raises(ValueError, match="channels=25"):
         wrapper._validate_spike_pair(torch.randn(1, 11, 8, 8), torch.randn(1, 25, 8, 8))
 
 
+@pytest.mark.unit
 def test_model_plain_requires_l_flow_spike_for_scflow():
     model = _build_stub_plain_model(flow_module="scflow")
     data = {
@@ -85,6 +89,7 @@ def test_model_plain_requires_l_flow_spike_for_scflow():
         model.feed_data(data)
 
 
+@pytest.mark.unit
 def test_vrt_scflow_branch_requires_flow_spike():
     vrt = VRT.__new__(VRT)
     vrt.spynet = _DummySpikeFlow()
@@ -92,6 +97,7 @@ def test_vrt_scflow_branch_requires_flow_spike():
         vrt.get_flow_2frames(torch.randn(1, 3, 7, 8, 8), flow_spike=None)
 
 
+@pytest.mark.unit
 def test_vrt_scflow_branch_accepts_25ch_flow_spike():
     vrt = VRT.__new__(VRT)
     vrt.spynet = _DummySpikeFlow()
@@ -102,6 +108,7 @@ def test_vrt_scflow_branch_accepts_25ch_flow_spike():
     assert len(flows_forward) == 4
 
 
+@pytest.mark.unit
 def test_dataset_rejects_non_encoding25_representation_for_scflow():
     ds = TrainDatasetRGBSpike.__new__(TrainDatasetRGBSpike)
     with pytest.raises(ValueError, match="representation='encoding25'"):
@@ -111,6 +118,7 @@ def test_dataset_rejects_non_encoding25_representation_for_scflow():
         )
 
 
+@pytest.mark.unit
 def test_dataset_missing_encoding25_artifact_reports_path(tmp_path):
     ds = TrainDatasetRGBSpike.__new__(TrainDatasetRGBSpike)
     ds.spike_root = tmp_path
@@ -164,14 +172,14 @@ def test_compute_center_index_formula():
 @pytest.mark.unit
 def test_validate_center_bounds_rejects_left_boundary():
     # center=50, edge_margin=40: center - 12 = 38 < 40 → ValueError
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="edge_margin"):
         validate_center_bounds(center=50, total_length=500, edge_margin=40)
 
 
 @pytest.mark.unit
 def test_validate_center_bounds_rejects_right_boundary():
     # center=448, total_length=500, edge_margin=40: center+12=460 >= 500-40=460 → ValueError
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="edge_margin"):
         validate_center_bounds(center=448, total_length=500, edge_margin=40)
 
 
