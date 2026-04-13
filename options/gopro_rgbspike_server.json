@@ -90,13 +90,13 @@
       "dataset_type": "TrainDatasetRGBSpike"
       // 真实标签（Ground Truth）数据路径：清晰视频帧的存储路径
       ,
-      "dataroot_gt": "/storage/main/users/hengyuanwu/gopro_small/GOPRO_Large/train_GT"
+      "dataroot_gt": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large/train_GT"
       // 低质量（Low Quality）数据路径：模糊视频帧的存储路径
       ,
-      "dataroot_lq": "/storage/main/users/hengyuanwu/gopro_small/GOPRO_Large/train_GT_blurred"
+      "dataroot_lq": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large/train_GT_blurred"
       // Spike 数据路径：Spike 序列数据的存储路径
       ,
-      "dataroot_spike": "/storage/main/users/hengyuanwu/gopro_small/GOPRO_Large_spike_seq/train"
+      "dataroot_spike": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large_spike_seq/train"
       // Spike 数据高度：Spike 图像的高度（像素）
       ,
       "spike_h": 360
@@ -106,7 +106,7 @@
       // Spike 配置文件：记录 Spike 相机配置与标注信息
       ,
       "spike_config": {
-        "path": "/storage/main/users/hengyuanwu/gopro_small/GOPRO_Large_spike_seq/config.yaml",
+        "path": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large_spike_seq/config.yaml",
         "spike_h": 360,
         "spike_w": 640,
         "is_labeled": false,
@@ -202,13 +202,13 @@
       "dataset_type": "TrainDatasetRGBSpike"
       // 真实标签数据路径：测试集的清晰视频帧路径
       ,
-      "dataroot_gt": "/storage/main/users/hengyuanwu/gopro_small/GOPRO_Large/test_GT"
+      "dataroot_gt": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large/test_GT"
       // 低质量数据路径：测试集的模糊视频帧路径
       ,
-      "dataroot_lq": "/storage/main/users/hengyuanwu/gopro_small/GOPRO_Large/test_GT_blurred"
+      "dataroot_lq": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large/test_GT_blurred"
       // Spike 数据路径：测试集的 Spike 序列数据路径
       ,
-      "dataroot_spike": "/storage/main/users/hengyuanwu/gopro_small/GOPRO_Large_spike_seq/test"
+      "dataroot_spike": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large_spike_seq/test"
       // Spike 数据高度：Spike 图像的高度（像素）
       // 测试集元信息文件：用于构建 clip/frame 索引
       ,
@@ -621,3 +621,4 @@
     "swanlab_mode": null
   }
 }
+
