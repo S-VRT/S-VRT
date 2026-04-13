@@ -236,13 +236,16 @@ python scripts/data_preparation/prepare_gopro_spike_dataset.py --force --generat
 Use the dedicated script to generate strict 25-slice flow artifacts next to each clip:
 
 ```bash
-python scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py \
+PYTHONPATH=. python scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py \
   --spike-root /path/to/GOPRO_Large_spike_seq/train \
-  --dt 10
+  --dt 10 \
+  --num-workers 16
 ```
 
 Optional flags:
 
 - `--meta-info-file data/meta_info/meta_info_GoPro_train_GT.txt` to use explicit clip start frame mapping.
+- `--num-workers 1` to run single-process mode (default).
+- `--max-clips N` to limit clip count for quick sanity checks.
 - `--dry-run` to report what would be generated.
 - `--overwrite` to regenerate existing `.npy` files.

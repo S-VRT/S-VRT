@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -22,6 +24,13 @@ class EncodeResult:
     skipped_existing: int = 0
     dry_run: int = 0
     failed: int = 0
+
+
+def _merge_result(dst: EncodeResult, src: EncodeResult) -> None:
+    dst.generated += src.generated
+    dst.skipped_existing += src.skipped_existing
+    dst.dry_run += src.dry_run
+    dst.failed += src.failed
 
 
 def parse_meta_info(meta_info_file: Optional[Path]) -> Dict[str, int]:
@@ -162,6 +171,95 @@ def process_clip(
     return result, missing
 
 
+def _process_clip_worker(args: Tuple[Path, int, int, int, bool, bool, Dict[str, int], int, int]) -> Tuple[str, EncodeResult, List[str]]:
+    clip_dir, dt, center_offset, edge_margin, dry_run, overwrite, clip_start_mapping, spike_h, spike_w = args
+    clip_name = clip_dir.name
+    try:
+        result, missing = process_clip(
+            clip_dir=clip_dir,
+            dt=dt,
+            center_offset=center_offset,
+            edge_margin=edge_margin,
+            dry_run=dry_run,
+            overwrite=overwrite,
+            clip_start_mapping=clip_start_mapping,
+            spike_h=spike_h,
+            spike_w=spike_w,
+        )
+        return clip_name, result, missing
+    except Exception as exc:
+        failed = EncodeResult(failed=1)
+        return clip_name, failed, [f"clip={clip_name} fatal_error={exc}"]
+
+
+def process_all_clips(
+    *,
+    clip_dirs: List[Path],
+    dt: int,
+    center_offset: int,
+    edge_margin: int,
+    dry_run: bool,
+    overwrite: bool,
+    clip_start_mapping: Dict[str, int],
+    spike_h: int,
+    spike_w: int,
+    num_workers: int,
+) -> Tuple[EncodeResult, List[str]]:
+    all_result = EncodeResult()
+    all_missing: List[str] = []
+    if not clip_dirs:
+        return all_result, all_missing
+
+    worker_count = min(max(1, int(num_workers)), len(clip_dirs))
+
+    if worker_count == 1:
+        for clip_dir in clip_dirs:
+            result, missing = process_clip(
+                clip_dir=clip_dir,
+                dt=dt,
+                center_offset=center_offset,
+                edge_margin=edge_margin,
+                dry_run=dry_run,
+                overwrite=overwrite,
+                clip_start_mapping=clip_start_mapping,
+                spike_h=spike_h,
+                spike_w=spike_w,
+            )
+            _merge_result(all_result, result)
+            all_missing.extend(missing)
+        return all_result, all_missing
+
+    task_args = [
+        (
+            clip_dir,
+            dt,
+            center_offset,
+            edge_margin,
+            dry_run,
+            overwrite,
+            clip_start_mapping,
+            spike_h,
+            spike_w,
+        )
+        for clip_dir in clip_dirs
+    ]
+
+    with ProcessPoolExecutor(max_workers=worker_count) as pool:
+        futures = [pool.submit(_process_clip_worker, item) for item in task_args]
+        for future in as_completed(futures):
+            clip_name, result, missing = future.result()
+            _merge_result(all_result, result)
+            if missing:
+                all_missing.extend(missing)
+            print(
+                "[prepare_scflow_encoding25] clip_done "
+                f"clip={clip_name} generated={result.generated} "
+                f"skipped_existing={result.skipped_existing} dry_run={result.dry_run} failed={result.failed}"
+            )
+
+    return all_result, all_missing
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare SCFlow strict encoding25 artifacts.")
     parser.add_argument("--spike-root", required=True, type=Path)
@@ -171,6 +269,8 @@ def main() -> None:
     parser.add_argument("--edge-margin", type=int, default=40)
     parser.add_argument("--spike-h", type=int, default=360)
     parser.add_argument("--spike-w", type=int, default=640)
+    parser.add_argument("--num-workers", type=int, default=1)
+    parser.add_argument("--max-clips", type=int, default=0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
@@ -180,33 +280,38 @@ def main() -> None:
         raise ValueError(f"spike root not found: {spike_root}")
     if args.dt <= 0:
         raise ValueError(f"--dt must be > 0, got {args.dt}")
+    if args.num_workers <= 0:
+        raise ValueError(f"--num-workers must be > 0, got {args.num_workers}")
+    if args.max_clips < 0:
+        raise ValueError(f"--max-clips must be >= 0, got {args.max_clips}")
 
     clip_start_mapping = parse_meta_info(args.meta_info_file)
 
-    all_result = EncodeResult()
-    all_missing: List[str] = []
-
     clip_dirs = [p for p in sorted(spike_root.iterdir()) if p.is_dir()]
-    for clip_dir in clip_dirs:
-        result, missing = process_clip(
-            clip_dir=clip_dir,
-            dt=args.dt,
-            center_offset=args.center_offset,
-            edge_margin=args.edge_margin,
-            dry_run=bool(args.dry_run),
-            overwrite=bool(args.overwrite),
-            clip_start_mapping=clip_start_mapping,
-            spike_h=int(args.spike_h),
-            spike_w=int(args.spike_w),
-        )
-        all_result.generated += result.generated
-        all_result.skipped_existing += result.skipped_existing
-        all_result.dry_run += result.dry_run
-        all_result.failed += result.failed
-        all_missing.extend(missing)
+    if args.max_clips > 0:
+        clip_dirs = clip_dirs[: args.max_clips]
+
+    requested_workers = int(args.num_workers)
+    if requested_workers > 1 and len(clip_dirs) > 1:
+        cpu_cnt = os.cpu_count() or requested_workers
+        requested_workers = min(requested_workers, cpu_cnt)
+
+    all_result, all_missing = process_all_clips(
+        clip_dirs=clip_dirs,
+        dt=int(args.dt),
+        center_offset=int(args.center_offset),
+        edge_margin=int(args.edge_margin),
+        dry_run=bool(args.dry_run),
+        overwrite=bool(args.overwrite),
+        clip_start_mapping=clip_start_mapping,
+        spike_h=int(args.spike_h),
+        spike_w=int(args.spike_w),
+        num_workers=requested_workers,
+    )
 
     print("[prepare_scflow_encoding25] Summary")
     print(f"  clips={len(clip_dirs)}")
+    print(f"  workers={requested_workers}")
     print(f"  generated={all_result.generated}")
     print(f"  skipped_existing={all_result.skipped_existing}")
     print(f"  dry_run={all_result.dry_run}")
