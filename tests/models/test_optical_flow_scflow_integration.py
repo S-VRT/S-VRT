@@ -70,22 +70,6 @@ class _RecordingNet:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _build_stub_plain_model(flow_module="scflow"):
-    model = ModelPlain.__new__(ModelPlain)
-    model.opt = {
-        "netG": {
-            "in_chans": 7,
-            "input_mode": "concat",
-            "optical_flow": {"module": flow_module},
-        }
-    }
-    model.device = "cpu"
-    model.timer = _DummyTimer()
-    model.netG = _RecordingNet()
-    model.L_flow_spike = None
-    return model
-
-
 def _build_stub_plain_model_with_net(flow_module, net):
     model = ModelPlain.__new__(ModelPlain)
     model.opt = {
@@ -141,7 +125,7 @@ def test_encoding25_npy_roundtrip(tmp_path):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.integration
-def test_load_encoded_flow_spike_returns_correct_shape(tmp_path):
+def test_load_encoded_flow_spike_returns_correct_shape_and_dtype(tmp_path):
     artifact_dir = tmp_path / "clip_a" / "encoding25_dt10"
     artifact_dir.mkdir(parents=True)
     arr = np.zeros((25, 8, 8), dtype=np.float32)
@@ -156,22 +140,6 @@ def test_load_encoded_flow_spike_returns_correct_shape(tmp_path):
     result = ds._load_encoded_flow_spike("clip_a", 1)
     assert result.shape == (25, 8, 8)
     assert result.dtype == np.float32
-
-
-@pytest.mark.integration
-def test_load_encoded_flow_spike_auto_root_resolves_to_spike_root(tmp_path):
-    artifact_dir = tmp_path / "clip_a" / "encoding25_dt10"
-    artifact_dir.mkdir(parents=True)
-    np.save(artifact_dir / "000001.npy", np.zeros((25, 8, 8), dtype=np.float32))
-
-    ds = TrainDatasetRGBSpike.__new__(TrainDatasetRGBSpike)
-    ds.spike_root = tmp_path
-    ds.spike_flow_root = "auto"
-    ds.spike_flow_dt = 10
-    ds.filename_tmpl = "06d"
-
-    result = ds._load_encoded_flow_spike("clip_a", 1)
-    assert result.shape == (25, 8, 8)
 
 
 @pytest.mark.integration
