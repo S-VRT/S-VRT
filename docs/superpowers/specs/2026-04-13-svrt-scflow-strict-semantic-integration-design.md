@@ -30,6 +30,7 @@ Goal: integrate SCFlow in a strict-semantic way so optical-flow estimation uses 
 - Responsibilities:
   - Build centered 25-slice windows from raw spike matrix.
   - Enforce `length=25` and configurable `dt` spacing.
+  - Provide reusable path helpers (e.g., `build_output_dir`) for both tests and scripts.
   - Deterministic index policy for train/test.
 
 ### 3.2 Offline preparation script
@@ -62,6 +63,20 @@ Hard contract rules:
   - `spike_flow.representation` must be `encoding25`.
   - dataset must provide `L_flow_spike` with channel size 25.
 - Violations must raise explicit `ValueError` with actionable hints.
+Temporal alignment contract (strict semantic):
+- Let `f` be current frame index parsed from frame filename (`000123` -> `f=123`).
+- Let `f0` be clip start frame from metadata (`start_frame` in meta info line).
+- Let `k = f - f0` be clip-local frame index.
+- Define center slice index:
+  - `center = center_offset + k * dt`
+- Fixed defaults for phase-1 compatibility:
+  - `center_offset = 40`
+  - `edge_margin = 40`
+  - `window_length = 25` (`half=12`)
+- Validity condition:
+  - `center - 12 >= edge_margin` and `center + 12 < T - edge_margin`
+  - where `T` is total spike time length in raw matrix.
+- If invalid, fail fast with explicit message containing `clip`, `frame`, `center`, `T`, and configured parameters.
 
 ## 5. Data Pipeline Changes
 
@@ -73,6 +88,7 @@ Loading behavior:
 - For SCFlow mode, load pre-encoded `.npy` from `encoding25_dt{dt}`.
 - Resize spatially to match RGB crop / frame size.
 - Keep dtype/normalization simple and deterministic (float32, no ImageNet normalization).
+- Ensure encoded filename matches RGB frame index so train/test use identical temporal alignment policy.
 
 Failure behavior:
 - Missing encoded file: fail with explicit path and regeneration hint.
@@ -149,3 +165,4 @@ Required evidence:
 - Misconfiguration fails fast with clear error messages.
 - Added tests catch contract regressions pre-runtime.
 - Server verification artifacts confirm end-to-end strict-semantic path works.
+

@@ -113,7 +113,7 @@ git commit -m "feat(spike): add encoding25 contract utilities"
 - [ ] **Step 1: Write failing test for output path policy helper**
 
 ```python
-from scripts.data_preparation.spike_flow.prepare_scflow_encoding25 import build_output_dir
+from data.spike_recc.encoding25 import build_output_dir
 
 
 def test_build_output_dir_uses_dataset_local_convention(tmp_path):
@@ -130,12 +130,9 @@ Expected: FAIL due to missing script helper.
 - [ ] **Step 3: Implement offline encoder script with deterministic policy**
 
 ```python
-def build_output_dir(clip_dir: Path, dt: int) -> Path:
-    return clip_dir / f"encoding25_dt{int(dt)}"
-
-
-def encode_one_frame(spike_matrix: np.ndarray, frame_index: int, dt: int) -> np.ndarray:
-    center = frame_index * dt
+def encode_one_frame(spike_matrix: np.ndarray, frame_index: int, clip_start_frame: int, dt: int, center_offset: int = 40) -> np.ndarray:
+    local_index = frame_index - clip_start_frame
+    center = center_offset + local_index * dt
     return build_centered_window(spike_matrix, center=center, length=25)
 ```
 
@@ -144,6 +141,8 @@ def encode_one_frame(spike_matrix: np.ndarray, frame_index: int, dt: int) -> np.
 ```python
 parser.add_argument("--spike-root", required=True)
 parser.add_argument("--dt", type=int, default=10)
+parser.add_argument("--center-offset", type=int, default=40)
+parser.add_argument("--edge-margin", type=int, default=40)
 parser.add_argument("--dry-run", action="store_true")
 parser.add_argument("--overwrite", action="store_true")
 ```
@@ -179,10 +178,15 @@ git commit -m "feat(data): add offline scflow encoding25 preparation script"
 - [ ] **Step 1: Write failing test for SCFlow dataset output contract**
 
 ```python
-def test_dataset_requires_l_flow_spike_when_scflow_enabled(...):
-    # Build minimal opt with optical_flow.module=scflow but no encoded file
-    # Expect ValueError mentioning missing encoding25 artifact.
-    ...
+def test_dataset_requires_l_flow_spike_when_scflow_enabled(tmp_path):
+    from data.dataset_video_train_rgbspike import TrainDatasetRGBSpike
+
+    opt = make_minimal_rgbspike_train_opt(tmp_path)
+    opt["spike_flow"] = {"representation": "encoding25", "dt": 10, "root": "auto"}
+    ds = TrainDatasetRGBSpike(opt)
+
+    with pytest.raises(ValueError, match="Missing encoding25 artifact"):
+        _ = ds[0]
 ```
 
 - [ ] **Step 2: Run failing contract test**
@@ -248,9 +252,15 @@ git commit -m "feat(dataset): add strict L_flow_spike contract for scflow"
 - [ ] **Step 1: Write failing test for model ingress requirement**
 
 ```python
-def test_model_plain_requires_l_flow_spike_for_scflow(...):
-    # feed_data with module=scflow and only L should fail
-    ...
+def test_model_plain_requires_l_flow_spike_for_scflow(monkeypatch):
+    from models.model_plain import ModelPlain
+
+    opt = make_minimal_model_opt(flow_module="scflow")
+    model = ModelPlain(opt)
+    data = {"L": torch.randn(1, 6, 11, 16, 16), "H": torch.randn(1, 6, 3, 16, 16)}
+
+    with pytest.raises(ValueError, match="module=scflow requires data\['L_flow_spike'\]"):
+        model.feed_data(data)
 ```
 
 - [ ] **Step 2: Run failing model ingress test**
@@ -286,7 +296,7 @@ self.E = self.netG(self.L, flow_spike=self.L_flow_spike)
 
 ```python
 def forward(self, x, flow_spike=None):
-    ...
+    # x remains restoration input; flow_spike is only for SCFlow optical-flow branch.
     flows_backward, flows_forward = self.get_flows(x, flow_spike=flow_spike)
 ```
 
@@ -384,9 +394,13 @@ git commit -m "fix(scflow): enforce strict 25-channel input contract"
 - [ ] **Step 2: Add config-contract test**
 
 ```python
-def test_scflow_requires_encoding25_representation(...):
-    # module=scflow + representation!=encoding25 should raise ValueError
-    ...
+def test_scflow_requires_encoding25_representation(tmp_path):
+    opt = make_minimal_rgbspike_train_opt(tmp_path)
+    opt["netG"]["optical_flow"] = {"module": "scflow", "checkpoint": None, "params": {}}
+    opt["spike_flow"] = {"representation": "tfp", "dt": 10, "root": "auto"}
+
+    with pytest.raises(ValueError, match="representation.*encoding25"):
+        _ = build_dataset_with_opt(opt)
 ```
 
 - [ ] **Step 3: Run full SCFlow contract test file**
@@ -477,3 +491,4 @@ git commit -m "test(scflow): verify strict-semantic path on server"
 - `L_flow_spike` shape consistently specified as `[B,T,25,H,W]` at model boundary.
 - Wrapper-level inputs consistently specified as `[B,25,H,W]` after frame-pair reshape.
 - SCFlow strict-gating is consistently keyed off `optical_flow.module == "scflow"`.
+
