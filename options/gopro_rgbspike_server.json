@@ -367,8 +367,8 @@
     // 光流模块配置：可选值 'spynet'、'sea_raft' 或 'scflow'。
     ,
     "optical_flow": {
-      "module": "scflow",
-      "checkpoint": "weights/optical_flow/dt10_e40.pth",
+      "module": "spynet",
+      "checkpoint": null,
       "params": {}
     }
     // Spike Encoder 配置：用于控制是否启用 Spike 编码器，以及可扩展支持不同编码器
@@ -621,4 +621,5 @@
     "swanlab_mode": null
   }
 }
+
 
