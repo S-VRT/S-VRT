@@ -352,7 +352,7 @@ class _MockSCFlowModel(nn.Module):
         self.received_dt = dt
         b, _, h, w = spk1.shape
         flows = [torch.zeros(b, 2, h // (2**i), w // (2**i)) for i in range(4)]
-        return flows[::-1], {}
+        return flows, {}
 
 
 class _RecordingNet:
@@ -599,8 +599,8 @@ def test_vrt_get_flow_2frames_backward_forward_count():
     x = torch.randn(1, 4, 7, 16, 16)
     flow_spike = torch.randn(1, 4, 25, 16, 16)
     flows_backward, flows_forward = vrt.get_flow_2frames(x, flow_spike=flow_spike)
-    assert len(flows_backward) == 3
-    assert len(flows_forward) == 3
+    assert len(flows_backward) == 4
+    assert len(flows_forward) == 4
 
 
 @pytest.mark.integration
@@ -610,7 +610,9 @@ def test_vrt_get_flow_2frames_flow_shape():
     x = torch.randn(1, 4, 7, 16, 16)
     flow_spike = torch.randn(1, 4, 25, 16, 16)
     flows_backward, _ = vrt.get_flow_2frames(x, flow_spike=flow_spike)
-    # b=1, n-1=3, 2 channels, h=16, w=16 at scale i=0
+    # b=1, n-1=3, 2 channels, h=16, w=16 at scale i=0 → shape (1, 3, 2, 16, 16)
+    # flows_backward has 4 elements (one per scale)
+    assert len(flows_backward) == 4
     assert tuple(flows_backward[0].shape) == (1, 3, 2, 16, 16)
 
 
