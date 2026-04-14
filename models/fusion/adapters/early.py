@@ -38,7 +38,7 @@ class EarlyFusionAdapter(nn.Module):
         operator: nn.Module,
         mode: str = "replace",
         inject_stages: Optional[list] = None,
-        spike_chans: int = 0,
+        spike_chans: Optional[int] = None,
         **kwargs: Any,
     ):
         super().__init__()
@@ -46,7 +46,7 @@ class EarlyFusionAdapter(nn.Module):
         self.mode = mode
         self.inject_stages = inject_stages if inject_stages is not None else []
         self.spike_chans = spike_chans
-        self.spike_upsample = SpikeUpsample(spike_chans) if spike_chans > 0 else None
+        self.spike_upsample = SpikeUpsample(spike_chans) if spike_chans is not None else None
         self.kwargs = kwargs
 
     def forward(self, rgb: torch.Tensor, spike: torch.Tensor) -> torch.Tensor:
