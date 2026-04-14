@@ -94,40 +94,42 @@ def test_vrt_dual_with_fusion_requires_spike_channels():
         _build_vrt(opt=opt, in_chans=3)
 
 
-def test_vrt_dual_early_out_chans_mismatch_includes_dims():
+def test_vrt_dual_early_out_chans_3_is_allowed():
     opt = {
         "netG": {
             "input_mode": "dual",
+            "output_mode": "restoration",
             "fusion": {
                 "enable": True,
                 "placement": "early",
                 "operator": "concat",
-                "out_chans": 5,
+                "out_chans": 3,
                 "operator_params": {},
             },
         }
     }
-    with pytest.raises(ValueError, match=r"input_mode=dual.*out_chans \(5\).*in_chans \(4\)"):
-        _build_vrt(opt=opt, in_chans=4)
+    model = _build_vrt(opt=opt, in_chans=11)
+    assert model is not None
 
 
-def test_vrt_dual_hybrid_out_chans_mismatch_includes_dims():
+def test_vrt_dual_hybrid_out_chans_3_is_allowed():
     opt = {
         "netG": {
             "input_mode": "dual",
+            "output_mode": "restoration",
             "fusion": {
                 "enable": True,
                 "placement": "hybrid",
                 "operator": "concat",
-                "out_chans": 5,
+                "out_chans": 3,
                 "middle": {"out_chans": 16},
                 "inject_stages": [1],
                 "operator_params": {},
             },
         }
     }
-    with pytest.raises(ValueError, match=r"input_mode=dual.*out_chans \(5\).*in_chans \(4\)"):
-        _build_vrt(opt=opt, in_chans=4)
+    model = _build_vrt(opt=opt, in_chans=11)
+    assert model is not None
 
 
 @pytest.mark.parametrize(
@@ -142,13 +144,13 @@ def test_vrt_dual_hybrid_out_chans_mismatch_includes_dims():
                         "enable": True,
                         "placement": "early",
                         "operator": "concat",
-                        "out_chans": 4,
+                        "out_chans": 3,
                         "early": {"expand_to_full_t": False},
                         "operator_params": {},
                     },
                 }
             },
-            4,
+            11,
         ),
         (
             {
@@ -174,14 +176,14 @@ def test_vrt_dual_hybrid_out_chans_mismatch_includes_dims():
                         "enable": True,
                         "placement": "hybrid",
                         "operator": "concat",
-                        "out_chans": 4,
+                        "out_chans": 3,
                         "middle": {"out_chans": 16},
                         "inject_stages": [1],
                         "operator_params": {},
                     },
                 }
             },
-            4,
+            11,
         ),
         (
             {

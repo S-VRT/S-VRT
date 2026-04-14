@@ -84,6 +84,21 @@ def test_build_model_input_dual_shape_mismatch_raises():
         model._build_model_input_tensor({"L_rgb": l_rgb, "L_spike": l_spike})
 
 
+def test_build_model_input_dual_resizes_spike_before_concat():
+    model = _build_stub_model("dual", in_chans=7)
+    l_rgb = torch.randn(1, 2, 3, 16, 16)
+    l_spike = torch.randn(1, 2, 4, 8, 8)
+    out = model._build_model_input_tensor({"L_rgb": l_rgb, "L_spike": l_spike})
+    assert out.shape == (1, 2, 7, 16, 16)
+
+
+def test_validate_dual_input_allows_spatial_mismatch():
+    model = _build_stub_model("dual", in_chans=7)
+    l_rgb = torch.randn(1, 2, 3, 16, 16)
+    l_spike = torch.randn(1, 2, 4, 8, 8)
+    model._validate_dual_input_tensors(l_rgb, l_spike)
+
+
 def test_build_model_input_dual_invalid_rgb_channels_raises():
     model = _build_stub_model("dual", in_chans=7)
     l_rgb = torch.randn(1, 2, 2, 8, 8)

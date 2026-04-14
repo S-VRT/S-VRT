@@ -5,6 +5,7 @@ import torch.nn as nn
 from models.architectures.vrt.vrt import VRT
 from models.fusion.adapters.hybrid import HybridFusionAdapter
 from models.fusion.adapters.middle import MiddleFusionAdapter
+from models.fusion.reducers import build_restoration_reducer
 
 
 def test_vrt_builds_with_fusion_config():
@@ -189,6 +190,145 @@ def test_vrt_builds_with_hybrid_fusion_adapter():
     assert model.fusion_adapter.early_adapter.operator.rgb_chans == 3
     assert model.fusion_adapter.middle_adapter.operator.rgb_chans == 16
     assert model.fusion_adapter.middle_adapter.operator.spike_chans == 1
+
+
+def test_vrt_builds_with_early_fusion_out_chans_3():
+    """Early fusion with out_chans=3 and in_chans=11 should build successfully."""
+    opt = {
+        "netG": {
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "gated",
+                "out_chans": 3,
+                "operator_params": {},
+            },
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=11,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.fusion_enabled is True
+    assert model.output_mode == "restoration"
+    assert model.spike_bins == 8
+    assert model.conv_first.weight.shape[1] == 27
+
+
+def test_index_reducer_selects_configured_index():
+    reducer = build_restoration_reducer({"type": "index", "index": 1})
+    x = torch.arange(18.0).reshape(1, 6, 1, 1, 1).expand(1, 6, 3, 2, 2)
+    out = reducer(x=x, spike_bins=3, base_rgb=None)
+    assert out.shape == (1, 2, 3, 2, 2)
+    assert out[0, 0, 0, 0, 0].item() == 1.0
+    assert out[0, 1, 0, 0, 0].item() == 4.0
+
+
+def test_index_reducer_uses_configured_position():
+    reducer = build_restoration_reducer({"type": "index", "index": 2})
+    x = torch.arange(12.0).reshape(1, 12, 1, 1, 1).expand(1, 12, 3, 8, 8)
+    selected = reducer(x=x, spike_bins=4, base_rgb=None)
+    assert selected.shape == (1, 3, 3, 8, 8)
+    assert selected[0, 0, 0, 0, 0].item() == 2.0
+    assert selected[0, 1, 0, 0, 0].item() == 6.0
+    assert selected[0, 2, 0, 0, 0].item() == 10.0
+
+
+def test_selector_reducer_restores_n_frames():
+    reducer = build_restoration_reducer({"type": "selector", "selector_hidden": 8})
+    x = torch.randn(2, 12, 3, 8, 8)
+    out = reducer(x=x, spike_bins=4, base_rgb=None)
+    assert out.shape == (2, 3, 3, 8, 8)
+
+
+def test_residual_selector_reducer_uses_base_rgb_shape():
+    reducer = build_restoration_reducer({"type": "residual_selector", "selector_hidden": 8})
+    x = torch.randn(2, 12, 3, 8, 8)
+    base = torch.randn(2, 3, 3, 8, 8)
+    out = reducer(x=x, spike_bins=4, base_rgb=base)
+    assert out.shape == base.shape
+
+
+def test_vrt_builds_with_selector_reducer():
+    opt = {
+        "netG": {
+            "output_mode": "restoration",
+            "restoration_reducer": {"type": "selector", "selector_hidden": 8},
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "gated",
+                "out_chans": 3,
+                "operator_params": {},
+            },
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=11,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.restoration_reducer is not None
+
+
+def test_vrt_builds_with_interpolation_mode():
+    opt = {
+        "netG": {
+            "output_mode": "interpolation",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "gated",
+                "out_chans": 3,
+                "operator_params": {},
+            },
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=11,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.output_mode == "interpolation"
+    assert model.restoration_reducer is None
 
 
 def test_vrt_forward_features_passes_fusion_hook_for_middle():

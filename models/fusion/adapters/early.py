@@ -1,7 +1,35 @@
 from typing import Any, Optional
 
 import torch
+import torch.nn.functional as F
 from torch import nn
+
+
+class SpikeUpsample(nn.Module):
+    def __init__(self, spike_chans: int):
+        super().__init__()
+        self.spike_chans = spike_chans
+        self.refine = nn.Sequential(
+            nn.Conv2d(spike_chans, spike_chans, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(spike_chans, spike_chans, kernel_size=3, padding=1),
+        )
+
+    def forward(self, spike: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
+        if spike.dim() != 4:
+            raise ValueError("spike must be 4D tensor [B_flat, S, H, W]")
+
+        _, spike_chans, _, _ = spike.shape
+        if spike_chans != self.spike_chans:
+            raise ValueError(f"Expected spike channels={self.spike_chans}, got {spike_chans}")
+
+        upsampled = F.interpolate(
+            spike,
+            size=(target_h, target_w),
+            mode="bilinear",
+            align_corners=False,
+        )
+        return self.refine(upsampled)
 
 
 class EarlyFusionAdapter(nn.Module):
@@ -10,28 +38,44 @@ class EarlyFusionAdapter(nn.Module):
         operator: nn.Module,
         mode: str = "replace",
         inject_stages: Optional[list] = None,
+        spike_chans: int = 0,
         **kwargs: Any,
     ):
         super().__init__()
         self.operator = operator
         self.mode = mode
         self.inject_stages = inject_stages if inject_stages is not None else []
+        self.spike_chans = spike_chans
+        self.spike_upsample = SpikeUpsample(spike_chans) if spike_chans > 0 else None
         self.kwargs = kwargs
 
     def forward(self, rgb: torch.Tensor, spike: torch.Tensor) -> torch.Tensor:
-        # rgb: [B, N, 3, H, W], spike: [B, N, T, H, W] or [B, N, C, H, W]
         if rgb.dim() != 5:
             raise ValueError("rgb must be 5D tensor [B, N, C, H, W]")
         if spike.dim() != 5:
-            raise ValueError("spike must be 5D tensor [B, N, T, H, W] or [B, N, C, H, W]")
+            raise ValueError("spike must be 5D tensor [B, N, S, H, W]")
+
         bsz, steps, rgb_chans, height, width = rgb.shape
-        spike_bsz, spike_steps, time_dim, spike_height, spike_width = spike.shape
-        if (bsz, steps, height, width) != (spike_bsz, spike_steps, spike_height, spike_width):
-            raise ValueError("rgb and spike must share batch, steps, height, and width")
-        rgb_rep = rgb.unsqueeze(2).expand(bsz, steps, time_dim, rgb_chans, height, width)
-        rgb_rep = rgb_rep.reshape(bsz, steps * time_dim, rgb_chans, height, width)
-        spk = spike.reshape(bsz, steps * time_dim, 1, height, width)
+        spike_bsz, spike_steps, spike_steps_per_frame, spike_height, spike_width = spike.shape
+
+        if (bsz, steps) != (spike_bsz, spike_steps):
+            raise ValueError("rgb and spike must share batch size and steps")
+
+        if (spike_height, spike_width) != (height, width):
+            if self.spike_upsample is None:
+                raise ValueError(
+                    "Cannot upsample spike features to match rgb spatial dimensions without spike_chans."
+                )
+            spike_flat = spike.reshape(bsz * steps, spike_steps_per_frame, spike_height, spike_width)
+            spike_flat = self.spike_upsample(spike_flat, target_h=height, target_w=width)
+            spike = spike_flat.reshape(bsz, steps, spike_steps_per_frame, height, width)
+
+        rgb_rep = rgb.unsqueeze(2).expand(
+            bsz, steps, spike_steps_per_frame, rgb_chans, height, width
+        )
+        rgb_rep = rgb_rep.reshape(bsz, steps * spike_steps_per_frame, rgb_chans, height, width)
+        spk = spike.reshape(bsz, steps * spike_steps_per_frame, 1, height, width)
         return self.operator(rgb_rep, spk)
 
 
-__all__ = ["EarlyFusionAdapter"]
+__all__ = ["SpikeUpsample", "EarlyFusionAdapter"]

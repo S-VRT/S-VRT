@@ -217,6 +217,27 @@ class ModelBase():
             network.load_state_dict(state_dict, strict=True)
             del state_dict_old, state_dict
 
+    def load_network_partial(self, load_path, network, param_key='params'):
+        network = self.get_bare_model(network)
+        state_dict_old = torch.load(load_path)
+        if param_key in state_dict_old.keys():
+            state_dict_old = state_dict_old[param_key]
+
+        state_dict = network.state_dict()
+        matched = {}
+        skipped = []
+        for key_old, param_old in state_dict_old.items():
+            if key_old in state_dict and state_dict[key_old].shape == param_old.shape:
+                matched[key_old] = param_old
+            else:
+                skipped.append(key_old)
+
+        state_dict.update(matched)
+        network.load_state_dict(state_dict, strict=True)
+        print(
+            f"Partial load: matched {len(matched)} tensors, skipped {len(skipped)} tensors from {load_path}"
+        )
+
     # ----------------------------------------
     # save the state_dict of the optimizer
     # ----------------------------------------

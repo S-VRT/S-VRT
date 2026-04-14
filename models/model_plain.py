@@ -1,6 +1,7 @@
 from collections import OrderedDict
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import lr_scheduler
 from torch.optim import Adam
 
@@ -12,6 +13,15 @@ from models.loss_ssim import SSIMLoss
 from utils.utils_model import test_mode
 from utils.utils_regularizers import regularizer_orth, regularizer_clip
 from utils.utils_timer import Timer
+
+
+def freeze_backbone(model):
+    """Freeze all backbone params and keep fusion-specific params trainable."""
+    for name, param in model.named_parameters():
+        if "fusion_adapter" in name or "fusion_operator" in name:
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
 
 
 class ModelPlain(ModelBase):
@@ -70,8 +80,19 @@ class ModelPlain(ModelBase):
         has_spike = 'L_spike' in data
         has_dual = has_rgb and has_spike
         if has_dual:
-            self._validate_dual_input_tensors(data['L_rgb'], data['L_spike'])
-            return torch.cat([data['L_rgb'], data['L_spike']], dim=2)
+            l_rgb = data['L_rgb']
+            l_spike = data['L_spike']
+            self._validate_dual_input_tensors(l_rgb, l_spike)
+            if l_rgb.shape[-2:] != l_spike.shape[-2:]:
+                bsz, steps, spike_chans, _, _ = l_spike.shape
+                target_h, target_w = l_rgb.shape[-2:]
+                l_spike = F.interpolate(
+                    l_spike.reshape(bsz * steps, spike_chans, l_spike.size(-2), l_spike.size(-1)),
+                    size=(target_h, target_w),
+                    mode='bilinear',
+                    align_corners=False,
+                ).reshape(bsz, steps, spike_chans, target_h, target_w)
+            return torch.cat([l_rgb, l_spike], dim=2)
         if has_rgb != has_spike:
             missing_key = "L_spike" if has_rgb else "L_rgb"
             raise KeyError(
@@ -99,11 +120,9 @@ class ModelPlain(ModelBase):
         if (
             l_rgb.size(0) != l_spike.size(0)
             or l_rgb.size(1) != l_spike.size(1)
-            or l_rgb.size(3) != l_spike.size(3)
-            or l_rgb.size(4) != l_spike.size(4)
         ):
             raise ValueError(
-                f"input_mode=dual requires matching [B,T,H,W] between L_rgb {tuple(l_rgb.shape)} "
+                f"input_mode=dual requires matching [B,T] between L_rgb {tuple(l_rgb.shape)} "
                 f"and L_spike {tuple(l_spike.shape)}."
             )
 
@@ -127,6 +146,12 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     def init_train(self):
         self.load()                           # load model
+        if self.opt.get('train', {}).get('freeze_backbone', False):
+            bare_model = self.get_bare_model(self.netG)
+            freeze_backbone(bare_model)
+            frozen_count = sum(1 for p in bare_model.parameters() if not p.requires_grad)
+            trainable_count = sum(1 for p in bare_model.parameters() if p.requires_grad)
+            print(f'[Stage A] Frozen {frozen_count} params, trainable {trainable_count} params')
         self.netG.train()                     # set training mode,for BN
         self.define_loss()                    # define loss
         self.define_optimizer()               # define optimizer
@@ -146,7 +171,11 @@ class ModelPlain(ModelBase):
         load_path_G = self.opt['path']['pretrained_netG']
         if load_path_G is not None:
             print('Loading model for G [{:s}] ...'.format(load_path_G))
-            self.load_network(load_path_G, self.netG, strict=self.opt_train['G_param_strict'], param_key='params')
+            use_partial = self.opt.get('train', {}).get('partial_load', False)
+            if use_partial:
+                self.load_network_partial(load_path_G, self.netG, param_key='params')
+            else:
+                self.load_network(load_path_G, self.netG, strict=self.opt_train['G_param_strict'], param_key='params')
         load_path_E = self.opt['path']['pretrained_netE']
         if self.opt_train['E_decay'] > 0:
             if load_path_E is not None:

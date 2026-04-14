@@ -297,6 +297,21 @@
   "netG": {
     // 网络类型：指定为 "vrt" (Video Restoration Transformer)
     "net_type": "vrt"
+    ,
+    "output_mode": "restoration"
+    ,
+    "restoration_reducer": {
+      "type": "index",
+      "index": 4
+    }
+    ,
+    "fusion": {
+      "enable": true,
+      "placement": "early",
+      "operator": "gated",
+      "out_chans": 3,
+      "operator_params": {}
+    }
     // 输入通道数：7 表示 RGB (3) + Spike TFP (4) 通道拼接
     // 注意：当 pa_frames>0 时，经过对齐后实际输入 conv_first 的通道数为 in_chans * 9 = 63
     // 2 (frames) * 4 (expansion) + 1 (current) = 9 倍
@@ -469,6 +484,21 @@
     // 损失函数配置
     // 生成器损失函数类型："charbonnier" 表示使用 Charbonnier 损失（L1 损失的平滑版本）
     "G_lossfn_type": "charbonnier"
+    ,
+    "freeze_backbone": true
+    ,
+    "partial_load": true
+    ,
+    "use_lora": false
+    ,
+    "lora_rank": 8
+    ,
+    "lora_alpha": 16
+    ,
+    "lora_target_modules": [
+      "qkv",
+      "proj"
+    ]
     // 生成器损失函数权重：损失函数的权重系数
     ,
     "G_lossfn_weight": 1.0

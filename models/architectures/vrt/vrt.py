@@ -14,6 +14,7 @@ from models.utils.flow import flow_warp
 from models.utils.init import trunc_normal_
 from models.spk_encoder import PixelAdaptiveSpikeEncoder
 from models.fusion.factory import create_fusion_operator, create_fusion_adapter
+from models.fusion.reducers import build_restoration_reducer
 
 LOGGER = logging.getLogger(__name__)
 INPUT_PATH_CONCAT = "concat_path"
@@ -177,6 +178,7 @@ class VRT(nn.Module):
             middle_cfg = (fusion_cfg.get('middle', {}) or {})
             early_out_chans = int(early_cfg.get('out_chans', fusion_out_chans))
             middle_out_chans = int(middle_cfg.get('out_chans', fusion_out_chans))
+            spike_input_chans = self.in_chans - 3
 
             middle_rgb_chans = None
             middle_spike_chans = None
@@ -185,7 +187,6 @@ class VRT(nn.Module):
                     f"[VRT] input_mode=dual requires in_chans>3 (rgb+spike), got in_chans={self.in_chans}."
                 )
             if fusion_placement in {'middle', 'hybrid'}:
-                spike_input_chans = self.in_chans - 3
                 if spike_input_chans <= 0:
                     raise ValueError(
                         f"[VRT] input_mode={self.input_mode}, placement={fusion_placement} "
@@ -220,11 +221,6 @@ class VRT(nn.Module):
                     middle_rgb_chans = embed_dims[0]
                 middle_spike_chans = 1 if fusion_placement == 'hybrid' else spike_input_chans
 
-            if fusion_placement in {'early', 'hybrid'} and early_out_chans != self.in_chans:
-                raise ValueError(
-                    f"[VRT] input_mode={self.input_mode}, placement={fusion_placement} requires "
-                    f"early out_chans ({early_out_chans}) to match in_chans ({self.in_chans})."
-                )
             full_t_required = (
                 fusion_placement == 'hybrid'
                 or (fusion_placement == 'early' and bool(early_cfg.get('expand_to_full_t', False)))
@@ -268,6 +264,7 @@ class VRT(nn.Module):
                     operator=self.fusion_operator,
                     mode=fusion_mode,
                     inject_stages=inject_stages,
+                    spike_chans=spike_input_chans,
                 )
             elif fusion_placement == 'middle':
                 self.fusion_operator = create_fusion_operator(
@@ -306,16 +303,36 @@ class VRT(nn.Module):
                     middle_operator=middle_operator,
                     mode=fusion_mode,
                     inject_stages=inject_stages,
+                    spike_chans=spike_input_chans,
                 )
+
+        if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
+            effective_in_chans = early_out_chans
+        else:
+            effective_in_chans = in_chans
 
         if self.pa_frames:
             if self.nonblind_denoising:
-                conv_first_in_chans = in_chans * 9 + 1
+                conv_first_in_chans = effective_in_chans * 9 + 1
             else:
-                conv_first_in_chans = in_chans * 9
+                conv_first_in_chans = effective_in_chans * 9
         else:
-            conv_first_in_chans = in_chans
+            conv_first_in_chans = effective_in_chans
         self.conv_first = nn.Conv3d(conv_first_in_chans, embed_dims[0], kernel_size=(1, 3, 3), padding=(0, 1, 1))
+        self.output_mode = ((opt or {}).get('netG', {}) or {}).get('output_mode', 'restoration')
+        if self.output_mode not in {'restoration', 'interpolation'}:
+            raise ValueError(
+                f"output_mode must be 'restoration' or 'interpolation', got '{self.output_mode}'"
+            )
+        reducer_cfg = ((opt or {}).get("netG", {}) or {}).get("restoration_reducer", {})
+        if self.output_mode == "restoration":
+            self.restoration_reducer = build_restoration_reducer(reducer_cfg)
+        else:
+            self.restoration_reducer = None
+        if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
+            self.spike_bins = in_chans - 3
+        else:
+            self.spike_bins = 1
 
         if self.pa_frames:
             # Instantiate a pluggable optical-flow backend via factory.
@@ -481,10 +498,12 @@ class VRT(nn.Module):
 
             x_lq = x.clone()
             x_lq_rgb = self.extract_rgb(x_lq)
+            spike_bins = 1
 
             if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
                 rgb = x[:, :, :3, :, :]
                 spike = x[:, :, 3:, :, :]
+                spike_bins = spike.shape[2]
                 x = self.fusion_adapter(rgb=rgb, spike=spike)
 
             if timer is not None:
@@ -542,6 +561,20 @@ class VRT(nn.Module):
                         ).transpose(1, 4)
                     ).transpose(1, 4)
                     x = self.conv_last(x).transpose(1, 2)
+                if self.output_mode == "restoration" and spike_bins > 1:
+                    if self.restoration_reducer is None:
+                        raise RuntimeError("restoration_reducer must be initialized for restoration mode.")
+                    reduced = self.restoration_reducer(x=x, spike_bins=spike_bins, base_rgb=x_lq_rgb)
+                    return reduced + x_lq_rgb
+                if self.output_mode == "interpolation" and spike_bins > 1:
+                    bsz, frames = x_lq_rgb.shape[:2]
+                    chans, height, width = x_lq_rgb.shape[2:]
+                    x_lq_rgb_exp = (
+                        x_lq_rgb.unsqueeze(2)
+                        .expand(bsz, frames, spike_bins, chans, height, width)
+                        .reshape(bsz, frames * spike_bins, chans, height, width)
+                    )
+                    return x + x_lq_rgb_exp
                 return x + x_lq_rgb
             else:
                 if timer is not None:
@@ -574,6 +607,20 @@ class VRT(nn.Module):
                 _, _, C, H, W = x.shape
                 x_lq_rgb = torch.nn.functional.interpolate(
                     x_lq_rgb, size=(C, H, W), mode='trilinear', align_corners=False)
+                if self.output_mode == "restoration" and spike_bins > 1:
+                    if self.restoration_reducer is None:
+                        raise RuntimeError("restoration_reducer must be initialized for restoration mode.")
+                    reduced = self.restoration_reducer(x=x, spike_bins=spike_bins, base_rgb=x_lq_rgb)
+                    return reduced + x_lq_rgb
+                if self.output_mode == "interpolation" and spike_bins > 1:
+                    bsz, frames = x_lq_rgb.shape[:2]
+                    chans, height, width = x_lq_rgb.shape[2:]
+                    x_lq_rgb_exp = (
+                        x_lq_rgb.unsqueeze(2)
+                        .expand(bsz, frames, spike_bins, chans, height, width)
+                        .reshape(bsz, frames * spike_bins, chans, height, width)
+                    )
+                    return x + x_lq_rgb_exp
                 return x + x_lq_rgb
         else:
             x_mean = x.mean([1,3,4], keepdim=True)
