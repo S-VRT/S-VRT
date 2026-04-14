@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Redesign EarlyFusionAdapter to support spatial upsampling (spike→RGB resolution), temporal expansion (N→N*S frames), and output_mode branching (restoration/interpolation), with partial weight loading and freeze_backbone support for Stage A training.
+**Goal:** Redesign EarlyFusionAdapter to support spatial upsampling (spike→RGB resolution), temporal expansion (N→N*S frames), and configurable restoration/interpolation output handling, with partial weight loading and freeze_backbone support for Stage A training.
 
-**Architecture:** EarlyFusionAdapter gains a SpikeUpsample submodule (bilinear + 2-layer refinement conv) and rewrites forward to: (1) upsample spike spatially, (2) expand RGB×S temporally, (3) fuse via operator outputting 3 channels. VRT backbone receives N*S×3-channel frames, and a new output_mode branch at the residual connection selects N frames (restoration) or keeps N*S frames (interpolation). Partial weight loading replaces the broken positional-zip loader. freeze_backbone config freezes VRT parameters for Stage A.
+**Architecture:** EarlyFusionAdapter gains a SpikeUpsample submodule (bilinear + 2-layer refinement conv) and rewrites forward to: (1) upsample spike spatially, (2) expand RGB×S temporally, (3) fuse via operator outputting 3 channels. VRT backbone receives N*S×3-channel frames. For `output_mode='restoration'`, a configurable reducer collapses each S-frame group back to N output frames using one of three strategies: fixed `index`, learnable `selector`, or learnable `residual_selector`. For `output_mode='interpolation'`, the full N*S sequence is kept. Partial weight loading replaces the broken positional-zip loader. `train.freeze_backbone` freezes VRT parameters for Stage A without changing pretrained backbone shapes.
 
 **Tech Stack:** PyTorch, pytest, existing S-VRT fusion framework
 
@@ -17,13 +17,15 @@
 | File | Action | Responsibility |
 |------|--------|---------------|
 | `models/fusion/adapters/early.py` | Modify | Add `SpikeUpsample` submodule; rewrite `EarlyFusionAdapter.__init__` to accept `spike_chans`; rewrite `forward` with spatial upsample + temporal expansion |
-| `models/architectures/vrt/vrt.py` | Modify | Remove line 223 validation; compute `effective_in_chans` for `conv_first`; add `output_mode` + `spike_bins` attrs; add output_mode branching at residual connections (lines 545, 577) |
+| `models/architectures/vrt/vrt.py` | Modify | Remove old early-fusion channel-equality validation; compute `effective_in_chans` for non-SGP path; add `output_mode` + configurable restoration reducer; wire interpolation path |
+| `models/fusion/reducers.py` | Create | Add `build_restoration_reducer()` and reducer modules for `index`, `selector`, and `residual_selector` |
 | `models/fusion/factory.py` | Modify | Pass `spike_chans` kwarg through to adapter |
 | `models/model_base.py` | Modify | Add `load_network_partial()` with key+shape matching |
 | `models/model_plain.py` | Modify | Add `freeze_backbone` logic after loading; use partial loading when configured; relax `_validate_dual_input_tensors` spatial check |
-| `options/gopro_rgbspike_local.json` | Modify | Add `output_mode`, `training` block |
+| `options/gopro_rgbspike_local.json` | Modify | Add `output_mode`, `fusion`, and `reducer` config under `netG`; add Stage A switches under existing `train` block |
 | `tests/models/test_fusion_early_adapter.py` | Modify | Add tests for spatial mismatch, SpikeUpsample, temporal expansion with upsample |
-| `tests/models/test_vrt_fusion_integration.py` | Modify | Add tests for output_mode branching, frame selection |
+| `tests/models/test_vrt_fusion_integration.py` | Modify | Add tests for output_mode branching and reducer behavior |
+| `tests/models/test_vrt_dual_input_priority.py` | Modify | Update/remove old tests that enforce pre-redesign early-fusion semantics |
 | `tests/models/test_partial_loading.py` | Create | Tests for partial weight loading and freeze_backbone |
 
 ---
@@ -424,10 +426,10 @@ Do the same for the hybrid path (around line 302-309):
 Run: `pytest tests/models/test_vrt_fusion_integration.py::test_vrt_builds_with_early_fusion_out_chans_3 -v`
 Expected: PASS
 
-- [ ] **Step 8: Verify existing VRT fusion tests still pass**
+- [ ] **Step 8: Verify core VRT fusion tests still pass, excluding legacy semantic tests updated later**
 
 Run: `pytest tests/models/test_vrt_fusion_integration.py -v`
-Expected: All existing tests PASS. Note: existing tests use `out_chans=4` with `in_chans=4` — these still work because `effective_in_chans` falls back to `in_chans` when `early_out_chans == in_chans`.
+Expected: Core VRT fusion tests PASS. Legacy semantic tests that still enforce pre-redesign early/hybrid contracts are updated in Task 8.
 
 - [ ] **Step 9: Commit**
 
@@ -438,30 +440,200 @@ git commit -m "fix(vrt): remove early_out_chans validation, compute effective_in
 
 ---
 
-### Task 4: VRT Forward — Record S and Add output_mode Branching
+### Task 4: Restoration Reducer — Configurable `index`, `selector`, `residual_selector`
 
 **Files:**
-- Modify: `models/architectures/vrt/vrt.py` (lines 485-488, 545, 577)
+- Create: `models/fusion/reducers.py`
+- Modify: `models/architectures/vrt/vrt.py`
 - Test: `tests/models/test_vrt_fusion_integration.py`
 
-Two changes in `forward`:
-1. Record `S = spike.shape[2]` when early fusion is called (line 485-488)
-2. Add output_mode branching at both residual connection sites (lines 545, 577)
+For `output_mode='restoration'`, replace hard-coded frame indexing with a configurable reducer that maps `[B, N*S, C, H, W]` to `[B, N, C, H, W]` using one of three strategies:
+1. `index` — fixed configured index per S-frame group, zero extra params
+2. `selector` — learnable scorer that outputs S weights per group, small extra params only in reducer
+3. `residual_selector` — learnable scorer plus residual-only fusion against `x_lq_rgb`, small extra params only in reducer
 
-- [ ] **Step 1: Write failing test for output_mode='restoration' with frame selection**
+Backbone compatibility requirement: these reducers are appended after the pretrained VRT body; they must not change pretrained VRT layer shapes.
+`selector` and `residual_selector` introduce new reducer parameters, but those parameters are isolated from the pretrained VRT backbone and should load as newly initialized modules during partial loading.
+
+- [ ] **Step 1: Write failing reducer tests**
 
 Add to `tests/models/test_vrt_fusion_integration.py`:
 
 ```python
-def test_vrt_forward_restoration_mode_selects_frames(monkeypatch):
-    """output_mode='restoration' should select N frames from N*S."""
+import torch
+
+from models.fusion.reducers import build_restoration_reducer
+
+
+def test_index_reducer_selects_configured_index():
+    reducer = build_restoration_reducer({"type": "index", "index": 1})
+    x = torch.arange(24.0).reshape(1, 6, 1, 2, 2)  # N=2, S=3
+    out = reducer(x=x, spike_bins=3, base_rgb=None)
+    assert out.shape == (1, 2, 1, 2, 2)
+    assert torch.equal(out[:, 0], x[:, 1])
+    assert torch.equal(out[:, 1], x[:, 4])
+
+
+def test_selector_reducer_restores_n_frames():
+    reducer = build_restoration_reducer({"type": "selector", "selector_hidden": 8})
+    x = torch.randn(2, 12, 3, 8, 8)  # N=3, S=4
+    out = reducer(x=x, spike_bins=4, base_rgb=None)
+    assert out.shape == (2, 3, 3, 8, 8)
+
+
+def test_residual_selector_reducer_uses_base_rgb_shape():
+    reducer = build_restoration_reducer({"type": "residual_selector", "selector_hidden": 8})
+    x = torch.randn(2, 12, 3, 8, 8)
+    base = torch.randn(2, 3, 3, 8, 8)
+    out = reducer(x=x, spike_bins=4, base_rgb=base)
+    assert out.shape == base.shape
+```
+
+- [ ] **Step 2: Run reducer tests to verify they fail**
+
+Run: `pytest tests/models/test_vrt_fusion_integration.py::test_index_reducer_selects_configured_index tests/models/test_vrt_fusion_integration.py::test_selector_reducer_restores_n_frames tests/models/test_vrt_fusion_integration.py::test_residual_selector_reducer_uses_base_rgb_shape -v`
+Expected: FAIL with missing reducer module/factory
+
+- [ ] **Step 3: Implement reducer modules in `models/fusion/reducers.py`**
+
+Create `models/fusion/reducers.py`:
+
+```python
+from typing import Dict, Optional
+
+import torch
+import torch.nn.functional as F
+from torch import nn
+
+
+class FixedIndexReducer(nn.Module):
+    def __init__(self, index: int):
+        super().__init__()
+        self.index = int(index)
+
+    def forward(self, x: torch.Tensor, spike_bins: int, base_rgb: Optional[torch.Tensor] = None) -> torch.Tensor:
+        b, ns, c, h, w = x.shape
+        n = ns // spike_bins
+        groups = x.reshape(b, n, spike_bins, c, h, w)
+        idx = max(0, min(self.index, spike_bins - 1))
+        return groups[:, :, idx]
+
+
+class SelectorReducer(nn.Module):
+    def __init__(self, hidden: int = 32, temperature: float = 0.25, hard_infer: bool = True):
+        super().__init__()
+        self.temperature = float(temperature)
+        self.hard_infer = bool(hard_infer)
+        self.score = nn.Sequential(
+            nn.Conv3d(3, hidden, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv3d(hidden, 1, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor, spike_bins: int, base_rgb: Optional[torch.Tensor] = None) -> torch.Tensor:
+        b, ns, c, h, w = x.shape
+        n = ns // spike_bins
+        groups = x.reshape(b, n, spike_bins, c, h, w)
+        score_in = groups.permute(0, 1, 3, 2, 4, 5).reshape(b * n, c, spike_bins, h, w)
+        logits = self.score(score_in).mean(dim=(-1, -2)).squeeze(1) / self.temperature
+        weights = torch.softmax(logits, dim=1)
+        if (not self.training) and self.hard_infer:
+            hard_idx = weights.argmax(dim=1)
+            weights = F.one_hot(hard_idx, num_classes=spike_bins).float()
+        weights = weights.view(b, n, spike_bins, 1, 1, 1)
+        return (groups * weights).sum(dim=2)
+
+
+class ResidualSelectorReducer(SelectorReducer):
+    def forward(self, x: torch.Tensor, spike_bins: int, base_rgb: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if base_rgb is None:
+            raise ValueError("residual_selector requires base_rgb.")
+        residual = super().forward(x=x, spike_bins=spike_bins, base_rgb=None)
+        return residual
+
+
+def build_restoration_reducer(cfg: Optional[Dict]) -> nn.Module:
+    cfg = cfg or {"type": "index", "index": 0}
+    reducer_type = str(cfg.get("type", "index")).lower()
+    if reducer_type == "index":
+        return FixedIndexReducer(index=cfg.get("index", 0))
+    if reducer_type == "selector":
+        return SelectorReducer(
+            hidden=int(cfg.get("selector_hidden", 32)),
+            temperature=float(cfg.get("selector_temperature", 0.25)),
+            hard_infer=bool(cfg.get("selector_hard_infer", True)),
+        )
+    if reducer_type == "residual_selector":
+        return ResidualSelectorReducer(
+            hidden=int(cfg.get("selector_hidden", 32)),
+            temperature=float(cfg.get("selector_temperature", 0.25)),
+            hard_infer=bool(cfg.get("selector_hard_infer", True)),
+        )
+    raise ValueError(f"Unsupported restoration reducer type: {reducer_type}")
+```
+
+- [ ] **Step 4: Run reducer tests to verify they pass**
+
+Run: `pytest tests/models/test_vrt_fusion_integration.py::test_index_reducer_selects_configured_index tests/models/test_vrt_fusion_integration.py::test_selector_reducer_restores_n_frames tests/models/test_vrt_fusion_integration.py::test_residual_selector_reducer_uses_base_rgb_shape -v`
+Expected: PASS
+
+- [ ] **Step 5: Wire reducer config into VRT**
+
+In `models/architectures/vrt/vrt.py`, add in `__init__` after `self.output_mode`:
+
+```python
+        reducer_cfg = ((opt or {}).get("netG", {}) or {}).get("restoration_reducer", {})
+        if self.output_mode == "restoration":
+            from models.fusion.reducers import build_restoration_reducer
+            self.restoration_reducer = build_restoration_reducer(reducer_cfg)
+        else:
+            self.restoration_reducer = None
+```
+
+In `forward`, keep `S = spike.shape[2]` recording, but replace hard-coded `S//2` frame selection with reducer invocation:
+
+```python
+                if self.output_mode == "restoration" and S > 1:
+                    if self.restoration_reducer is None:
+                        raise RuntimeError("restoration_reducer must be initialized for restoration mode.")
+                    reduced = self.restoration_reducer(x=x, spike_bins=S, base_rgb=x_lq_rgb)
+                    return reduced + x_lq_rgb
+```
+
+Reducer contract for restoration mode:
+- `index` and `selector` return a residual tensor shaped `[B, N, 3, H, W]`
+- `residual_selector` also returns a residual tensor shaped `[B, N, 3, H, W]`; it may use `base_rgb` internally as conditioning, but must not apply the final RGB skip connection itself
+
+This keeps VRT's restoration head semantics unchanged: the outer return site remains the single place that applies `+ x_lq_rgb`.
+
+Keep interpolation path as explicit RGB residual expansion:
+
+```python
+                if self.output_mode == "interpolation" and S > 1:
+                    bsz, n_orig = x_lq_rgb.shape[:2]
+                    chans, height, width = x_lq_rgb.shape[2:]
+                    x_lq_rgb_exp = (
+                        x_lq_rgb.unsqueeze(2)
+                        .expand(bsz, n_orig, S, chans, height, width)
+                        .reshape(bsz, n_orig * S, chans, height, width)
+                    )
+                    return x + x_lq_rgb_exp
+```
+
+- [ ] **Step 6: Add VRT-level tests for reducer config**
+
+Add to `tests/models/test_vrt_fusion_integration.py`:
+
+```python
+def test_vrt_builds_with_selector_reducer():
     opt = {
         "netG": {
             "output_mode": "restoration",
+            "restoration_reducer": {"type": "selector", "selector_hidden": 8},
             "fusion": {
                 "enable": True,
                 "placement": "early",
-                "operator": "concat",
+                "operator": "gated",
                 "out_chans": 3,
                 "operator_params": {},
             },
@@ -469,7 +641,7 @@ def test_vrt_forward_restoration_mode_selects_frames(monkeypatch):
     }
     model = VRT(
         upscale=1,
-        in_chans=11,  # 3 RGB + 8 spike
+        in_chans=11,
         out_chans=3,
         img_size=[2, 8, 8],
         window_size=[2, 4, 4],
@@ -482,119 +654,15 @@ def test_vrt_forward_restoration_mode_selects_frames(monkeypatch):
         optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
         opt=opt,
     )
-
-    # Mock get_flows and forward_features to avoid full VRT execution
-    dummy_flows = [
-        torch.zeros(1, 1, 2, 8, 8),
-        torch.zeros(1, 1, 2, 4, 4),
-        torch.zeros(1, 1, 2, 2, 2),
-        torch.zeros(1, 1, 2, 1, 1),
-    ]
-
-    def _fake_get_flows(_x, flow_spike=None):
-        return dummy_flows, dummy_flows
-
-    def _fake_aligned(_x, _fb, _ff):
-        bsz, steps, chans, height, width = _x.shape
-        return [
-            torch.zeros(bsz, steps, chans * 4, height, width),
-            torch.zeros(bsz, steps, chans * 4, height, width),
-        ]
-
-    def _fake_forward_features(_x, _fb, _ff, fusion_hook=None, spike_ctx=None):
-        # Return same shape as input
-        return _x
-
-    monkeypatch.setattr(model, "get_flows", _fake_get_flows)
-    monkeypatch.setattr(model, "get_aligned_image_2frames", _fake_aligned)
-    monkeypatch.setattr(model, "forward_features", _fake_forward_features)
-
-    # Input: [B, N, 11, H, W] (3 RGB + 8 spike)
-    x = torch.randn(1, 2, 11, 8, 8)
-    out = model(x)
-
-    # Output should be [B, N, 3, H, W] (restoration mode selects N frames)
-    assert out.shape == (1, 2, 3, 8, 8)
+    assert model.restoration_reducer is not None
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pytest tests/models/test_vrt_fusion_integration.py::test_vrt_forward_restoration_mode_selects_frames -v`
-Expected: FAIL with shape mismatch at residual connection (x is [1, 16, 3, 8, 8] but x_lq_rgb is [1, 2, 3, 8, 8])
-
-- [ ] **Step 3: Record S in forward when early fusion is called**
-
-In `models/architectures/vrt/vrt.py`, modify the early fusion block (lines 485-488):
-
-```python
-            if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
-                rgb = x[:, :, :3, :, :]
-                spike = x[:, :, 3:, :, :]
-                S = spike.shape[2]  # NEW: record spike bins for later frame selection
-                x = self.fusion_adapter(rgb=rgb, spike=spike)
-            else:
-                S = 1  # NEW: no temporal expansion when fusion is disabled
-```
-
-- [ ] **Step 4: Add output_mode branching at upscale==1 residual (line 545)**
-
-Replace line 545 (`return x + x_lq_rgb`) with:
-
-```python
-                # output_mode branching: select frames (restoration) or expand residual (interpolation)
-                if self.output_mode == 'restoration' and S > 1:
-                    # Select center frame from each S-frame group: [B, N*S, 3, H, W] → [B, N, 3, H, W]
-                    x = x[:, S // 2 :: S, :, :, :]
-                    return x + x_lq_rgb
-                elif self.output_mode == 'interpolation' and S > 1:
-                    # Expand x_lq_rgb to match N*S frames: [B, N, 3, H, W] → [B, N*S, 3, H, W]
-                    B, N_orig = x_lq_rgb.shape[:2]
-                    C, H, W = x_lq_rgb.shape[2:]
-                    x_lq_rgb_exp = (
-                        x_lq_rgb.unsqueeze(2)
-                        .expand(B, N_orig, S, C, H, W)
-                        .reshape(B, N_orig * S, C, H, W)
-                    )
-                    return x + x_lq_rgb_exp
-                else:
-                    # S=1 (no temporal expansion) or unrecognized mode
-                    return x + x_lq_rgb
-```
-
-- [ ] **Step 5: Add output_mode branching at upscale>1 residual (line 577)**
-
-Replace line 577 (`return x + x_lq_rgb`) with the same branching logic:
-
-```python
-                # output_mode branching (same as upscale==1 path)
-                if self.output_mode == 'restoration' and S > 1:
-                    x = x[:, S // 2 :: S, :, :, :]
-                    return x + x_lq_rgb
-                elif self.output_mode == 'interpolation' and S > 1:
-                    B, N_orig = x_lq_rgb.shape[:2]
-                    C, H, W = x_lq_rgb.shape[2:]
-                    x_lq_rgb_exp = (
-                        x_lq_rgb.unsqueeze(2)
-                        .expand(B, N_orig, S, C, H, W)
-                        .reshape(B, N_orig * S, C, H, W)
-                    )
-                    return x + x_lq_rgb_exp
-                else:
-                    return x + x_lq_rgb
-```
-
-- [ ] **Step 6: Run restoration test to verify it passes**
-
-Run: `pytest tests/models/test_vrt_fusion_integration.py::test_vrt_forward_restoration_mode_selects_frames -v`
-Expected: PASS
-
-- [ ] **Step 7: Write test for output_mode='interpolation'**
+- [ ] **Step 7: Add interpolation-path test**
 
 Add to `tests/models/test_vrt_fusion_integration.py`:
 
 ```python
 def test_vrt_forward_interpolation_mode_keeps_all_frames(monkeypatch):
-    """output_mode='interpolation' should keep all N*S frames."""
     opt = {
         "netG": {
             "output_mode": "interpolation",
@@ -623,7 +691,6 @@ def test_vrt_forward_interpolation_mode_keeps_all_frames(monkeypatch):
         opt=opt,
     )
 
-    # Same mocks as restoration test
     dummy_flows = [
         torch.zeros(1, 1, 2, 8, 8),
         torch.zeros(1, 1, 2, 4, 4),
@@ -642,7 +709,7 @@ def test_vrt_forward_interpolation_mode_keeps_all_frames(monkeypatch):
         ]
 
     def _fake_forward_features(_x, _fb, _ff, fusion_hook=None, spike_ctx=None):
-        return _x
+        return torch.zeros_like(_x)
 
     monkeypatch.setattr(model, "get_flows", _fake_get_flows)
     monkeypatch.setattr(model, "get_aligned_image_2frames", _fake_aligned)
@@ -650,27 +717,19 @@ def test_vrt_forward_interpolation_mode_keeps_all_frames(monkeypatch):
 
     x = torch.randn(1, 2, 11, 8, 8)
     out = model(x)
-
-    # Output should be [B, N*S, 3, H, W] (interpolation mode keeps all frames)
-    # N=2, S=8 → N*S=16
     assert out.shape == (1, 16, 3, 8, 8)
 ```
 
-- [ ] **Step 8: Run interpolation test to verify it passes**
-
-Run: `pytest tests/models/test_vrt_fusion_integration.py::test_vrt_forward_interpolation_mode_keeps_all_frames -v`
-Expected: PASS
-
-- [ ] **Step 9: Verify all VRT fusion tests still pass**
+- [ ] **Step 8: Run VRT reducer tests**
 
 Run: `pytest tests/models/test_vrt_fusion_integration.py -v`
-Expected: All tests PASS
+Expected: PASS, including new reducer tests
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add models/architectures/vrt/vrt.py tests/models/test_vrt_fusion_integration.py
-git commit -m "feat(vrt): add output_mode branching for restoration/interpolation frame selection"
+git add models/fusion/reducers.py models/architectures/vrt/vrt.py tests/models/test_vrt_fusion_integration.py
+git commit -m "feat(fusion): add configurable restoration reducers for early fusion"
 ```
 
 ---
@@ -834,7 +893,7 @@ def test_freeze_backbone_freezes_non_fusion_params():
                 "operator_params": {},
             },
         },
-        "training": {
+        "train": {
             "freeze_backbone": True,
         },
     }
@@ -898,7 +957,7 @@ In `models/model_plain.py`, in `init_train()` method, add after `self.load()` (l
         self.load()                           # load model
 
         # Stage A: freeze backbone, only train fusion adapter
-        if self.opt.get('training', {}).get('freeze_backbone', False):
+        if self.opt.get('train', {}).get('freeze_backbone', False):
             bare_model = self.get_bare_model(self.netG)
             freeze_backbone(bare_model)
             frozen_count = sum(1 for p in bare_model.parameters() if not p.requires_grad)
@@ -911,14 +970,14 @@ In `models/model_plain.py`, in `init_train()` method, add after `self.load()` (l
 
 - [ ] **Step 8: Use partial loading in ModelPlain.load when configured**
 
-In `models/model_plain.py`, modify the `load()` method to use partial loading when `training.partial_load` is true:
+In `models/model_plain.py`, modify the `load()` method to use partial loading when `train.partial_load` is true:
 
 ```python
     def load(self):
         load_path_G = self.opt['path']['pretrained_netG']
         if load_path_G is not None:
             print('Loading model for G [{:s}] ...'.format(load_path_G))
-            use_partial = self.opt.get('training', {}).get('partial_load', False)
+            use_partial = self.opt.get('train', {}).get('partial_load', False)
             if use_partial:
                 self.load_network_partial(load_path_G, self.netG, param_key='params')
             else:
@@ -950,79 +1009,80 @@ git commit -m "feat(training): add partial weight loading and freeze_backbone fo
 **Files:**
 - Modify: `options/gopro_rgbspike_local.json`
 
-Add `output_mode` and `training` block to the config.
+Add `output_mode`, `fusion`, and reducer config to `netG`, and add Stage A switches under the existing top-level `train` block.
 
-- [ ] **Step 1: Add output_mode to netG**
+- [ ] **Step 1: Add output_mode and reducer config to `netG`**
 
-In `options/gopro_rgbspike_local.json`, add `"output_mode": "restoration"` inside the `"netG"` block (after the existing `"net_type": "vrt"` line).
+In `options/gopro_rgbspike_local.json`, add `output_mode`, `restoration_reducer`, and `fusion` inside the `"netG"` block. The baseline restoration config should use reducer type `"index"` with an explicit `index` value from config, not an implicit code-side `S//2`.
 
-- [ ] **Step 2: Add training block**
+- [ ] **Step 2: Add Stage A switches to existing `train` block**
 
-In `options/gopro_rgbspike_local.json`, add a `"training"` block at the top level (sibling of `"netG"`, `"train"`, etc.):
+In `options/gopro_rgbspike_local.json`, add the new keys inside the existing top-level `"train"` block:
 
 ```json
-"training": {
-    "freeze_backbone": true,
-    "partial_load": true,
-    "use_lora": false,
-    "lora_rank": 8,
-    "lora_alpha": 16,
-    "lora_target_modules": ["qkv", "proj"]
-}
+"freeze_backbone": true,
+"partial_load": true,
+"use_lora": false,
+"lora_rank": 8,
+"lora_alpha": 16,
+"lora_target_modules": ["qkv", "proj"]
 ```
 
-- [ ] **Step 3: Update fusion block for early fusion out_chans=3**
+- [ ] **Step 3: Verify reducer defaults and Stage A flags are internally consistent**
 
-In the `"fusion"` section inside `"netG"`, ensure `"out_chans": 3` (the value required for early fusion temporal expansion design). If currently different, update it.
-
-Review the `"in_chans"` — it should remain `11` (3 RGB + 8 spike channels), since early fusion will internally produce 3-channel output before `conv_first`.
+Review the `"in_chans"` — it should remain `11` (3 RGB + 8 spike channels), since early fusion internally produces 3-channel fused frames before `conv_first`. For the initial baseline run:
+- `restoration_reducer.type` should be `"index"`
+- `restoration_reducer.index` should be set explicitly by config
+- `train.freeze_backbone` should be `true`
+- `train.partial_load` should be `true`
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add options/gopro_rgbspike_local.json
-git commit -m "config: add output_mode and training block for Stage A early fusion"
+git commit -m "config: add output_mode and train flags for Stage A early fusion"
 ```
 
 ---
 
-### Task 7: Fix Dual Input Spatial Validation
+### Task 7: Fix Dual Input Spatial Validation And Model Ingress
 
 **Files:**
-- Modify: `models/model_plain.py` (lines 99-104 in `_validate_dual_input_tensors`)
+- Modify: `models/model_plain.py`
 - Modify: `tests/models/test_partial_loading.py`
 
-The current `_validate_dual_input_tensors` asserts that `L_rgb` and `L_spike` share the same spatial dimensions (`H, W`). With the early fusion temporal expansion design, spike has a **different** spatial resolution than RGB (e.g., spike is 360×640 while RGB is 720×1280). The spatial alignment is handled by `SpikeUpsample` inside `EarlyFusionAdapter`, so this validation must be relaxed.
+The current dual-input ingress has two independent blockers for spatially mismatched RGB and spike tensors:
+1. `_validate_dual_input_tensors()` rejects mismatched `H/W`
+2. `_build_model_input_tensor()` still does a raw `torch.cat([L_rgb, L_spike], dim=2)`, which will crash even if validation is relaxed
+
+This task must fix both. The minimal ingress-compatible design is: when `input_mode='dual'` and spatial sizes differ, resize `L_spike` to RGB spatial size with bilinear interpolation before concatenation. `SpikeUpsample` still remains useful inside `EarlyFusionAdapter` for learned refinement when inputs are routed separately in tests or future refactors, but the current model ingress must become cat-safe.
 
 - [ ] **Step 1: Write failing test for dual input with spatial mismatch**
 
 Add to `tests/models/test_partial_loading.py`:
 
 ```python
-def test_validate_dual_input_allows_spatial_mismatch():
-    """Dual input validation should allow different spatial dims between RGB and spike."""
+def test_build_model_input_tensor_resizes_spike_before_concat():
+    """Dual input ingress should resize spike to RGB spatial size before concat."""
     from models.model_plain import ModelPlain
 
-    # Create a minimal ModelPlain instance with dual input mode
-    opt = {
-        "netG": {
-            "net_type": "vrt",
-            "in_chans": 7,
-            "input_mode": "dual",
-        },
-    }
-    # We only need to test the validation method, not full init
     mp = ModelPlain.__new__(ModelPlain)
-    mp.opt = opt
-
-    # RGB: [B, T, 3, 16, 16], Spike: [B, T, 4, 8, 8] — different spatial dims
+    mp.opt = {"netG": {"input_mode": "dual", "in_chans": 7}}
+    mp._mark_net_input_path = lambda marker: None
     l_rgb = torch.randn(1, 2, 3, 16, 16)
     l_spike = torch.randn(1, 2, 4, 8, 8)
+    out = mp._build_model_input_tensor({"L_rgb": l_rgb, "L_spike": l_spike})
+    assert out.shape == (1, 2, 7, 16, 16)
 
-    # Should NOT raise — spatial mismatch is handled by SpikeUpsample
+
+def test_validate_dual_input_allows_spatial_mismatch_but_still_checks_bt():
+    """Validation should allow H/W mismatch but still reject mismatched batch/time."""
+    from models.model_plain import ModelPlain
+    mp = ModelPlain.__new__(ModelPlain)
+    mp.opt = {"netG": {"input_mode": "dual", "in_chans": 7}}
+    l_rgb = torch.randn(1, 2, 3, 16, 16)
+    l_spike = torch.randn(1, 2, 4, 8, 8)
     mp._validate_dual_input_tensors(l_rgb, l_spike)
-
-    # Should still raise on batch/temporal mismatch
     l_spike_bad = torch.randn(1, 3, 4, 8, 8)  # T=3 vs T=2
     with pytest.raises(ValueError, match="matching"):
         mp._validate_dual_input_tensors(l_rgb, l_spike_bad)
@@ -1030,12 +1090,12 @@ def test_validate_dual_input_allows_spatial_mismatch():
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pytest tests/models/test_partial_loading.py::test_validate_dual_input_allows_spatial_mismatch -v`
-Expected: FAIL with `ValueError: input_mode=dual requires matching [B,T,H,W]`
+Run: `pytest tests/models/test_partial_loading.py::test_build_model_input_tensor_resizes_spike_before_concat tests/models/test_partial_loading.py::test_validate_dual_input_allows_spatial_mismatch_but_still_checks_bt -v`
+Expected: FAIL because validation rejects spatial mismatch and raw concat cannot handle different `H/W`
 
-- [ ] **Step 3: Relax spatial validation in _validate_dual_input_tensors**
+- [ ] **Step 3: Relax spatial validation and resize spike in `_build_model_input_tensor`**
 
-In `models/model_plain.py`, modify `_validate_dual_input_tensors` (lines 89-108). Change the spatial dimension check to only validate batch and temporal dimensions:
+In `models/model_plain.py`, modify `_validate_dual_input_tensors` to only validate batch and temporal dimensions:
 
 ```python
     def _validate_dual_input_tensors(self, l_rgb, l_spike):
@@ -1056,24 +1116,122 @@ In `models/model_plain.py`, modify `_validate_dual_input_tensors` (lines 89-108)
                 f"input_mode=dual requires matching [B,T] between L_rgb {tuple(l_rgb.shape)} "
                 f"and L_spike {tuple(l_spike.shape)}."
             )
-        # Note: spatial dims (H, W) may differ — SpikeUpsample handles alignment
+        # Note: spatial dims (H, W) may differ. In the current concat ingress,
+        # _build_model_input_tensor() resizes spike to RGB resolution before cat.
+```
+
+Also update `_build_model_input_tensor()` so dual-input concat is safe when spatial sizes differ:
+
+```python
+import torch.nn.functional as F
+
+    def _build_model_input_tensor(self, data):
+        mode = self._resolve_input_mode()
+        self._mark_net_input_path('concat_path' if mode == 'concat' else 'dual_path')
+        if mode == 'concat':
+            if 'L' not in data:
+                raise KeyError("input_mode=concat requires data['L'].")
+            return data['L']
+
+        has_rgb = 'L_rgb' in data
+        has_spike = 'L_spike' in data
+        has_dual = has_rgb and has_spike
+        if has_dual:
+            l_rgb = data['L_rgb']
+            l_spike = data['L_spike']
+            self._validate_dual_input_tensors(l_rgb, l_spike)
+            if l_rgb.shape[-2:] != l_spike.shape[-2:]:
+                b, t, c_spike, _, _ = l_spike.shape
+                target_h, target_w = l_rgb.shape[-2:]
+                l_spike = F.interpolate(
+                    l_spike.reshape(b * t, c_spike, l_spike.size(-2), l_spike.size(-1)),
+                    size=(target_h, target_w),
+                    mode='bilinear',
+                    align_corners=False,
+                ).reshape(b, t, c_spike, target_h, target_w)
+            return torch.cat([l_rgb, l_spike], dim=2)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/models/test_partial_loading.py::test_validate_dual_input_allows_spatial_mismatch -v`
+Run: `pytest tests/models/test_partial_loading.py::test_build_model_input_tensor_resizes_spike_before_concat tests/models/test_partial_loading.py::test_validate_dual_input_allows_spatial_mismatch_but_still_checks_bt -v`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add models/model_plain.py tests/models/test_partial_loading.py
-git commit -m "fix(model_plain): relax dual input spatial validation for SpikeUpsample compatibility"
+git commit -m "fix(model_plain): resize spike before dual-input concat and relax spatial validation"
 ```
 
 ---
 
-### Task 8: End-to-End Integration Tests
+### Task 8: Update Old Semantic Tests
+
+**Files:**
+- Modify: `tests/models/test_vrt_dual_input_priority.py`
+- Modify: `tests/models/test_vrt_fusion_integration.py`
+
+The redesign intentionally removes the old constraint that early/hybrid fusion `out_chans` must equal `in_chans`. Update or delete tests that still enforce that legacy contract, and replace them with tests that validate the new contract: `in_chans = 3 + spike_bins`, `fusion.out_chans = 3`, and successful construction in restoration mode.
+
+- [ ] **Step 1: Replace mismatch-raises tests in `test_vrt_dual_input_priority.py`**
+
+Remove tests that expect early/hybrid construction to fail when `out_chans != in_chans`, and replace them with:
+
+```python
+def test_vrt_dual_early_out_chans_3_is_allowed():
+    opt = {
+        "netG": {
+            "input_mode": "dual",
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "concat",
+                "out_chans": 3,
+                "operator_params": {},
+            },
+        }
+    }
+    model = _build_vrt(opt=opt, in_chans=11)
+    assert model is not None
+
+
+def test_vrt_dual_hybrid_out_chans_3_is_allowed():
+    opt = {
+        "netG": {
+            "input_mode": "dual",
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "hybrid",
+                "operator": "concat",
+                "out_chans": 3,
+                "middle": {"out_chans": 16},
+                "inject_stages": [1],
+                "operator_params": {},
+            },
+        }
+    }
+    model = _build_vrt(opt=opt, in_chans=11)
+    assert model is not None
+```
+
+- [ ] **Step 2: Run the updated semantic tests**
+
+Run: `pytest tests/models/test_vrt_dual_input_priority.py -v`
+Expected: PASS, with no remaining assertions that require early/hybrid `out_chans == in_chans`
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add tests/models/test_vrt_dual_input_priority.py tests/models/test_vrt_fusion_integration.py
+git commit -m "test(vrt): update legacy early fusion semantics to 3-channel restoration contract"
+```
+
+---
+
+### Task 9: End-to-End Integration Tests
 
 **Files:**
 - Modify: `tests/models/test_vrt_fusion_integration.py`
@@ -1111,32 +1269,24 @@ def test_early_adapter_output_is_3_channels():
 Run: `pytest tests/models/test_fusion_early_adapter.py::test_early_adapter_gated_spatial_mismatch tests/models/test_fusion_early_adapter.py::test_early_adapter_output_is_3_channels -v`
 Expected: PASS
 
-- [ ] **Step 3: Write test for frame selection index correctness**
+- [ ] **Step 3: Write test for `index` reducer correctness**
 
 Add to `tests/models/test_vrt_fusion_integration.py`:
 
 ```python
-def test_frame_selection_index_correctness():
-    """S//2::S should select the center frame from each group of S frames."""
-    S = 4
-    N = 3
-    NS = N * S  # 12
-
-    # Create a tensor where each frame has a unique value
-    x = torch.arange(NS).float().reshape(1, NS, 1, 1, 1).expand(1, NS, 3, 8, 8)
-
-    # Select frames: S//2::S = 2::4 → indices [2, 6, 10]
-    selected = x[:, S // 2 :: S, :, :, :]
-    assert selected.shape == (1, N, 3, 8, 8)
-    # Verify selected indices
-    assert selected[0, 0, 0, 0, 0].item() == 2.0   # center of group [0,1,2,3]
-    assert selected[0, 1, 0, 0, 0].item() == 6.0   # center of group [4,5,6,7]
-    assert selected[0, 2, 0, 0, 0].item() == 10.0  # center of group [8,9,10,11]
+def test_index_reducer_uses_configured_position():
+    reducer = build_restoration_reducer({"type": "index", "index": 2})
+    x = torch.arange(12.0).reshape(1, 12, 1, 1, 1).expand(1, 12, 3, 8, 8)  # N=3, S=4
+    selected = reducer(x=x, spike_bins=4, base_rgb=None)
+    assert selected.shape == (1, 3, 3, 8, 8)
+    assert selected[0, 0, 0, 0, 0].item() == 2.0
+    assert selected[0, 1, 0, 0, 0].item() == 6.0
+    assert selected[0, 2, 0, 0, 0].item() == 10.0
 ```
 
 - [ ] **Step 4: Run and verify it passes**
 
-Run: `pytest tests/models/test_vrt_fusion_integration.py::test_frame_selection_index_correctness -v`
+Run: `pytest tests/models/test_vrt_fusion_integration.py::test_index_reducer_uses_configured_position -v`
 Expected: PASS
 
 - [ ] **Step 5: Write test for SpikeUpsample gradient flow**
@@ -1182,18 +1332,18 @@ git commit -m "test: add integration tests for early fusion temporal expansion"
 |----------|--------|-----------|
 | `SpikeUpsample` location | Inside `early.py` as submodule of `EarlyFusionAdapter` | Collocated with the only consumer; ~288 params (S=4) |
 | `effective_in_chans` | Computed from `early_out_chans` when early fusion enabled | `conv_first` sees fusion output (3ch), not raw input (11ch) |
-| Frame selection | `x[:, S//2::S]` — pure indexing | No blur/averaging; center bin corresponds to RGB timestamp |
+| Restoration reducer | Configurable `index`, `selector`, or `residual_selector` | Avoid hard-coding unverified `S//2`; allow zero-param baseline and learnable alternatives without changing pretrained VRT shapes |
 | Partial loading | Key+shape matching (not positional zip) | Old `strict=False` was positionally pairing keys — broken for differently-structured models |
 | `freeze_backbone` | Module-level function filtering by name substring | Simple, no special module registry needed; optimizer already filters by `requires_grad` |
 | `output_mode` | Config-driven, default `'restoration'` | `interpolation` path available for future use; restoration is the current training target |
-| Dual input spatial validation | Relaxed to only check `[B, T]` | Spike spatial resolution differs from RGB; `SpikeUpsample` handles alignment inside `EarlyFusionAdapter` |
+| Dual input spatial validation | Relaxed to only check `[B, T]` | In the current concat ingress, `_build_model_input_tensor()` resizes spike to RGB resolution before concat; `SpikeUpsample` remains as adapter-level alignment/refinement support for direct adapter tests and future non-concat routing |
 
 ## Notes on Existing Tests
 
 The existing tests in `test_fusion_early_adapter.py` and `test_vrt_fusion_integration.py` use `out_chans=4` with `in_chans=4` (equal). These tests continue to work because:
 - When `out_chans == in_chans`, the `effective_in_chans` computation produces the same result as before
 - `spike_chans=0` (default) means no `SpikeUpsample` is created, so the spatial-same path is unchanged
-- `S=1` default means no frame selection occurs, and `return x + x_lq_rgb` works as before
+- `S=1` default means no temporal reduction is needed, and the restoration reducer is bypassed
 
 ## Deferred Items
 
@@ -1205,8 +1355,8 @@ The existing tests in `test_fusion_early_adapter.py` and `test_vrt_fusion_integr
 ### Stage C (LoRA) — Deferred
 
 Stage C uses the same code paths with config switches:
-- `training.freeze_backbone: false` — all params unfrozen
-- `training.use_lora: true` — LoRA adapters injected into VRT attention QKV/proj
+- `train.freeze_backbone: false` — all params unfrozen
+- `train.use_lora: true` — LoRA adapters injected into VRT attention QKV/proj
 
 Implementation of LoRA injection is deferred to after Stage A validation succeeds. The config fields are defined now for forward compatibility.
 
