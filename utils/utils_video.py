@@ -264,6 +264,8 @@ def paired_random_crop(img_gts, img_lqs, gt_patch_size, scale, gt_path=None):
     Returns:
         list[ndarray] | ndarray: GT images and LQ images. If returned results
             only have one element, just return ndarray.
+        dict: Crop parameters with keys 'top', 'left', 'lq_patch_size'
+            in LQ coordinate space.
     """
 
     if not isinstance(img_gts, list):
@@ -310,7 +312,8 @@ def paired_random_crop(img_gts, img_lqs, gt_patch_size, scale, gt_path=None):
         img_gts = img_gts[0]
     if len(img_lqs) == 1:
         img_lqs = img_lqs[0]
-    return img_gts, img_lqs
+    crop_params = {'top': top, 'left': left, 'lq_patch_size': lq_patch_size}
+    return img_gts, img_lqs, crop_params
 
 
 # Modified from https://github.com/open-mmlab/mmcv/blob/master/mmcv/fileio/file_client.py  # noqa: E501
