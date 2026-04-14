@@ -231,7 +231,7 @@ def test_vrt_builds_with_early_fusion_out_chans_3():
 
 def test_index_reducer_selects_configured_index():
     reducer = build_restoration_reducer({"type": "index", "index": 1})
-    x = torch.arange(18.0).reshape(1, 6, 1, 1, 1).expand(1, 6, 3, 2, 2)
+    x = torch.arange(6.0).reshape(1, 6, 1, 1, 1).expand(1, 6, 3, 2, 2)
     out = reducer(x=x, spike_bins=3, base_rgb=None)
     assert out.shape == (1, 2, 3, 2, 2)
     assert out[0, 0, 0, 0, 0].item() == 1.0
