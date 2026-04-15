@@ -101,8 +101,8 @@ def test_vrt_forward_triggers_early_fusion(monkeypatch):
     def _fake_aligned(_x, _fb, _ff):
         bsz, steps, chans, height, width = _x.shape
         return [
-            torch.zeros(bsz, steps, model.in_chans * 4, height, width),
-            torch.zeros(bsz, steps, model.in_chans * 4, height, width),
+            torch.zeros(bsz, steps, model.backbone_in_chans * 4, height, width),
+            torch.zeros(bsz, steps, model.backbone_in_chans * 4, height, width),
         ]
 
     def _fake_forward_features(_x, _fb, _ff, fusion_hook=None, spike_ctx=None):
@@ -117,6 +117,45 @@ def test_vrt_forward_triggers_early_fusion(monkeypatch):
 
     assert called["adapter"] is True
     assert out.shape == (1, 2, 3, 8, 8)
+
+
+def test_vrt_get_aligned_image_uses_backbone_in_chans_for_early_fusion():
+    opt = {
+        "netG": {
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "gated",
+                "out_chans": 3,
+                "operator_params": {},
+            }
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=11,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    x = torch.randn(1, 2, 3, 8, 8)
+    flows = torch.zeros(1, 1, 2, 8, 8)
+    x_backward, x_forward = model.get_aligned_image_2frames(x, flows, flows)
+
+    assert model.backbone_in_chans == 3
+    assert x_backward.shape == (1, 2, 12, 8, 8)
+    assert x_forward.shape == (1, 2, 12, 8, 8)
 
 
 def test_vrt_builds_with_middle_fusion_adapter():

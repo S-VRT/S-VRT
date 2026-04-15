@@ -51,7 +51,8 @@
   ,
   "scale": 1
   // 输出图像通道数：3 表示输出 RGB 三通道图像（GT 图像的通道数）
-  // 注意：实际输入通道数由 netG.in_chans 控制（这里是 4：RGB+Spike），输出通道数由 netG.out_chans 控制
+  // 注意：raw ingress 宽度由 netG.in_chans 控制（dual/legacy concat 下通常是 RGB + spike bins），
+  // early/hybrid fusion 后进入 VRT 主干的实际通道宽度可能会缩减为 fusion.out_chans
   // 代码会自动处理输入输出通道数不匹配的情况（残差连接时只使用前 out_chans 个通道）
   ,
   "n_channels": 3
@@ -114,7 +115,7 @@
           0
         ]
       }
-      // Spike 数据通道数：4 表示 TFP 体素 (4通道)
+      // Spike 数据通道数：历史字段，语义上等价于 TFP 重建 bins；新配置优先看 spike.reconstruction.num_bins
       ,
       "spike_channels": 8
       // Spike 重建配置：使用字典级配置项
@@ -312,8 +313,8 @@
       "out_chans": 3,
       "operator_params": {}
     }
-    // 输入通道数：7 表示 RGB (3) + Spike TFP (4) 通道拼接
-    // 注意：当 pa_frames>0 时，经过对齐后实际输入 conv_first 的通道数为 in_chans * 9 = 63
+    // 原始 ingress 通道数：这里是 RGB (3) + spike bins (8) = 11
+    // 注意：early fusion 后 VRT 主干实际输入宽度取决于 fusion.out_chans，而不是 netG.in_chans
     // 2 (frames) * 4 (expansion) + 1 (current) = 9 倍
     ,
     "in_chans": 11

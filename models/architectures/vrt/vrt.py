@@ -310,14 +310,17 @@ class VRT(nn.Module):
             effective_in_chans = early_out_chans
         else:
             effective_in_chans = in_chans
+        # `in_chans` tracks the raw model ingress contract (e.g. RGB + spike bins),
+        # while the VRT backbone may see a reduced channel width after early/hybrid fusion.
+        self.backbone_in_chans = effective_in_chans
 
         if self.pa_frames:
             if self.nonblind_denoising:
-                conv_first_in_chans = effective_in_chans * 9 + 1
+                conv_first_in_chans = self.backbone_in_chans * 9 + 1
             else:
-                conv_first_in_chans = effective_in_chans * 9
+                conv_first_in_chans = self.backbone_in_chans * 9
         else:
-            conv_first_in_chans = effective_in_chans
+            conv_first_in_chans = self.backbone_in_chans
         self.conv_first = nn.Conv3d(conv_first_in_chans, embed_dims[0], kernel_size=(1, 3, 3), padding=(0, 1, 1))
         self.output_mode = ((opt or {}).get('netG', {}) or {}).get('output_mode', 'restoration')
         if self.output_mode not in {'restoration', 'interpolation'}:
@@ -768,9 +771,14 @@ class VRT(nn.Module):
 
         x_backward = torch.stack(x_backward, 1)
         x_forward = torch.stack(x_forward, 1)
-        expected_channels = self.in_chans * 4
+        expected_channels = self.backbone_in_chans * 4
         if x_backward.size(2) != expected_channels or x_forward.size(2) != expected_channels:
-            raise ValueError("SGP alignment produced mismatched channels.")
+            raise ValueError(
+                "SGP alignment produced mismatched channels: "
+                f"expected 4 * backbone_in_chans = {expected_channels} "
+                f"(backbone_in_chans={self.backbone_in_chans}, raw in_chans={self.in_chans}), "
+                f"got backward={x_backward.size(2)}, forward={x_forward.size(2)}."
+            )
 
         return [x_backward, x_forward]
 

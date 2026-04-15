@@ -62,7 +62,8 @@ class TrainDatasetRGBSpike(data.Dataset):
             
             spike_h (int): Spike camera height. Default: 250.
             spike_w (int): Spike camera width. Default: 400.
-            spike_channels (int): Number of spike channels after voxelization. Default: 1.
+            spike_channels (int): Legacy alias for spike reconstruction bins. Prefer
+                spike.reconstruction.num_bins when configuring new experiments.
             input_pack_mode (str): Input packing mode. One of ['concat', 'dual'].
                 Default: 'concat'.
             keep_legacy_l (bool): In dual mode, whether to keep legacy `L`.
@@ -182,7 +183,8 @@ class TrainDatasetRGBSpike(data.Dataset):
         self.input_pack_mode = normalized_input_pack_mode
         self.keep_legacy_l = bool(opt.get('keep_legacy_l', True))
         self._dual_mode = self.input_pack_mode == 'dual'
-        # Both concat and dual modes rely on the combined tensor holding 3 + spike_channels.
+        # Legacy combined ingress width is 3 + spike bins; dual mode may still emit the
+        # concatenated `L` tensor for compatibility when keep_legacy_l=True.
         self.expected_lq_channels = 3 + self.spike_channels
         keys = []
         total_num_frames = [] # some clips may not have 100 frames

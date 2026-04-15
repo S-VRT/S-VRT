@@ -36,8 +36,8 @@ def _patch_lightweight_forward(model, monkeypatch):
     def _fake_aligned(_x, _fb, _ff):
         bsz, steps, _chans, height, width = _x.shape
         return [
-            torch.zeros(bsz, steps, model.in_chans * 4, height, width),
-            torch.zeros(bsz, steps, model.in_chans * 4, height, width),
+            torch.zeros(bsz, steps, model.backbone_in_chans * 4, height, width),
+            torch.zeros(bsz, steps, model.backbone_in_chans * 4, height, width),
         ]
 
     def _fake_forward_features(_x, _fb, _ff, fusion_hook=None, spike_ctx=None):
@@ -130,6 +130,41 @@ def test_vrt_dual_hybrid_out_chans_3_is_allowed():
     }
     model = _build_vrt(opt=opt, in_chans=11)
     assert model is not None
+
+
+def test_vrt_uses_canonical_input_strategy_and_mode():
+    opt = {
+        "netG": {
+            "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 11},
+            "output_mode": "restoration",
+            "fusion": {
+                "placement": "early",
+                "operator": "concat",
+                "out_chans": 3,
+                "operator_params": {},
+            },
+        }
+    }
+    model = _build_vrt(opt=opt, in_chans=11)
+    assert model.input_strategy == "fusion"
+    assert model.input_mode == "dual"
+    assert model.in_chans == 11
+
+
+def test_vrt_rejects_fusion_strategy_with_concat_mode():
+    opt = {
+        "netG": {
+            "input": {"strategy": "fusion", "mode": "concat", "raw_ingress_chans": 11},
+            "fusion": {
+                "placement": "early",
+                "operator": "concat",
+                "out_chans": 3,
+                "operator_params": {},
+            },
+        }
+    }
+    with pytest.raises(ValueError, match="strategy=fusion"):
+        _build_vrt(opt=opt, in_chans=11)
 
 
 @pytest.mark.parametrize(

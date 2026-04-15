@@ -169,6 +169,18 @@ def test_nested_spike_reconstruction_num_bins_drives_default_channels(tmp_path):
     assert dataset.spike_channels == 3
 
 
+def test_compat_keep_legacy_l_overrides_top_level_flag(tmp_path):
+    opt = _build_opt(
+        tmp_path,
+        input_pack_mode="dual",
+        keep_legacy_l=True,
+        spike={"reconstruction": {"type": "spikecv_tfp", "num_bins": 2}},
+    )
+    opt["compat"] = {"keep_legacy_L": False}
+    dataset = TrainDatasetRGBSpike(opt)
+    assert dataset.keep_legacy_l is False
+
+
 def test_conflicting_nested_and_legacy_reconstruction_raises(tmp_path):
     opt = _build_opt(
         tmp_path,

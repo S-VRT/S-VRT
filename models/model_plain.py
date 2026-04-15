@@ -39,7 +39,7 @@ class ModelPlain(ModelBase):
         self.L_flow_spike = None
 
     def _assert_lq_channels(self, tensor, tensor_name):
-        """Validate that the incoming temporal tensor matches configured in_chans."""
+        """Validate the raw model-ingress tensor against configured netG.in_chans."""
         expected_in_chans = self.opt['netG'].get('in_chans', 3)
         actual_in_chans = tensor.size(2)
         if actual_in_chans != expected_in_chans:
@@ -48,8 +48,8 @@ class ModelPlain(ModelBase):
                 f"Tensor shape: {tensor.shape} (Channels: {actual_in_chans})\n"
                 f"Expected netG.in_chans: {expected_in_chans}\n"
                 f"Mode: {'Train' if self.netG.training else 'Test/Val'}\n"
-                f"Hint: Ensure your dataset returns all expected channels "
-                f"(e.g., RGB 3 + Spike 4 = 7) before feeding them to netG."
+                f"Hint: netG.in_chans validates the raw ingress contract before VRT fusion "
+                f"(e.g., RGB 3 + spike bins 8 = 11 for dual/concat ingress)."
             )
 
 

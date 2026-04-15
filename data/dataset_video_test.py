@@ -138,7 +138,7 @@ class TestDataset(data.Dataset):
 
 
 class TrainDatasetRGBSpike(data.Dataset):
-    """Video test dataset that concatenates RGB frames with Spike data channels."""
+    """Video test dataset for RGB + spike-bin inputs with optional legacy concat ingress."""
 
     def __init__(self, opt):
         super(TrainDatasetRGBSpike, self).__init__()

@@ -42,6 +42,39 @@ def test_build_model_input_concat_uses_legacy_l():
     assert out is l
 
 
+def test_build_model_input_uses_canonical_input_mode_dual():
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt = {"netG": {"input": {"mode": "dual"}, "in_chans": 7}}
+    model.device = "cpu"
+    model.timer = _DummyTimer()
+    out = model._build_model_input_tensor(
+        {"L_rgb": torch.randn(1, 2, 3, 8, 8), "L_spike": torch.randn(1, 2, 4, 8, 8)}
+    )
+    assert out.shape == (1, 2, 7, 8, 8)
+
+
+def test_concat_strategy_accepts_concat_mode():
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt = {
+        "netG": {"input": {"strategy": "concat", "mode": "concat", "raw_ingress_chans": 7}}
+    }
+    model.device = "cpu"
+    model.timer = _DummyTimer()
+    out = model._build_model_input_tensor({"L": torch.randn(1, 2, 7, 8, 8)})
+    assert out.shape == (1, 2, 7, 8, 8)
+
+
+def test_fusion_strategy_rejects_concat_mode():
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt = {
+        "netG": {"input": {"strategy": "fusion", "mode": "concat", "raw_ingress_chans": 11}}
+    }
+    model.device = "cpu"
+    model.timer = _DummyTimer()
+    with pytest.raises(ValueError, match="strategy=fusion"):
+        model._resolve_input_mode()
+
+
 def test_build_model_input_concat_missing_l_raises():
     model = _build_stub_model("concat", in_chans=7)
     with pytest.raises(KeyError, match="input_mode=concat"):
