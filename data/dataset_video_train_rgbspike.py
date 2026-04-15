@@ -62,11 +62,11 @@ class TrainDatasetRGBSpike(data.Dataset):
             
             spike_h (int): Spike camera height. Default: 250.
             spike_w (int): Spike camera width. Default: 400.
-            spike_channels (int): Legacy alias for spike reconstruction bins. Prefer
-                spike.reconstruction.num_bins when configuring new experiments.
+            spike_channels (int): Legacy alias for spike reconstruction bins.
+                Prefer spike.reconstruction.num_bins when configuring new experiments.
             input_pack_mode (str): Input packing mode. One of ['concat', 'dual'].
                 Default: 'concat'.
-            keep_legacy_l (bool): In dual mode, whether to keep legacy `L`.
+            keep_legacy_l (bool): Legacy alias for compat.keep_legacy_L.
                 Default: True.
             spike_flipud (bool): Whether to flip spike data vertically. Default: True.
             tfp_half_win_length (int): Half window length fed into TFP. Default: 20.
@@ -90,6 +90,7 @@ class TrainDatasetRGBSpike(data.Dataset):
         self.spike_h = opt.get('spike_h', 360)
         self.spike_w = opt.get('spike_w', 640)
         spike_cfg = opt.get('spike', {}) if isinstance(opt.get('spike', {}), dict) else {}
+        compat_cfg = opt.get('compat', {}) if isinstance(opt.get('compat', {}), dict) else {}
         spike_reconstruction_nested = spike_cfg.get('reconstruction', {})
         if not isinstance(spike_reconstruction_nested, dict):
             spike_reconstruction_nested = {}
@@ -181,9 +182,9 @@ class TrainDatasetRGBSpike(data.Dataset):
                 f"[TrainDatasetRGBSpike] input_pack_mode must be one of {supported_pack_modes}, got '{raw_input_pack_mode}'."
             )
         self.input_pack_mode = normalized_input_pack_mode
-        self.keep_legacy_l = bool(opt.get('keep_legacy_l', True))
+        self.keep_legacy_l = bool(compat_cfg.get('keep_legacy_L', opt.get('keep_legacy_l', True)))
         self._dual_mode = self.input_pack_mode == 'dual'
-        # Legacy combined ingress width is 3 + spike bins; dual mode may still emit the
+        # Raw ingress width remains RGB 3 + spike bins; dual mode may still emit the
         # concatenated `L` tensor for compatibility when keep_legacy_l=True.
         self.expected_lq_channels = 3 + self.spike_channels
         keys = []
