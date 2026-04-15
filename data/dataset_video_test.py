@@ -138,7 +138,7 @@ class TestDataset(data.Dataset):
 
 
 class TrainDatasetRGBSpike(data.Dataset):
-    """Video test dataset that concatenates RGB frames with Spike data channels."""
+    """Video test dataset for RGB + spike-bin inputs with concat as a first-class strategy."""
 
     def __init__(self, opt):
         super(TrainDatasetRGBSpike, self).__init__()
@@ -152,12 +152,22 @@ class TrainDatasetRGBSpike(data.Dataset):
         self._parse_spike_flow_config(opt, optical_flow_module=self._flow_module_name_from_opt(opt))
         self.spike_h = opt.get('spike_h', 250)
         self.spike_w = opt.get('spike_w', 400)
-        self.spike_channels = opt.get('spike_channels', 4)  # Default updated to 4 for TFP
+        spike_cfg = opt.get('spike', {}) if isinstance(opt.get('spike', {}), dict) else {}
+        recon_cfg = spike_cfg.get('reconstruction', {})
+        if not isinstance(recon_cfg, dict):
+            recon_cfg = {}
+        nested_num_bins = recon_cfg.get('num_bins', None)
+        self.spike_channels = int(opt.get('spike_channels', nested_num_bins if nested_num_bins is not None else 4))
+        if nested_num_bins is not None and 'spike_channels' in opt and int(opt['spike_channels']) != int(nested_num_bins):
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] Conflicting channel settings: spike_channels={int(opt['spike_channels'])} "
+                f"vs spike.reconstruction.num_bins={int(nested_num_bins)}."
+            )
         self.spike_flipud = opt.get('spike_flipud', True)
         self.spike_folder = opt.get('spike_folder_name', 'spike')
         self.spike_ext = opt.get('spike_filename_ext', 'dat')
         self.tfp_half_win_length = opt.get('tfp_half_win_length', 20)
-        spike_reconstruction_cfg = opt.get('spike_reconstruction', 'spikecv_tfp')
+        spike_reconstruction_cfg = recon_cfg or opt.get('spike_reconstruction', 'spikecv_tfp')
         if isinstance(spike_reconstruction_cfg, dict):
             self.spike_reconstruction = str(spike_reconstruction_cfg.get('type', 'spikecv_tfp')).strip().lower()
             self.middle_tfp_center = int(spike_reconstruction_cfg.get('middle_tfp_center', 44))

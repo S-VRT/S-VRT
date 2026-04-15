@@ -51,8 +51,8 @@
   ,
   "scale": 1
   // 输出图像通道数：3 表示输出 RGB 三通道图像（GT 图像的通道数）
-  // 注意：实际输入通道数由 netG.in_chans 控制（这里是 4：RGB+Spike），输出通道数由 netG.out_chans 控制
-  // 代码会自动处理输入输出通道数不匹配的情况（残差连接时只使用前 out_chans 个通道）
+  // 注意：netG.input.raw_ingress_chans / netG.in_chans 表示原始入口宽度
+  // 在 fusion 策略下，实际 backbone 通道数会先由 fusion.out_chans 收缩，再进入后续主干
   ,
   "n_channels": 3
   // ========================================
@@ -114,9 +114,24 @@
           0
         ]
       }
-      // Spike 数据通道数：4 表示 TFP 体素 (4通道)
+      // Spike 重建 bin 数：legacy 字段名仍叫 spike_channels，但语义上仅表示 Spike 表征宽度
       ,
       "spike_channels": 8
+      ,
+      "input_pack_mode": "dual"
+      ,
+      "compat": {
+        "keep_legacy_L": true
+      }
+      ,
+      "keep_legacy_l": true
+      ,
+      "spike": {
+        "reconstruction": {
+          "type": "spikecv_tfp",
+          "num_bins": 8
+        }
+      }
       // Spike 重建配置：使用字典级配置项
       ,
       "spike_reconstruction": {
@@ -224,9 +239,24 @@
       // Spike 数据宽度：Spike 图像的宽度（像素）
       ,
       "spike_w": 640
-      // Spike 数据通道数：4 表示 TFP 体素 (4通道)
+      // Spike 重建 bin 数：legacy 字段名仍叫 spike_channels，但语义上仅表示 Spike 表征宽度
       ,
       "spike_channels": 8
+      ,
+      "input_pack_mode": "dual"
+      ,
+      "compat": {
+        "keep_legacy_L": true
+      }
+      ,
+      "keep_legacy_l": true
+      ,
+      "spike": {
+        "reconstruction": {
+          "type": "spikecv_tfp",
+          "num_bins": 8
+        }
+      }
       // Spike 重建配置：使用字典级配置项
       ,
       "spike_reconstruction": {
@@ -297,9 +327,19 @@
   "netG": {
     // 网络类型：指定为 "vrt" (Video Restoration Transformer)
     "net_type": "vrt"
-    // 输入通道数：7 表示 RGB (3) + Spike TFP (4) 通道拼接
-    // 注意：当 pa_frames>0 时，经过对齐后实际输入 conv_first 的通道数为 in_chans * 9 = 63
-    // 2 (frames) * 4 (expansion) + 1 (current) = 9 倍
+    ,
+    "input": {
+      "strategy": "fusion",
+      "mode": "dual",
+      "raw_ingress_chans": 11
+    }
+    ,
+    // concat 与 fusion 是并列输入策略；当前配置选择 fusion，因此 concat 留空
+    "concat": {}
+    ,
+    "input_mode": "dual"
+    // 原始入口宽度：RGB 3 + Spike 重建 bins 8 = 11
+    // 在 fusion 策略下，对齐前使用的是 raw ingress 宽度；进入 backbone 后会由 fusion.out_chans 决定主干宽度
     ,
     "in_chans": 11
     // 上采样倍数：1 表示不进行上采样（保持原始分辨率）

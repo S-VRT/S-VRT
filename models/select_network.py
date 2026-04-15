@@ -17,6 +17,8 @@ from torch.nn import init
 def define_G(opt):
     opt_net = opt['netG']
     net_type = opt_net['net_type']
+    input_cfg = opt_net.get('input', {}) if isinstance(opt_net.get('input', {}), dict) else {}
+    raw_ingress_chans = int(input_cfg.get('raw_ingress_chans', opt_net.get('in_chans', 3)))
 
     # ----------------------------------------
     # VRT
@@ -24,7 +26,7 @@ def define_G(opt):
     if net_type == 'vrt':
         from models.architectures.vrt import VRT as net
         netG = net(upscale=opt_net['upscale'],
-                   in_chans=opt_net.get('in_chans', 3),
+                   in_chans=raw_ingress_chans,
                    img_size=opt_net['img_size'],
                    window_size=opt_net['window_size'],
                    depths=opt_net['depths'],

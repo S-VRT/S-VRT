@@ -39,17 +39,17 @@ class ModelPlain(ModelBase):
         self.L_flow_spike = None
 
     def _assert_lq_channels(self, tensor, tensor_name):
-        """Validate that the incoming temporal tensor matches configured in_chans."""
-        expected_in_chans = self.opt['netG'].get('in_chans', 3)
+        """Validate the raw model-ingress tensor against configured input width."""
+        _, _, expected_in_chans = self._resolve_input_config()
         actual_in_chans = tensor.size(2)
         if actual_in_chans != expected_in_chans:
             raise ValueError(
                 f"{tensor_name} Channel Mismatch!\n"
                 f"Tensor shape: {tensor.shape} (Channels: {actual_in_chans})\n"
-                f"Expected netG.in_chans: {expected_in_chans}\n"
+                f"Expected raw ingress chans: {expected_in_chans}\n"
                 f"Mode: {'Train' if self.netG.training else 'Test/Val'}\n"
-                f"Hint: Ensure your dataset returns all expected channels "
-                f"(e.g., RGB 3 + Spike 4 = 7) before feeding them to netG."
+                f"Hint: raw ingress width validates the tensor before concat/fusion handling "
+                f"(e.g., RGB 3 + spike bins 8 = 11)."
             )
 
 
@@ -59,13 +59,35 @@ class ModelPlain(ModelBase):
             return 'scflow'
         return module
 
-    def _resolve_input_mode(self):
-        raw_mode = self.opt.get('netG', {}).get('input_mode', 'concat')
+    def _resolve_input_config(self):
+        net_cfg = self.opt.get('netG', {})
+        input_cfg = net_cfg.get('input', {}) if isinstance(net_cfg.get('input', {}), dict) else {}
+        fusion_cfg = net_cfg.get('fusion', {}) if isinstance(net_cfg.get('fusion', {}), dict) else {}
+        raw_strategy = input_cfg.get(
+            'strategy',
+            'fusion' if fusion_cfg.get('enable', False) else 'concat',
+        )
+        strategy = str(raw_strategy).strip().lower()
+        if strategy not in {'concat', 'fusion'}:
+            raise ValueError(
+                f"Unsupported netG.input.strategy={raw_strategy!r}; expected 'concat' or 'fusion'."
+            )
+
+        raw_mode = input_cfg.get('mode', net_cfg.get('input_mode', 'concat'))
         mode = str(raw_mode).strip().lower()
         if mode not in {'concat', 'dual'}:
             raise ValueError(
-                f"Unsupported netG.input_mode={raw_mode!r}; expected 'concat' or 'dual'."
+                f"Unsupported netG.input.mode={raw_mode!r}; expected 'concat' or 'dual'."
             )
+
+        if strategy == 'fusion' and mode != 'dual':
+            raise ValueError("input.strategy=fusion requires input.mode='dual'.")
+
+        raw_ingress_chans = int(input_cfg.get('raw_ingress_chans', net_cfg.get('in_chans', 3)))
+        return strategy, mode, raw_ingress_chans
+
+    def _resolve_input_mode(self):
+        _, mode, _ = self._resolve_input_config()
         return mode
 
     def _build_model_input_tensor(self, data):

@@ -127,7 +127,29 @@ class VRT(nn.Module):
                  dcn_config=None,  # DCN configuration dict: {'type': 'DCNv2'/'DCNv4', 'apply_softmax': bool}
                  opt=None):  # Global configuration for initialization
         super().__init__()
-        self.in_chans = in_chans
+        net_cfg = ((opt or {}).get('netG', {}) or {})
+        input_cfg = net_cfg.get('input', {}) if isinstance(net_cfg.get('input', {}), dict) else {}
+        fusion_cfg_from_opt = net_cfg.get('fusion', {}) if isinstance(net_cfg.get('fusion', {}), dict) else {}
+        raw_strategy = input_cfg.get(
+            'strategy',
+            'fusion' if fusion_cfg_from_opt.get('enable', False) else 'concat',
+        )
+        self.input_strategy = str(raw_strategy).strip().lower()
+        if self.input_strategy not in {'concat', 'fusion'}:
+            raise ValueError(
+                f"[VRT] Unsupported netG.input.strategy={raw_strategy!r}; expected 'concat' or 'fusion'."
+            )
+        raw_input_mode = input_cfg.get('mode', net_cfg.get('input_mode', 'concat'))
+        self.input_mode = str(raw_input_mode).strip().lower()
+        if self.input_mode not in {'concat', 'dual'}:
+            raise ValueError(
+                f"[VRT] Unsupported netG.input.mode={raw_input_mode!r}; expected 'concat' or 'dual'."
+            )
+        if self.input_strategy == 'fusion' and self.input_mode != 'dual':
+            raise ValueError("[VRT] input.strategy=fusion requires input.mode='dual'.")
+
+        resolved_in_chans = int(input_cfg.get('raw_ingress_chans', in_chans))
+        self.in_chans = resolved_in_chans
         self.out_chans = out_chans
         self.upscale = upscale
         self.pa_frames = pa_frames
@@ -135,12 +157,6 @@ class VRT(nn.Module):
         self.nonblind_denoising = nonblind_denoising
         self.use_sgp = use_sgp
         self.use_flash_attn = use_flash_attn
-        raw_input_mode = ((opt or {}).get('netG', {}) or {}).get('input_mode', 'concat')
-        self.input_mode = str(raw_input_mode).strip().lower()
-        if self.input_mode not in {'concat', 'dual'}:
-            raise ValueError(
-                f"[VRT] Unsupported netG.input_mode={raw_input_mode!r}; expected 'concat' or 'dual'."
-            )
 
         # Parse DCN configuration
         self.dcn_config = dcn_config or {}
@@ -155,8 +171,8 @@ class VRT(nn.Module):
             if self.spike_encoder_type == 'pase':
                 pase_params = spike_encoder_cfg.get('params', {}) or {}
                 self.spike_encoder = PixelAdaptiveSpikeEncoder(
-                    in_chans=in_chans,
-                    out_chans=in_chans,
+                    in_chans=resolved_in_chans,
+                    out_chans=resolved_in_chans,
                     kernel_size=pase_params.get('kernel_size', 3),
                     hidden_chans=pase_params.get('hidden_chans', 32),
                     normalize_kernel=pase_params.get('normalize_kernel', True),
@@ -164,8 +180,8 @@ class VRT(nn.Module):
             else:
                 raise ValueError(f"Unsupported spike encoder type: {self.spike_encoder_type}")
 
-        fusion_cfg = ((opt or {}).get('netG', {}) or {}).get('fusion', {})
-        self.fusion_enabled = bool(fusion_cfg.get('enable', False))
+        fusion_cfg = fusion_cfg_from_opt
+        self.fusion_enabled = self.input_strategy == 'fusion'
         self.fusion_cfg = fusion_cfg
         self.fusion_operator = None
         self.fusion_adapter = None
@@ -309,7 +325,7 @@ class VRT(nn.Module):
         if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
             effective_in_chans = early_out_chans
         else:
-            effective_in_chans = in_chans
+            effective_in_chans = resolved_in_chans
 
         if self.pa_frames:
             if self.nonblind_denoising:
@@ -330,7 +346,7 @@ class VRT(nn.Module):
         else:
             self.restoration_reducer = None
         if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
-            self.spike_bins = in_chans - 3
+            self.spike_bins = resolved_in_chans - 3
         else:
             self.spike_bins = 1
 
