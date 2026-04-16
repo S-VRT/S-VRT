@@ -10,7 +10,14 @@ from typing import Iterable, List, Tuple
 import numpy as np
 
 from data.spike_recc import SpikeStream
-from data.spike_recc.encoding25 import build_output_dir, validate_encoding25_tensor
+from data.spike_recc.encoding25 import (
+    build_output_dir,
+    build_output_dir_subframes,
+    compute_subframe_centers,
+    build_centered_window,
+    validate_subframes_tensor,
+    validate_encoding25_tensor,
+)
 
 
 @dataclass
@@ -86,6 +93,23 @@ def build_scflow_window(spike_matrix: np.ndarray, short_policy: str) -> Tuple[np
     return window, "padded"
 
 
+def build_scflow_subframe_windows(
+    spike_matrix: np.ndarray,
+    num_subframes: int,
+) -> np.ndarray:
+    """Extract S sub-windows from a spike matrix based on its own T_raw."""
+    if spike_matrix.ndim != 3:
+        raise ValueError(f"spike_matrix must be [T,H,W], got shape={tuple(spike_matrix.shape)}")
+    centers = compute_subframe_centers(
+        t_raw=spike_matrix.shape[0],
+        num_subframes=num_subframes,
+    )
+    windows = [build_centered_window(spike_matrix, center) for center in centers]
+    result = np.stack(windows, axis=0)
+    validate_subframes_tensor(result, num_subframes)
+    return result
+
+
 def process_clip(
     *,
     clip_dir: Path,
@@ -95,10 +119,11 @@ def process_clip(
     overwrite: bool,
     spike_h: int,
     spike_w: int,
+    num_subframes: int = 1,
 ) -> Tuple[EncodeResult, List[str]]:
     clip_name = clip_dir.name
     spike_dir = clip_dir / "spike"
-    out_dir = build_output_dir(clip_dir, dt=dt)
+    out_dir = build_output_dir_subframes(clip_dir, dt=dt, num_subframes=num_subframes)
     result = EncodeResult()
     missing: List[str] = []
 
@@ -133,15 +158,21 @@ def process_clip(
                 print_dat_detail=False,
             )
             spike_matrix = spike_stream.get_spike_matrix(flipud=True)
-            encoded, kind = build_scflow_window(spike_matrix=spike_matrix, short_policy=short_policy)
-            np.save(out_path, encoded)
-            result.generated += 1
-            if kind == "exact25":
-                result.exact25 += 1
-            elif kind == "cropped":
+            if num_subframes > 1:
+                encoded = build_scflow_subframe_windows(spike_matrix, num_subframes)
+                np.save(out_path, encoded)
+                result.generated += 1
                 result.cropped += 1
             else:
-                result.padded += 1
+                encoded, kind = build_scflow_window(spike_matrix=spike_matrix, short_policy=short_policy)
+                np.save(out_path, encoded)
+                result.generated += 1
+                if kind == "exact25":
+                    result.exact25 += 1
+                elif kind == "cropped":
+                    result.cropped += 1
+                else:
+                    result.padded += 1
         except Exception as exc:
             result.failed += 1
             missing.append(f"clip={clip_name} frame={frame_idx} error={exc}")
@@ -149,8 +180,8 @@ def process_clip(
     return result, missing
 
 
-def _process_clip_worker(args: Tuple[Path, int, str, bool, bool, int, int]) -> Tuple[str, EncodeResult, List[str]]:
-    clip_dir, dt, short_policy, dry_run, overwrite, spike_h, spike_w = args
+def _process_clip_worker(args: Tuple[Path, int, str, bool, bool, int, int, int]) -> Tuple[str, EncodeResult, List[str]]:
+    clip_dir, dt, short_policy, dry_run, overwrite, spike_h, spike_w, num_subframes = args
     clip_name = clip_dir.name
     try:
         result, missing = process_clip(
@@ -161,6 +192,7 @@ def _process_clip_worker(args: Tuple[Path, int, str, bool, bool, int, int]) -> T
             overwrite=overwrite,
             spike_h=spike_h,
             spike_w=spike_w,
+            num_subframes=num_subframes,
         )
         return clip_name, result, missing
     except Exception as exc:
@@ -178,6 +210,7 @@ def process_all_clips(
     spike_h: int,
     spike_w: int,
     num_workers: int,
+    num_subframes: int = 1,
 ) -> Tuple[EncodeResult, List[str]]:
     all_result = EncodeResult()
     all_missing: List[str] = []
@@ -196,6 +229,7 @@ def process_all_clips(
                 overwrite=overwrite,
                 spike_h=spike_h,
                 spike_w=spike_w,
+                num_subframes=num_subframes,
             )
             _merge_result(all_result, result)
             all_missing.extend(missing)
@@ -210,6 +244,7 @@ def process_all_clips(
             overwrite,
             spike_h,
             spike_w,
+            num_subframes,
         )
         for clip_dir in clip_dirs
     ]
@@ -248,6 +283,12 @@ def main() -> None:
     parser.add_argument("--max-clips", type=int, default=0)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--subframes",
+        type=int,
+        default=4,
+        help="Number of sub-windows per .dat file (S). Default: 4.",
+    )
     args = parser.parse_args()
 
     spike_root = Path(args.spike_root)
@@ -278,6 +319,7 @@ def main() -> None:
         spike_h=int(args.spike_h),
         spike_w=int(args.spike_w),
         num_workers=requested_workers,
+        num_subframes=int(args.subframes),
     )
 
     print("[prepare_scflow_encoding25] Summary")

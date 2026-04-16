@@ -454,3 +454,45 @@ def test_build_output_dir_subframes_s4(tmp_path):
 def test_build_output_dir_subframes_s1_backward_compat(tmp_path):
     out = build_output_dir_subframes(tmp_path / "clip", dt=10, num_subframes=1)
     assert out.name == "encoding25_dt10"
+
+
+# ---------------------------------------------------------------------------
+# Group G — build_scflow_subframe_windows contracts
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_build_scflow_subframe_windows_shape_t56_s4():
+    from scripts.data_preparation.spike_flow.prepare_scflow_encoding25 import (
+        build_scflow_subframe_windows,
+    )
+    spike = np.random.rand(56, 8, 8).astype(np.float32)
+    result = build_scflow_subframe_windows(spike, num_subframes=4)
+    assert result.shape == (4, 25, 8, 8)
+    assert result.dtype == np.float32
+
+@pytest.mark.unit
+def test_build_scflow_subframe_windows_shape_t88_s4():
+    from scripts.data_preparation.spike_flow.prepare_scflow_encoding25 import (
+        build_scflow_subframe_windows,
+    )
+    spike = np.random.rand(88, 8, 8).astype(np.float32)
+    result = build_scflow_subframe_windows(spike, num_subframes=4)
+    assert result.shape == (4, 25, 8, 8)
+
+@pytest.mark.unit
+def test_build_scflow_subframe_windows_s1_backward_compat():
+    from scripts.data_preparation.spike_flow.prepare_scflow_encoding25 import (
+        build_scflow_subframe_windows,
+    )
+    spike = np.random.rand(56, 8, 8).astype(np.float32)
+    result = build_scflow_subframe_windows(spike, num_subframes=1)
+    assert result.shape == (1, 25, 8, 8)
+
+@pytest.mark.unit
+def test_build_scflow_subframe_windows_rejects_short():
+    from scripts.data_preparation.spike_flow.prepare_scflow_encoding25 import (
+        build_scflow_subframe_windows,
+    )
+    spike = np.random.rand(20, 8, 8).astype(np.float32)
+    with pytest.raises(ValueError):
+        build_scflow_subframe_windows(spike, num_subframes=4)
