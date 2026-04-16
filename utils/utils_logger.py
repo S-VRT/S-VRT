@@ -14,13 +14,15 @@ except ImportError:
 try:
     import wandb
     WANDB_AVAILABLE = True
-except ImportError:
+except Exception:
+    wandb = None
     WANDB_AVAILABLE = False
 
 try:
     import swanlab
     SWANLAB_AVAILABLE = True
-except ImportError:
+except Exception:
+    swanlab = None
     SWANLAB_AVAILABLE = False
 
 
@@ -205,8 +207,9 @@ class Logger(object):
                 wandb_name = logging_config.get('wandb_name', opt.get('task', 'experiment'))
                 
                 try:
-                    # Set mode to offline if no API key is available
-                    wandb_mode = 'online' if (wandb_api_key or 'WANDB_API_KEY' in os.environ) else 'offline'
+                    wandb_mode = logging_config.get('wandb_mode', None)
+                    if not wandb_mode:
+                        wandb_mode = 'online' if (wandb_api_key or 'WANDB_API_KEY' in os.environ) else 'offline'
                     
                     self.wandb_run = wandb.init(
                         project=wandb_project,

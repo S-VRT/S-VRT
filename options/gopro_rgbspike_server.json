@@ -3,7 +3,7 @@
   // 基础配置
   // ========================================
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
-  "task": "gopro_tfp8_scflow_pase_dcn4"
+  "task": "gopro_tfp8_scflow_gated_dcn4"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
   ,
   "model": "vrt"
@@ -90,13 +90,13 @@
       "dataset_type": "TrainDatasetRGBSpike"
       // 真实标签（Ground Truth）数据路径：清晰视频帧的存储路径
       ,
-      "dataroot_gt": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large/train_GT"
+      "dataroot_gt": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/train_GT"
       // 低质量（Low Quality）数据路径：模糊视频帧的存储路径
       ,
-      "dataroot_lq": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large/train_GT_blurred"
+      "dataroot_lq": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/train_GT_blurred"
       // Spike 数据路径：Spike 序列数据的存储路径
       ,
-      "dataroot_spike": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large_spike_seq/train"
+      "dataroot_spike": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train"
       // Spike 数据高度：Spike 图像的高度（像素）
       ,
       "spike_h": 360
@@ -106,7 +106,7 @@
       // Spike 配置文件：记录 Spike 相机配置与标注信息
       ,
       "spike_config": {
-        "path": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large_spike_seq/config.yaml",
+        "path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/config.yaml",
         "spike_h": 360,
         "spike_w": 640,
         "is_labeled": false,
@@ -223,13 +223,13 @@
       "dataset_type": "TrainDatasetRGBSpike"
       // 真实标签数据路径：测试集的清晰视频帧路径
       ,
-      "dataroot_gt": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large/test_GT"
+      "dataroot_gt": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/test_GT"
       // 低质量数据路径：测试集的模糊视频帧路径
       ,
-      "dataroot_lq": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large/test_GT_blurred"
+      "dataroot_lq": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/test_GT_blurred"
       // Spike 数据路径：测试集的 Spike 序列数据路径
       ,
-      "dataroot_spike": "/storage/main/users/hengyuanwu/Datasets/gopro_spike/GOPRO_Large_spike_seq/test"
+      "dataroot_spike": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/test"
       // Spike 数据高度：Spike 图像的高度（像素）
       // 测试集元信息文件：用于构建 clip/frame 索引
       ,
@@ -337,6 +337,15 @@
     // concat 与 fusion 是并列输入策略；当前配置选择 fusion，因此 concat 留空
     "concat": {}
     ,
+    "fusion": {
+      "enable": true,
+      "placement": "early",
+      "operator": "gated",
+      "mode": "replace",
+      "out_chans": 3,
+      "operator_params": {}
+    }
+    ,
     "input_mode": "dual"
     // 原始入口宽度：RGB 3 + Spike 重建 bins 8 = 11
     // 在 fusion 策略下，对齐前使用的是 raw ingress 宽度；进入 backbone 后会由 fusion.out_chans 决定主干宽度
@@ -419,19 +428,7 @@
     // 光流模块配置：可选值 'spynet'、'sea_raft' 或 'scflow'。
     ,
     "optical_flow": {
-      "module": "spynet",
-      "checkpoint": null,
-      "params": {}
-    }
-    // Spike Encoder 配置：用于控制是否启用 Spike 编码器，以及可扩展支持不同编码器
-    // enable: 是否启用 Spike Encoder
-    // type: 编码器类型（例如 "pase"，后续可扩展为其他编码器）
-    // checkpoint: 预训练权重路径，null 表示不加载
-    // params: 编码器专属参数，按不同 type 扩展
-    ,
-    "spike_encoder": {
-      "enable": true,
-      "type": "pase",
+      "module": "scflow",
       "checkpoint": null,
       "params": {}
     }
@@ -500,6 +497,10 @@
     // 初始化类型：网络参数的初始化方式，"default" 表示使用默认初始化
     ,
     "init_type": "default"
+    ,
+    "init_bn_type": "uniform"
+    ,
+    "init_gain": 0.2
   }
   // ========================================
   // 训练配置
@@ -646,10 +647,10 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_tfp8_scflow_pase_dcn4"
+    "wandb_name": "gopro_tfp8_scflow_gated_dcn4"
     // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
     ,
-    "wandb_mode": "offline"
+    "wandb_mode": "online"
     // 是否使用 SwanLab：true 表示启用 SwanLab 日志记录（默认关闭）
     ,
     "use_swanlab": true
@@ -664,14 +665,12 @@
     "swanlab_workspace": null
     // SwanLab 运行名称：用于区分不同实验
     ,
-    "swanlab_name": "gopro_tfp8_scflow_pase_dcn4"
+    "swanlab_name": "gopro_tfp8_scflow_gated_dcn4"
     // SwanLab 实验描述：可选文本信息
     ,
-    "swanlab_description": "offline"
+    "swanlab_description": "early fusion gated + scflow"
     // SwanLab 运行模式：可设置 cloud/offline/local；留空自动根据 API key 决定
     ,
     "swanlab_mode": null
   }
 }
-
-

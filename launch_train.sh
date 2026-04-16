@@ -35,10 +35,19 @@
 # ================================================================================
 
 # Default configuration
-DEFAULT_CONFIG="options/gopro_rgbspike_local.json"
-DEFAULT_GOPRO_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large"
-DEFAULT_SPIKE_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large_spike_seq"
+DEFAULT_CONFIG="options/gopro_rgbspike_server.json"
+DEFAULT_GOPRO_ROOT="/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large"
+DEFAULT_SPIKE_ROOT="/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq"
 DEFAULT_GPU_COUNT=1
+
+if [[ -x ".venv/bin/python" ]]; then
+    PYTHON_BIN="$(pwd)/.venv/bin/python"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python)"
+else
+    echo "Python not found."
+    exit 1
+fi
 
 # Parse arguments
 GPU_COUNT=""
@@ -206,20 +215,71 @@ ensure_python_package() {
     local import_name="$1"
     local pip_name="$2"
 
-    if python -c "import ${import_name}" >/dev/null 2>&1; then
+    if "$PYTHON_BIN" -c "import ${import_name}" >/dev/null 2>&1; then
         echo "Dependency check: ${pip_name} already installed."
         return 0
     fi
 
     echo "Dependency check: ${pip_name} missing, installing..."
-    python -m pip install "${pip_name}"
+    "$PYTHON_BIN" -m pip install "${pip_name}"
+}
+
+ensure_python_package_version() {
+    local import_name="$1"
+    local version_expr="$2"
+    local pip_name="${3:-${import_name}${version_expr}}"
+
+    if "$PYTHON_BIN" - "$import_name" "$version_expr" >/dev/null 2>&1 <<'PY'
+import importlib
+import sys
+from packaging.version import Version
+
+module_name, required = sys.argv[1:3]
+mod = importlib.import_module(module_name)
+installed = getattr(mod, "__version__", None)
+if installed is None:
+    raise SystemExit(1)
+required = required.strip()
+if required.startswith(">="):
+    ok = Version(installed) >= Version(required[2:])
+elif required.startswith("=="):
+    ok = Version(installed) == Version(required[2:])
+else:
+    raise SystemExit(1)
+raise SystemExit(0 if ok else 1)
+PY
+    then
+        echo "Dependency check: ${pip_name} already compatible."
+        return 0
+    fi
+
+    echo "Dependency check: ${pip_name} incompatible or missing, installing..."
+    "$PYTHON_BIN" -m pip install "${pip_name}"
 }
 
 ensure_dcnv4_module() {
-    if python -c "from models.op.dcnv4 import DCNv4; from DCNv4 import ext" >/dev/null 2>&1; then
+    local import_output=""
+    import_output=$("$PYTHON_BIN" - <<'PY' 2>&1
+import glob
+import os
+
+print("DCNv4 import probe:")
+for path in sorted(glob.glob("DCNv4/ext*.so")):
+    print(f"  artifact: {os.path.abspath(path)}")
+
+from models.op.dcnv4 import DCNv4  # noqa: F401
+from DCNv4 import ext
+
+print(f"  import ok: {getattr(ext, '__file__', '<unknown>')}")
+PY
+)
+    if [[ $? -eq 0 ]]; then
+        echo "$import_output"
         echo "Dependency check: DCNv4 module already available."
         return 0
     fi
+    echo "$import_output"
+    echo "Dependency check: DCNv4 import probe failed, rebuilding..."
 
     if [[ ! -d "models/op/dcnv4" ]]; then
         echo "Warning: models/op/dcnv4 not found, skip DCNv4 build."
@@ -239,14 +299,14 @@ PYINIT
 
     # Important: setup.py declares packages as models.op.dcnv4.*, so it must
     # be executed from repo root instead of models/op/dcnv4 directory.
-    python models/op/dcnv4/setup.py develop
+    "$PYTHON_BIN" models/op/dcnv4/setup.py develop
     local dcn_exit_code=$?
     if [[ $dcn_exit_code -ne 0 ]]; then
         handle_error $dcn_exit_code "DCNv4 构建失败，请检查上面的错误信息。"
     fi
 
     # Post-build sanity check: ensure extension can be imported in current env.
-    if ! python -c "from models.op.dcnv4 import DCNv4; from DCNv4 import ext" >/dev/null 2>&1; then
+    if ! "$PYTHON_BIN" -c "from models.op.dcnv4 import DCNv4; from DCNv4 import ext" >/dev/null 2>&1; then
         handle_error 1 "DCNv4 扩展导入失败（DCNv4.ext 不可用），请检查编译环境与 Python 环境是否一致。"
     fi
 }
@@ -262,6 +322,7 @@ echo "Generate LMDB: $GENERATE_LMDB"
 echo "Dataset Root: ${DATASET_ROOT:-<none>}"
 echo "GoPro Root: $EFFECTIVE_GOPRO_ROOT"
 echo "Spike Root: $EFFECTIVE_SPIKE_ROOT"
+echo "Python: $PYTHON_BIN"
 echo ""
 
 # ================================================================================
@@ -297,7 +358,7 @@ if [[ "$PREPARE_DATA" == true ]]; then
     echo "Command: python scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS"
     echo ""
     
-    python scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS
+    "$PYTHON_BIN" scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS
     
     PREP_EXIT_CODE=$?
     echo ""
@@ -329,6 +390,9 @@ echo "=========================================="
 echo "Dependency Preparation"
 echo "=========================================="
 ensure_python_package "snntorch" "snntorch"
+ensure_python_package "cv2" "opencv-python-headless"
+ensure_python_package_version "google.protobuf" ">=6.32.1" "protobuf>=6.32.1"
+ensure_python_package "wandb" "wandb"
 ensure_python_package "swanlab" "swanlab"
 ensure_dcnv4_module
 echo ""
@@ -344,14 +408,17 @@ echo ""
 # Create a temporary config with runtime-resolved dataset paths
 RUNTIME_CONFIG="$CONFIG_PATH"
 TMP_CONFIG=""
-if command -v python >/dev/null 2>&1; then
+if [[ -n "$PYTHON_BIN" ]]; then
     TMP_CONFIG="$(mktemp /tmp/vrt_config.XXXXXX.json)"
-    python - "$CONFIG_PATH" "$TMP_CONFIG" "$EFFECTIVE_GOPRO_ROOT" "$EFFECTIVE_SPIKE_ROOT" <<'PYUPDATE'
-import json, sys, pathlib
+    "$PYTHON_BIN" - "$CONFIG_PATH" "$TMP_CONFIG" "$EFFECTIVE_GOPRO_ROOT" "$EFFECTIVE_SPIKE_ROOT" <<'PYUPDATE'
+import json, re, sys, pathlib
 src, dst, gopro_root, spike_root = sys.argv[1:5]
-p = pathlib.Path(src)
+
+def strip_json_comments(text: str) -> str:
+    return re.sub(r'^\s*//.*$', '', text, flags=re.MULTILINE)
+
 with open(src, 'r') as f:
-    cfg = json.load(f)
+    cfg = json.loads(strip_json_comments(f.read()))
 # Defensive: walk expected keys if present
 ds = cfg.get('datasets', {})
 train = ds.get('train', {})
@@ -392,11 +459,11 @@ if [[ -n "${WORLD_SIZE:-}" && "${WORLD_SIZE:-0}" -gt 1 ]]; then
     echo "  MASTER_ADDR=$MASTER_ADDR"
     echo "  MASTER_PORT=$MASTER_PORT"
     echo ""
-    echo "Running: python -u main_train_vrt.py --opt $RUNTIME_CONFIG"
+    echo "Running: $PYTHON_BIN -u main_train_vrt.py --opt $RUNTIME_CONFIG"
     echo "=========================================="
     
     # Platform has already set up environment, just run python directly
-    python -u main_train_vrt.py --opt "$RUNTIME_CONFIG"
+    "$PYTHON_BIN" -u main_train_vrt.py --opt "$RUNTIME_CONFIG"
 
 else
     # ========================================
@@ -424,10 +491,10 @@ else
         SINGLE_GPU_ID="${GPU_ID_ARRAY[0]}"
         echo "  CUDA_VISIBLE_DEVICES: $SINGLE_GPU_ID"
         echo ""
-        echo "Running: python main_train_vrt.py --opt $RUNTIME_CONFIG"
+        echo "Running: $PYTHON_BIN main_train_vrt.py --opt $RUNTIME_CONFIG"
         echo "=========================================="
         
-        CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" python main_train_vrt.py --opt "$RUNTIME_CONFIG"
+        CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" "$PYTHON_BIN" main_train_vrt.py --opt "$RUNTIME_CONFIG"
     fi
 fi
 
