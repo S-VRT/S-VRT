@@ -96,15 +96,21 @@ class TrainDatasetRGBSpike(data.Dataset):
             spike_reconstruction_nested = {}
         nested_num_bins = spike_reconstruction_nested.get('num_bins', None)
         legacy_reconstruction = opt.get('spike_reconstruction', None)
+        legacy_reconstruction_cfg = legacy_reconstruction if isinstance(legacy_reconstruction, dict) else {}
         if spike_reconstruction_nested and legacy_reconstruction is not None:
             nested_type = str(spike_reconstruction_nested.get('type', 'spikecv_tfp')).strip().lower()
-            legacy_type = str(legacy_reconstruction).strip().lower()
+            if legacy_reconstruction_cfg:
+                legacy_type = str(legacy_reconstruction_cfg.get('type', 'spikecv_tfp')).strip().lower()
+            else:
+                legacy_type = str(legacy_reconstruction).strip().lower()
             if nested_type != legacy_type:
                 raise ValueError(
                     f"[TrainDatasetRGBSpike] Conflicting reconstruction types: "
                     f"spike.reconstruction.type={nested_type!r} vs spike_reconstruction={legacy_type!r}."
                 )
         legacy_middle_center = opt.get('middle_tfp_center', None)
+        if legacy_middle_center is None and legacy_reconstruction_cfg and 'middle_tfp_center' in legacy_reconstruction_cfg:
+            legacy_middle_center = legacy_reconstruction_cfg.get('middle_tfp_center')
         if spike_reconstruction_nested and legacy_middle_center is not None and 'middle_tfp_center' in spike_reconstruction_nested:
             nested_center = int(spike_reconstruction_nested['middle_tfp_center'])
             if nested_center != int(legacy_middle_center):
@@ -655,4 +661,3 @@ class TrainDatasetRGBSpike(data.Dataset):
         if self.spike_norm_stats is not None and tensor.size(1) > 3:
             tensor[:, 3:, :, :] = (tensor[:, 3:, :, :] - self.spike_norm_stats['mean']) / self.spike_norm_stats['std']
         return tensor
-

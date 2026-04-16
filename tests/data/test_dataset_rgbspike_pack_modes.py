@@ -191,3 +191,13 @@ def test_conflicting_nested_and_legacy_reconstruction_raises(tmp_path):
     with pytest.raises(ValueError, match="Conflicting reconstruction types"):
         TrainDatasetRGBSpike(opt)
 
+
+def test_legacy_reconstruction_dict_matching_nested_does_not_raise(tmp_path):
+    opt = _build_opt(
+        tmp_path,
+        spike_channels=4,
+        spike={"reconstruction": {"type": "spikecv_tfp", "num_bins": 4}},
+        spike_reconstruction={"type": "spikecv_tfp"},
+    )
+    dataset = TrainDatasetRGBSpike(opt)
+    assert dataset.spike_reconstruction == "spikecv_tfp"
