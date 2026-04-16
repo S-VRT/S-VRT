@@ -125,6 +125,8 @@
     , "no_checkpoint_ffn_blocks": [1,2,3,4,5,9]
 
     , "init_type": "default"
+    , "init_bn_type": "uniform"
+    , "init_gain": 0.2
   }
 
 
@@ -173,4 +175,3 @@
   }
 
 }
-

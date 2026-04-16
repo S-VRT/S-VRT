@@ -142,7 +142,7 @@ def test_build_model_input_dual_invalid_rgb_channels_raises():
 
 def test_build_model_input_invalid_mode_raises():
     model = _build_stub_model("bad_mode", in_chans=7)
-    with pytest.raises(ValueError, match="input_mode"):
+    with pytest.raises(ValueError, match=r"netG\.input\.mode|input_mode"):
         model._build_model_input_tensor({"L": torch.randn(1, 2, 7, 8, 8)})
 
 
@@ -187,4 +187,3 @@ def test_feed_data_dual_fallback_still_enforces_channel_assert():
     model.netG = _MarkerNet()
     with pytest.raises(ValueError, match="Channel Mismatch"):
         model.feed_data({"L": torch.randn(1, 2, 7, 8, 8), "H": torch.randn(1, 2, 3, 8, 8)})
-

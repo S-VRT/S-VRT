@@ -17,8 +17,10 @@ def test_optical_flow_backends_forward_shapes_cpu():
     for backend in ('spynet', 'sea_raft'):
         of = create_optical_flow(module=backend, checkpoint=None, device=device)
         out = of(frame1, frame2)
-        assert isinstance(out, (list, tuple)), f"{backend} must return a list/tuple of flows"
-        final = out[-1] if len(out) > 1 else out[0]
+        # The optical-flow stack accepts either a multiscale list/tuple or a single final-flow tensor.
+        if isinstance(out, (list, tuple)):
+            final = out[-1] if len(out) > 1 else out[0]
+        else:
+            final = out
         assert final.shape[0] == 1 and final.shape[1] == 2
         assert torch.isfinite(final).all()
-

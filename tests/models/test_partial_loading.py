@@ -52,6 +52,11 @@ def test_load_network_partial_matches_key_and_shape():
 def test_freeze_backbone_freezes_non_fusion_params():
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
             "output_mode": "restoration",
             "fusion": {
                 "enable": True,

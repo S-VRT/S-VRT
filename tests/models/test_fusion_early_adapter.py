@@ -104,7 +104,7 @@ def test_early_adapter_spatial_mismatch_no_spike_chans_raises():
     adapter = EarlyFusionAdapter(operator=op)
     rgb = torch.randn(2, 6, 3, 12, 12)
     spike = torch.randn(2, 6, 8, 6, 6)
-    with pytest.raises(ValueError, match=r"(?i)(unable|cannot) upsample|(?i)(unable|cannot) to upsample"):
+    with pytest.raises(ValueError, match=r"(?i)((unable|cannot) upsample|(unable|cannot) to upsample)"):
         adapter(rgb=rgb, spike=spike)
 
 

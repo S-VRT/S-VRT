@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
 import numpy as np
+import warnings
 
 from DCNv4 import ext
 
@@ -28,12 +29,21 @@ shm_size_dict = {
     "7.0": 96000,
 }
 
-cuda_capability = f"{torch.cuda.get_device_properties(0).major}.{torch.cuda.get_device_properties(0).minor}"
-
-if cuda_capability not in shm_size_dict:
-    raise NotImplementedError
-
-shm_size_cap = shm_size_dict[cuda_capability]
+cuda_capability = None
+shm_size_cap = shm_size_dict["8.9"]
+if torch.cuda.is_available():
+    cuda_capability = (
+        f"{torch.cuda.get_device_properties(0).major}."
+        f"{torch.cuda.get_device_properties(0).minor}"
+    )
+    if cuda_capability in shm_size_dict:
+        shm_size_cap = shm_size_dict[cuda_capability]
+    else:
+        warnings.warn(
+            f"FlashDeformAttn does not have a tuned shared-memory entry for CUDA capability "
+            f"{cuda_capability}; falling back to the sm_89 preset.",
+            RuntimeWarning,
+        )
 
 def factors(N):
     res = []

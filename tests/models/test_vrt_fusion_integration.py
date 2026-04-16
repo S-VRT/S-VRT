@@ -11,6 +11,11 @@ from models.fusion.reducers import build_restoration_reducer
 def test_vrt_builds_with_fusion_config():
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 4,
+            },
             "fusion": {
                 "enable": True,
                 "placement": "early",
@@ -53,6 +58,11 @@ def test_vrt_builds_with_fusion_config():
 def test_vrt_forward_triggers_early_fusion(monkeypatch):
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 4,
+            },
             "fusion": {
                 "enable": True,
                 "placement": "hybrid",
@@ -122,6 +132,11 @@ def test_vrt_forward_triggers_early_fusion(monkeypatch):
 def test_vrt_get_aligned_image_uses_backbone_in_chans_for_early_fusion():
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 11,
+            },
             "output_mode": "restoration",
             "fusion": {
                 "enable": True,
@@ -161,6 +176,11 @@ def test_vrt_get_aligned_image_uses_backbone_in_chans_for_early_fusion():
 def test_vrt_builds_with_middle_fusion_adapter():
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 4,
+            },
             "fusion": {
                 "enable": True,
                 "placement": "middle",
@@ -194,6 +214,11 @@ def test_vrt_builds_with_middle_fusion_adapter():
 def test_vrt_builds_with_hybrid_fusion_adapter():
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 4,
+            },
             "fusion": {
                 "enable": True,
                 "placement": "hybrid",
@@ -235,6 +260,11 @@ def test_vrt_builds_with_early_fusion_out_chans_3():
     """Early fusion with out_chans=3 and in_chans=11 should build successfully."""
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 11,
+            },
             "output_mode": "restoration",
             "fusion": {
                 "enable": True,
@@ -305,6 +335,11 @@ def test_residual_selector_reducer_uses_base_rgb_shape():
 def test_vrt_builds_with_selector_reducer():
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 11,
+            },
             "output_mode": "restoration",
             "restoration_reducer": {"type": "selector", "selector_hidden": 8},
             "fusion": {
@@ -339,6 +374,11 @@ def test_vrt_builds_with_selector_reducer():
 def test_vrt_builds_with_interpolation_mode():
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 11,
+            },
             "output_mode": "interpolation",
             "fusion": {
                 "enable": True,
@@ -373,6 +413,11 @@ def test_vrt_builds_with_interpolation_mode():
 def test_vrt_forward_features_passes_fusion_hook_for_middle():
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 4,
+            },
             "fusion": {
                 "enable": True,
                 "placement": "middle",
@@ -443,6 +488,11 @@ def test_vrt_forward_features_passes_fusion_hook_for_middle():
 def test_vrt_middle_out_chans_mismatch_raises():
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 4,
+            },
             "fusion": {
                 "enable": True,
                 "placement": "middle",
@@ -475,6 +525,11 @@ def test_vrt_middle_out_chans_mismatch_raises():
 def test_vrt_middle_inject_stages_mixed_dims_raises():
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 4,
+            },
             "fusion": {
                 "enable": True,
                 "placement": "middle",
@@ -507,6 +562,11 @@ def test_vrt_middle_inject_stages_mixed_dims_raises():
 def test_full_t_rejects_non_spikecv_tfp():
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 11,
+            },
             "fusion": {
                 "enable": True,
                 "placement": "early",
@@ -546,6 +606,11 @@ def test_full_t_rejects_non_spikecv_tfp():
 def test_full_t_hybrid_rejects_non_spikecv_tfp_from_test_dataset():
     opt = {
         "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 4,
+            },
             "fusion": {
                 "enable": True,
                 "placement": "hybrid",
@@ -581,4 +646,3 @@ def test_full_t_hybrid_rejects_non_spikecv_tfp_from_test_dataset():
             optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
             opt=opt,
         )
-
