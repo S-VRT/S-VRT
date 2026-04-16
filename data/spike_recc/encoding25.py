@@ -96,6 +96,11 @@ def compute_subframe_centers(
         raise ValueError(f"num_subframes must be >= 1, got {num_subframes}")
     lo = margin
     hi = t_raw - margin - 1
+    if hi < lo:
+        raise ValueError(
+            f"t_raw={t_raw} with margin={margin} yields no valid center range "
+            f"[{lo}, {hi}]"
+        )
     if num_subframes == 1:
         return [(lo + hi) // 2]
     raw_centers = np.linspace(lo, hi, num_subframes)
