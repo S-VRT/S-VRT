@@ -162,7 +162,7 @@ def process_clip(
                 encoded = build_scflow_subframe_windows(spike_matrix, num_subframes)
                 np.save(out_path, encoded)
                 result.generated += 1
-                result.cropped += 1
+                result.exact25 += 1
             else:
                 encoded, kind = build_scflow_window(spike_matrix=spike_matrix, short_policy=short_policy)
                 np.save(out_path, encoded)
