@@ -33,7 +33,7 @@ class TFP:
         if T_im < 0:
             raise ValueError('The length of spike stream {:d} is not enough for half window length {:d}'.format(T, half_win_length))
         
-        spikes = torch.from_numpy(spikes).to(self.device).float()
+        spikes = torch.from_numpy(np.ascontiguousarray(spikes)).to(self.device).float()
         ImageMatrix = torch.zeros([T_im, self.spike_h, self.spike_w]).to(self.device)
 
         for ts in range(half_win_length, T-half_win_length):
@@ -64,7 +64,7 @@ class TFP:
             raise ValueError('The length of spike stream {:d} is not enough for half window length {:d} at key time stamp {:d}'.format(T, half_win_length, key_ts))
         
         spikes = spikes[key_ts - half_win_length : key_ts + half_win_length + 1]
-        spikes = torch.from_numpy(spikes).to(self.device).float()
+        spikes = torch.from_numpy(np.ascontiguousarray(spikes)).to(self.device).float()
 
         Image = spikes.mean(dim=0) * 255
         Image = Image.cpu().detach().numpy().astype(np.uint8)
