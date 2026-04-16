@@ -343,8 +343,15 @@ class TrainDatasetRGBSpike(data.Dataset):
         flow_spikes_resized = []
         if self.use_encoding25_flow:
             for flow_spike in flow_spikes:
-                validate_encoding25_tensor(flow_spike)
-                flow_spikes_resized.append(_crop_resize_chw(flow_spike, 25, "Flow spike"))
+                if flow_spike.ndim == 4:
+                    # Subframe mode: [S, 25, H, W] → crop each sub-window independently
+                    for s_idx in range(flow_spike.shape[0]):
+                        sub_window = flow_spike[s_idx]  # [25, H, W]
+                        validate_encoding25_tensor(sub_window)
+                        flow_spikes_resized.append(_crop_resize_chw(sub_window, 25, "Flow spike"))
+                else:
+                    validate_encoding25_tensor(flow_spike)
+                    flow_spikes_resized.append(_crop_resize_chw(flow_spike, 25, "Flow spike"))
 
         # Concatenate RGB and Spike channels
         # Channel Order: 
@@ -399,7 +406,7 @@ class TrainDatasetRGBSpike(data.Dataset):
                 raise ValueError("SCFlow strict mode expected non-empty flow_tensor.")
             if flow_tensor.ndim != 4 or flow_tensor.size(1) != 25:
                 raise ValueError(
-                    f"Expected L_flow_spike shape [T,25,H,W], got {tuple(flow_tensor.shape)}"
+                    f"Expected L_flow_spike shape [T*S,25,H,W], got {tuple(flow_tensor.shape)}"
                 )
             sample['L_flow_spike'] = flow_tensor.float()
         return sample
@@ -505,6 +512,7 @@ class TrainDatasetRGBSpike(data.Dataset):
         self.spike_flow_representation = str(spike_flow_cfg.get('representation', '')).strip().lower()
         self.spike_flow_dt = int(spike_flow_cfg.get('dt', 10))
         self.spike_flow_root = spike_flow_cfg.get('root', 'auto')
+        self.spike_flow_subframes = int(spike_flow_cfg.get('subframes', 1))
         self.use_encoding25_flow = self.spike_flow_representation == 'encoding25'
 
         flow_module = str(optical_flow_module or '').strip().lower()
@@ -519,15 +527,29 @@ class TrainDatasetRGBSpike(data.Dataset):
     def _load_encoded_flow_spike(self, clip_name, frame_idx):
         flow_root = self.spike_root if str(self.spike_flow_root).strip().lower() == 'auto' else Path(self.spike_flow_root)
         frame_name = f'{frame_idx:{self.filename_tmpl}}'
-        path = flow_root / clip_name / f'encoding25_dt{self.spike_flow_dt}' / f'{frame_name}.npy'
-        if not path.exists():
-            raise ValueError(
-                f"Missing encoding25 artifact: {path}. "
-                "Run scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py first."
-            )
-        arr = np.load(path).astype(np.float32)
-        validate_encoding25_tensor(arr)
-        return arr
+
+        if self.spike_flow_subframes > 1:
+            dir_name = f'encoding25_dt{self.spike_flow_dt}_s{self.spike_flow_subframes}'
+            path = flow_root / clip_name / dir_name / f'{frame_name}.npy'
+            if not path.exists():
+                raise ValueError(
+                    f"Missing subframe encoding25 artifact: {path}. "
+                    "Run prepare_scflow_encoding25.py --subframes first."
+                )
+            arr = np.load(path).astype(np.float32)
+            from data.spike_recc.encoding25 import validate_subframes_tensor
+            validate_subframes_tensor(arr, self.spike_flow_subframes)
+            return arr
+        else:
+            path = flow_root / clip_name / f'encoding25_dt{self.spike_flow_dt}' / f'{frame_name}.npy'
+            if not path.exists():
+                raise ValueError(
+                    f"Missing encoding25 artifact: {path}. "
+                    "Run scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py first."
+                )
+            arr = np.load(path).astype(np.float32)
+            validate_encoding25_tensor(arr)
+            return arr
 
     def _validate_dual_tensor_contract(self, l_rgb, l_spike):
         if l_rgb.ndim != 4 or l_spike.ndim != 4:

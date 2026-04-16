@@ -127,6 +127,7 @@ def test_dataset_missing_encoding25_artifact_reports_path(tmp_path):
     ds.spike_root = tmp_path
     ds.spike_flow_root = "auto"
     ds.spike_flow_dt = 10
+    ds.spike_flow_subframes = 1
     ds.filename_tmpl = "06d"
     with pytest.raises(ValueError, match="Missing encoding25 artifact"):
         ds._load_encoded_flow_spike("clip_a", 1)
@@ -364,6 +365,7 @@ def test_dataset_load_path_construction_auto_mode(tmp_path):
     ds.spike_root = tmp_path
     ds.spike_flow_root = "auto"
     ds.spike_flow_dt = 10
+    ds.spike_flow_subframes = 1
     ds.filename_tmpl = "06d"
     # artifact does not exist; we just check the error message contains tmp_path
     with pytest.raises(ValueError, match=str(tmp_path)):
@@ -376,6 +378,7 @@ def test_dataset_load_path_construction_explicit_root(tmp_path):
     ds.spike_root = tmp_path / "other"
     ds.spike_flow_root = "/explicit/root"
     ds.spike_flow_dt = 10
+    ds.spike_flow_subframes = 1
     ds.filename_tmpl = "06d"
     with pytest.raises(ValueError, match="/explicit/root"):
         ds._load_encoded_flow_spike("clip_a", 1)
@@ -496,3 +499,44 @@ def test_build_scflow_subframe_windows_rejects_short():
     spike = np.random.rand(20, 8, 8).astype(np.float32)
     with pytest.raises(ValueError):
         build_scflow_subframe_windows(spike, num_subframes=4)
+
+
+# ---------------------------------------------------------------------------
+# Group H — Dataset subframe flow spike loading
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_dataset_parses_spike_flow_subframes():
+    ds = TrainDatasetRGBSpike.__new__(TrainDatasetRGBSpike)
+    ds._parse_spike_flow_config(
+        {"spike_flow": {"representation": "encoding25", "dt": 10, "root": "auto", "subframes": 4}},
+        optical_flow_module="scflow",
+    )
+    assert ds.spike_flow_subframes == 4
+
+@pytest.mark.unit
+def test_dataset_spike_flow_subframes_default_1():
+    ds = TrainDatasetRGBSpike.__new__(TrainDatasetRGBSpike)
+    ds._parse_spike_flow_config(
+        {"spike_flow": {"representation": "encoding25", "dt": 10, "root": "auto"}},
+        optical_flow_module="scflow",
+    )
+    assert ds.spike_flow_subframes == 1
+
+@pytest.mark.unit
+def test_dataset_load_subframe_flow_spike(tmp_path):
+    ds = TrainDatasetRGBSpike.__new__(TrainDatasetRGBSpike)
+    ds.spike_root = tmp_path
+    ds.spike_flow_root = "auto"
+    ds.spike_flow_dt = 10
+    ds.spike_flow_subframes = 4
+    ds.filename_tmpl = "06d"
+
+    # Create artifact
+    clip_dir = tmp_path / "clip_a" / "encoding25_dt10_s4"
+    clip_dir.mkdir(parents=True)
+    arr = np.random.rand(4, 25, 8, 8).astype(np.float32)
+    np.save(clip_dir / "000001.npy", arr)
+
+    result = ds._load_encoded_flow_spike("clip_a", 1)
+    assert result.shape == (4, 25, 8, 8)
