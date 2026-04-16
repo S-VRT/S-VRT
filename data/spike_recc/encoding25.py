@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 
@@ -82,3 +82,40 @@ def build_centered_window(
     window = spike_matrix[st:ed].astype(np.float32)
     validate_encoding25_tensor(window)
     return window
+
+
+def compute_subframe_centers(
+    t_raw: int,
+    num_subframes: int,
+    margin: int = WINDOW_HALF,
+) -> List[int]:
+    """Compute S evenly-spaced sub-centers within a single .dat file."""
+    if t_raw < WINDOW_LENGTH:
+        raise ValueError(f"t_raw={t_raw} too short for a {WINDOW_LENGTH}-wide window")
+    if num_subframes < 1:
+        raise ValueError(f"num_subframes must be >= 1, got {num_subframes}")
+    lo = margin
+    hi = t_raw - margin - 1
+    if num_subframes == 1:
+        return [(lo + hi) // 2]
+    raw_centers = np.linspace(lo, hi, num_subframes)
+    return [int(round(c)) for c in raw_centers]
+
+
+def validate_subframes_tensor(tensor: np.ndarray, num_subframes: int) -> None:
+    """Validate shape [S, 25, H, W] for multi-subframe encoding."""
+    if tensor.ndim != 4:
+        raise ValueError(f"subframes tensor must be ndim=4 [S,25,H,W], got ndim={tensor.ndim}")
+    if tensor.shape[0] != num_subframes:
+        raise ValueError(f"subframes tensor expected {num_subframes} subframes, got {tensor.shape[0]}")
+    if tensor.shape[1] != WINDOW_LENGTH:
+        raise ValueError(f"subframes tensor expected {WINDOW_LENGTH} channels, got {tensor.shape[1]}")
+
+
+def build_output_dir_subframes(clip_dir: Path, dt: int, num_subframes: int) -> Path:
+    """Return artifact directory with subframe suffix when S > 1."""
+    if num_subframes <= 1:
+        return build_output_dir(clip_dir, dt)
+    if dt <= 0:
+        raise ValueError(f"dt must be > 0, got {dt}")
+    return Path(clip_dir) / f"encoding25_dt{int(dt)}_s{int(num_subframes)}"

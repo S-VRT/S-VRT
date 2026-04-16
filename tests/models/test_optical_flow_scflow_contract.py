@@ -11,6 +11,9 @@ from data.spike_recc.encoding25 import (
     validate_center_bounds,
     build_centered_window,
     validate_encoding25_tensor,
+    compute_subframe_centers,
+    validate_subframes_tensor,
+    build_output_dir_subframes,
 )
 from models.architectures.vrt.vrt import VRT
 from models.model_plain import ModelPlain
@@ -376,3 +379,78 @@ def test_dataset_load_path_construction_explicit_root(tmp_path):
     ds.filename_tmpl = "06d"
     with pytest.raises(ValueError, match="/explicit/root"):
         ds._load_encoded_flow_spike("clip_a", 1)
+
+
+# ---------------------------------------------------------------------------
+# Group F — Subframe encoding25 contracts
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+def test_compute_subframe_centers_t56_s4():
+    """T_raw=56, S=4: centers in [12, 43], evenly spaced, sub_dt ~10.3."""
+    centers = compute_subframe_centers(t_raw=56, num_subframes=4)
+    assert len(centers) == 4
+    assert centers[0] == 12
+    assert centers[-1] == 43
+    assert all(12 <= c <= 43 for c in centers)
+    assert centers == sorted(centers)
+
+@pytest.mark.unit
+def test_compute_subframe_centers_t88_s4():
+    """T_raw=88, S=4: centers in [12, 75], evenly spaced."""
+    centers = compute_subframe_centers(t_raw=88, num_subframes=4)
+    assert len(centers) == 4
+    assert centers[0] == 12
+    assert centers[-1] == 75
+    assert centers == sorted(centers)
+
+@pytest.mark.unit
+def test_compute_subframe_centers_s1_returns_midpoint():
+    """S=1: single center at midpoint of valid range."""
+    centers = compute_subframe_centers(t_raw=56, num_subframes=1)
+    assert len(centers) == 1
+    assert centers[0] == (12 + 43) // 2  # 27
+
+@pytest.mark.unit
+def test_compute_subframe_centers_rejects_too_short():
+    """T_raw=24 can't fit a 25-wide window."""
+    with pytest.raises(ValueError, match="t_raw"):
+        compute_subframe_centers(t_raw=24, num_subframes=1)
+
+@pytest.mark.unit
+def test_compute_subframe_centers_rejects_zero_subframes():
+    with pytest.raises(ValueError, match="num_subframes"):
+        compute_subframe_centers(t_raw=56, num_subframes=0)
+
+@pytest.mark.unit
+def test_validate_subframes_tensor_accepts_valid():
+    arr = np.zeros((4, 25, 8, 8), dtype=np.float32)
+    validate_subframes_tensor(arr, num_subframes=4)
+
+@pytest.mark.unit
+def test_validate_subframes_tensor_rejects_wrong_s():
+    arr = np.zeros((3, 25, 8, 8), dtype=np.float32)
+    with pytest.raises(ValueError, match="subframes"):
+        validate_subframes_tensor(arr, num_subframes=4)
+
+@pytest.mark.unit
+def test_validate_subframes_tensor_rejects_wrong_channels():
+    arr = np.zeros((4, 11, 8, 8), dtype=np.float32)
+    with pytest.raises(ValueError, match="25"):
+        validate_subframes_tensor(arr, num_subframes=4)
+
+@pytest.mark.unit
+def test_validate_subframes_tensor_rejects_3d():
+    arr = np.zeros((25, 8, 8), dtype=np.float32)
+    with pytest.raises(ValueError, match="ndim"):
+        validate_subframes_tensor(arr, num_subframes=1)
+
+@pytest.mark.unit
+def test_build_output_dir_subframes_s4(tmp_path):
+    out = build_output_dir_subframes(tmp_path / "clip", dt=10, num_subframes=4)
+    assert out.name == "encoding25_dt10_s4"
+
+@pytest.mark.unit
+def test_build_output_dir_subframes_s1_backward_compat(tmp_path):
+    out = build_output_dir_subframes(tmp_path / "clip", dt=10, num_subframes=1)
+    assert out.name == "encoding25_dt10"
