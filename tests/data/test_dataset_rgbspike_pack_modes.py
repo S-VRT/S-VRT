@@ -14,7 +14,11 @@ def _patch_video_utils(monkeypatch):
     monkeypatch.setattr(
         utils_video,
         "paired_random_crop",
-        lambda gts, lqs, gt_size, scale, path: (gts, lqs),
+        lambda gts, lqs, gt_size, scale, path: (
+            gts,
+            lqs,
+            {"top": 0, "left": 0, "lq_patch_size": gt_size // scale},
+        ),
     )
     monkeypatch.setattr(utils_video, "augment", lambda imgs, hflip, rot: imgs)
 

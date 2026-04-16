@@ -172,7 +172,7 @@ class TrainDataset(data.Dataset):
             img_gts.append(img_gt)
 
         # randomly crop
-        img_gts, img_lqs = utils_video.paired_random_crop(img_gts, img_lqs, self.gt_size, self.scale, img_gt_path)
+        img_gts, img_lqs, _ = utils_video.paired_random_crop(img_gts, img_lqs, self.gt_size, self.scale, img_gt_path)
 
         # augmentation - flip, rotate
         img_lqs.extend(img_gts)

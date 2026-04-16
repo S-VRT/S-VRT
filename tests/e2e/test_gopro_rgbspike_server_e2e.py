@@ -19,6 +19,11 @@ def _run_server_option_minimal_forward(
     if force_dual_pack_mode:
         train_opt["input_pack_mode"] = "dual"
         train_opt["keep_legacy_l"] = False
+        compat_opt = train_opt.get("compat")
+        if not isinstance(compat_opt, dict):
+            compat_opt = {}
+            train_opt["compat"] = compat_opt
+        compat_opt["keep_legacy_L"] = False
 
     require_paths_or_skip_fn(
         [
@@ -72,7 +77,7 @@ def _run_server_option_minimal_forward(
 
     model.eval()
     with torch.no_grad():
-        y = model(x)
+        y = model(x, flow_spike=sample.get("L_flow_spike", None).unsqueeze(0) if "L_flow_spike" in sample else None)
 
     assert y.ndim == 5
     assert y.size(0) == 1
@@ -101,4 +106,3 @@ def test_server_option_e2e_minimal_forward_forced_dual_path(
         require_paths_or_skip_fn,
         force_dual_pack_mode=True,
     )
-

@@ -297,40 +297,54 @@ class TrainDatasetRGBSpike(data.Dataset):
                 flow_spikes.append(self._load_encoded_flow_spike(clip_name, neighbor))
             img_gt_path_reference = sample['gt_path']
 
-        # randomly crop RGB frames
-        img_gts, img_lqs = utils_video.paired_random_crop(img_gts, img_lqs, self.gt_size, self.scale, img_gt_path_reference)
+        lq_h_orig, lq_w_orig = img_lqs[0].shape[:2]
 
-        # Resize spike voxels to match the cropped RGB size
+        # randomly crop RGB frames
+        img_gts, img_lqs, crop_params = utils_video.paired_random_crop(
+            img_gts, img_lqs, self.gt_size, self.scale, img_gt_path_reference
+        )
+
         cropped_h, cropped_w = img_lqs[0].shape[:2]
+
+        def _crop_resize_chw(arr_chw, expected_channels, name):
+            if arr_chw.ndim != 3:
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] {name} must be [C,H,W], got shape {arr_chw.shape}."
+                )
+            if expected_channels is not None and arr_chw.shape[0] != expected_channels:
+                label = "Spike" if name == "Spike voxel" else name
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] {label} channels mismatch before resize: "
+                    f"expected {expected_channels}, got {arr_chw.shape[0]}."
+                )
+
+            src_h, src_w = arr_chw.shape[1:]
+            ratio_h = src_h / lq_h_orig
+            ratio_w = src_w / lq_w_orig
+            src_top = round(crop_params['top'] * ratio_h)
+            src_left = round(crop_params['left'] * ratio_w)
+            src_crop_h = max(round(crop_params['lq_patch_size'] * ratio_h), 1)
+            src_crop_w = max(round(crop_params['lq_patch_size'] * ratio_w), 1)
+            src_top = max(min(src_top, src_h - src_crop_h), 0)
+            src_left = max(min(src_left, src_w - src_crop_w), 0)
+            arr_cropped = arr_chw[:, src_top:src_top + src_crop_h, src_left:src_left + src_crop_w]
+
+            resized = []
+            for ch in range(arr_cropped.shape[0]):
+                ch_resized = cv2.resize(arr_cropped[ch], (cropped_w, cropped_h), interpolation=cv2.INTER_LINEAR)
+                resized.append(ch_resized)
+            return np.stack(resized, axis=0).astype(np.float32)
+
+        # Crop spike voxels to the RGB-corresponding region, then resize to the RGB crop size.
         spike_voxels_resized = []
         for spike_voxel in spike_voxels:
-            if spike_voxel.ndim != 3:
-                raise ValueError(
-                    f"[TrainDatasetRGBSpike] Spike voxel must be [S,H,W], got shape {spike_voxel.shape}."
-                )
-            if spike_voxel.shape[0] != self.spike_channels:
-                raise ValueError(
-                    f"[TrainDatasetRGBSpike] Spike channels mismatch before resize: "
-                    f"expected {self.spike_channels}, got {spike_voxel.shape[0]}."
-                )
-            # spike_voxel: (S, H, W)
-            spike_voxel_resized = []
-            for ch in range(self.spike_channels):
-                spike_ch = spike_voxel[ch]  # (H, W)
-                spike_ch_resized = cv2.resize(spike_ch, (cropped_w, cropped_h), interpolation=cv2.INTER_LINEAR)
-                spike_voxel_resized.append(spike_ch_resized)
-            spike_voxel_resized = np.stack(spike_voxel_resized, axis=0)  # (S, H, W)
-            spike_voxels_resized.append(spike_voxel_resized)
+            spike_voxels_resized.append(_crop_resize_chw(spike_voxel, self.spike_channels, "Spike voxel"))
 
         flow_spikes_resized = []
         if self.use_encoding25_flow:
             for flow_spike in flow_spikes:
                 validate_encoding25_tensor(flow_spike)
-                flow_resized = []
-                for ch in range(flow_spike.shape[0]):
-                    flow_ch_resized = cv2.resize(flow_spike[ch], (cropped_w, cropped_h), interpolation=cv2.INTER_LINEAR)
-                    flow_resized.append(flow_ch_resized)
-                flow_spikes_resized.append(np.stack(flow_resized, axis=0).astype(np.float32))
+                flow_spikes_resized.append(_crop_resize_chw(flow_spike, 25, "Flow spike"))
 
         # Concatenate RGB and Spike channels
         # Channel Order: 
