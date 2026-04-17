@@ -245,6 +245,36 @@ class ModelPlain(ModelBase):
         if self.opt_train['G_optimizer_reuse']:
             self.save_optimizer(self.save_dir, self.G_optimizer, 'optimizerG', iter_label)
 
+    def save_merged(self, iter_label):
+        """Export LoRA-merged checkpoint (`{iter}_G_merged.pth` / `{iter}_E_merged.pth`).
+
+        Produces state_dicts that are structurally identical to the non-LoRA VRT,
+        so non-LoRA code paths can load them directly.
+        Rank-0 only under DDP; no-op when use_lora is disabled.
+        """
+        import os
+        import copy as _copy
+        if not self.opt.get('train', {}).get('use_lora', False):
+            return
+        if self.opt.get('rank', 0) != 0:
+            return
+        from models.lora import merge_lora
+
+        pairs = [(self.netG, 'G')]
+        if self.opt_train.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
+            pairs.append((self.netE, 'E'))
+
+        for net, tag in pairs:
+            bare = self.get_bare_model(net)
+            net_copy = _copy.deepcopy(bare)
+            merge_lora(net_copy)
+            state_dict = {k: v.detach().cpu() for k, v in net_copy.state_dict().items()}
+            save_path = os.path.join(self.save_dir, f'{iter_label}_{tag}_merged.pth')
+            tmp_path = save_path + '.tmp'
+            torch.save(state_dict, tmp_path)
+            os.replace(tmp_path, save_path)
+            print(f'[Stage C] Saved merged ckpt -> {save_path}')
+
     # ----------------------------------------
     # define loss
     # ----------------------------------------

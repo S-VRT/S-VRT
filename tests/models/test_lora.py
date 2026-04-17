@@ -172,3 +172,48 @@ def test_init_train_injects_lora(monkeypatch, tmp_path):
     assert isinstance(model.netG.proj, LoRALinear)
     assert model.netG.qkv_self.base.weight.requires_grad is False
     assert model.netG.qkv_self.lora_A.weight.requires_grad is True
+
+
+def test_save_merged_writes_fused_ckpt(tmp_path):
+    from models.model_plain import ModelPlain
+    from models.architectures.vrt.attention import WindowAttention
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt = {"train": {"use_lora": True, "E_decay": 0}, "rank": 0, "dist": False}
+    model.opt_train = model.opt["train"]
+    model.save_dir = str(tmp_path)
+    net = WindowAttention(dim=8, window_size=(2, 2, 2), num_heads=2, mut_attn=True)
+    inject_lora(net, ["qkv", "proj"], rank=4, alpha=8)
+    # Perturb LoRA so merge is non-trivial
+    for mod in net.modules():
+        if isinstance(mod, LoRALinear):
+            nn.init.normal_(mod.lora_A.weight, std=0.02)
+            nn.init.normal_(mod.lora_B.weight, std=0.02)
+    model.netG = net
+
+    # Reference structure without LoRA
+    ref = WindowAttention(dim=8, window_size=(2, 2, 2), num_heads=2, mut_attn=True)
+    ref_keys = set(ref.state_dict().keys())
+
+    model.save_merged(iter_label=12345)
+
+    merged_path = tmp_path / "12345_G_merged.pth"
+    assert merged_path.exists()
+    sd = torch.load(merged_path, map_location="cpu", weights_only=True)
+    assert set(sd.keys()) == ref_keys
+    # netG in memory untouched (still has LoRA)
+    assert isinstance(model.netG.qkv_self, LoRALinear)
+
+
+def test_save_merged_noop_without_lora(tmp_path):
+    from models.model_plain import ModelPlain
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt = {"train": {"use_lora": False, "E_decay": 0}, "rank": 0, "dist": False}
+    model.opt_train = model.opt["train"]
+    model.save_dir = str(tmp_path)
+    model.netG = nn.Linear(4, 4)
+
+    model.save_merged(iter_label=1)
+
+    assert list(tmp_path.iterdir()) == []
