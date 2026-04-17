@@ -349,6 +349,20 @@
     }
     ,
     "input_mode": "dual"
+    ,
+    "output_mode": "restoration"
+    ,
+    "restoration_reducer": {
+      "type": "index",
+      "index": 4
+    }
+    ,
+    "spike_encoder": {
+      "enable": true,
+      "type": "pase",
+      "checkpoint": null,
+      "params": {}
+    }
     // 原始入口宽度：RGB 3 + Spike 重建 bins 8 = 11
     // 在 fusion 策略下，对齐前使用的是 raw ingress 宽度；进入 backbone 后会由 fusion.out_chans 决定主干宽度
     ,
@@ -512,6 +526,21 @@
     // 损失函数配置
     // 生成器损失函数类型："charbonnier" 表示使用 Charbonnier 损失（L1 损失的平滑版本）
     "G_lossfn_type": "charbonnier"
+    ,
+    "freeze_backbone": true
+    ,
+    "partial_load": true
+    ,
+    "use_lora": false
+    ,
+    "lora_rank": 8
+    ,
+    "lora_alpha": 16
+    ,
+    "lora_target_modules": [
+      "qkv",
+      "proj"
+    ]
     // 生成器损失函数权重：损失函数的权重系数
     ,
     "G_lossfn_weight": 1.0
