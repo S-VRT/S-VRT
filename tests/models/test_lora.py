@@ -84,3 +84,28 @@ def test_merge_lora_forward_equivalence():
     with torch.no_grad():
         y_after = merged.qkv_self(x)
     assert torch.allclose(y_before, y_after, atol=1e-5), (y_before - y_after).abs().max()
+
+
+def test_freeze_backbone_keeps_lora_trainable():
+    from models.model_plain import freeze_backbone
+
+    class _Wrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = _MiniAttention()
+            # simulate fusion adapter on model root
+            self.fusion_adapter = nn.Linear(8, 3)
+
+    m = _Wrapper()
+    inject_lora(m, ["qkv", "proj"], rank=4, alpha=8)
+    freeze_backbone(m)
+
+    # Base weights of LoRA-wrapped layers frozen
+    assert m.attn.qkv_self.base.weight.requires_grad is False
+    # LoRA adapters trainable
+    assert m.attn.qkv_self.lora_A.weight.requires_grad is True
+    assert m.attn.qkv_self.lora_B.weight.requires_grad is True
+    # Fusion adapter stays trainable
+    assert m.fusion_adapter.weight.requires_grad is True
+    # Non-target Linear is frozen (backbone)
+    assert m.attn.other_linear.weight.requires_grad is False

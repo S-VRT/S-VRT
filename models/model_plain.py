@@ -15,10 +15,13 @@ from utils.utils_regularizers import regularizer_orth, regularizer_clip
 from utils.utils_timer import Timer
 
 
+_TRAINABLE_NAME_MARKERS = ("fusion_adapter", "fusion_operator", "lora_A", "lora_B")
+
+
 def freeze_backbone(model):
-    """Freeze all backbone params and keep fusion-specific params trainable."""
+    """Freeze backbone params; keep fusion adapters and LoRA adapters trainable."""
     for name, param in model.named_parameters():
-        if "fusion_adapter" in name or "fusion_operator" in name:
+        if any(marker in name for marker in _TRAINABLE_NAME_MARKERS):
             param.requires_grad = True
         else:
             param.requires_grad = False
