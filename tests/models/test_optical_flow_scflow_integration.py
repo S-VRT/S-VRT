@@ -135,6 +135,7 @@ def test_load_encoded_flow_spike_returns_correct_shape_and_dtype(tmp_path):
     ds.spike_root = tmp_path
     ds.spike_flow_root = "auto"
     ds.spike_flow_dt = 10
+    ds.spike_flow_subframes = 1
     ds.filename_tmpl = "06d"
 
     result = ds._load_encoded_flow_spike("clip_a", 1)
@@ -153,6 +154,7 @@ def test_load_encoded_flow_spike_explicit_root_overrides_spike_root(tmp_path):
     ds.spike_root = tmp_path / "other"
     ds.spike_flow_root = str(explicit_root)
     ds.spike_flow_dt = 10
+    ds.spike_flow_subframes = 1
     ds.filename_tmpl = "06d"
 
     result = ds._load_encoded_flow_spike("clip_a", 1)
