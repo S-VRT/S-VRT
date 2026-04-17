@@ -109,3 +109,66 @@ def test_freeze_backbone_keeps_lora_trainable():
     assert m.fusion_adapter.weight.requires_grad is True
     # Non-target Linear is frozen (backbone)
     assert m.attn.other_linear.weight.requires_grad is False
+
+
+def test_init_train_injects_lora(monkeypatch, tmp_path):
+    """When train.use_lora=True, init_train should inject LoRA adapters into netG."""
+    from models.model_plain import ModelPlain
+    from models.architectures.vrt.attention import WindowAttention
+
+    opt = {
+        "train": {
+            "use_lora": True,
+            "lora_rank": 4,
+            "lora_alpha": 8,
+            "lora_target_modules": ["qkv", "proj"],
+            "freeze_backbone": True,
+            "E_decay": 0,
+            "G_lossfn_type": "l1",
+            "G_lossfn_weight": 1.0,
+            "G_optimizer_type": "adam",
+            "G_optimizer_lr": 1e-4,
+            "G_optimizer_betas": [0.9, 0.99],
+            "G_optimizer_wd": 0,
+            "G_optimizer_reuse": False,
+            "G_optimizer_clipgrad": None,
+            "G_scheduler_type": "CosineAnnealingWarmRestarts",
+            "G_scheduler_periods": 100,
+            "G_scheduler_restart_weights": 1,
+            "G_scheduler_eta_min": 1e-7,
+            "G_regularizer_orthstep": None,
+            "G_regularizer_clipstep": None,
+            "G_param_strict": False,
+        },
+        "path": {"pretrained_netG": None, "pretrained_netE": None,
+                 "pretrained_optimizerG": None},
+        "rank": 0,
+        "dist": False,
+    }
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt = opt
+    model.opt_train = opt["train"]
+    model.device = torch.device("cpu")
+    model.schedulers = []
+    model.netG = WindowAttention(dim=8, window_size=(2, 2, 2), num_heads=2, mut_attn=True)
+
+    class _DummyTimer:
+        def timer(self, *a, **k):
+            from contextlib import nullcontext
+            return nullcontext()
+    model.timer = _DummyTimer()
+
+    # Stub out calls init_train makes that we don't want to exercise here
+    monkeypatch.setattr(model, "load", lambda: None)
+    monkeypatch.setattr(model, "load_optimizers", lambda: None)
+    monkeypatch.setattr(model, "define_loss", lambda: None)
+    monkeypatch.setattr(model, "define_scheduler", lambda: None)
+    monkeypatch.setattr(model, "get_bare_model", lambda net: net)
+
+    model.init_train()
+
+    assert isinstance(model.netG.qkv_self, LoRALinear)
+    assert isinstance(model.netG.proj, LoRALinear)
+    assert model.netG.qkv_self.base.weight.requires_grad is False
+    assert model.netG.qkv_self.lora_A.weight.requires_grad is True

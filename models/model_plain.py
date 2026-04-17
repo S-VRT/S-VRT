@@ -171,12 +171,27 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     def init_train(self):
         self.load()                           # load model
-        if self.opt.get('train', {}).get('freeze_backbone', False):
-            bare_model = self.get_bare_model(self.netG)
+        train_opt = self.opt.get('train', {})
+        bare_model = self.get_bare_model(self.netG)
+
+        if train_opt.get('use_lora', False):
+            from models.lora import inject_lora
+            targets = train_opt.get('lora_target_modules', ['qkv', 'proj'])
+            rank = int(train_opt.get('lora_rank', 8))
+            alpha = float(train_opt.get('lora_alpha', 16))
+            replaced = inject_lora(bare_model, targets, rank=rank, alpha=alpha)
+            print(f'[Stage C] Injected LoRA(rank={rank}, alpha={alpha}) into '
+                  f'{len(replaced)} Linear layers; targets={targets}')
+            # Mirror into netE so EMA has matching structure for load/save
+            if train_opt.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
+                bare_e = self.get_bare_model(self.netE)
+                inject_lora(bare_e, targets, rank=rank, alpha=alpha)
+
+        if train_opt.get('freeze_backbone', False):
             freeze_backbone(bare_model)
             frozen_count = sum(1 for p in bare_model.parameters() if not p.requires_grad)
             trainable_count = sum(1 for p in bare_model.parameters() if p.requires_grad)
-            print(f'[Stage A] Frozen {frozen_count} params, trainable {trainable_count} params')
+            print(f'[Stage A/C] Frozen {frozen_count} params, trainable {trainable_count} params')
         self.netG.train()                     # set training mode,for BN
         self.define_loss()                    # define loss
         self.define_optimizer()               # define optimizer
