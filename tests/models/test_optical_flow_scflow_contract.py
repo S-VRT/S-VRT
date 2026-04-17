@@ -317,7 +317,7 @@ def test_vrt_rejects_flow_spike_batch_mismatch():
     vrt = VRT.__new__(VRT)
     vrt.spynet = _DummySpikeFlow()
     x = torch.randn(1, 4, 7, 16, 16)
-    with pytest.raises(ValueError, match="B,T"):
+    with pytest.raises(ValueError, match="temporal dim mismatch"):
         vrt.get_flow_2frames(x, flow_spike=torch.randn(2, 4, 25, 16, 16))
 
 
@@ -326,7 +326,7 @@ def test_vrt_rejects_flow_spike_time_mismatch():
     vrt = VRT.__new__(VRT)
     vrt.spynet = _DummySpikeFlow()
     x = torch.randn(1, 4, 7, 16, 16)
-    with pytest.raises(ValueError, match="B,T"):
+    with pytest.raises(ValueError, match="temporal dim mismatch"):
         vrt.get_flow_2frames(x, flow_spike=torch.randn(1, 3, 25, 16, 16))
 
 

@@ -298,7 +298,10 @@ class ModelPlain(ModelBase):
 
             if self._flow_module_name() == 'scflow':
                 if 'L_flow_spike' not in data:
-                    raise ValueError("module=scflow requires data['L_flow_spike'] with shape [B,T,25,H,W]")
+                    raise ValueError(
+                        "module=scflow requires data['L_flow_spike'] with shape [B,T,25,H,W] "
+                        "where T = frames (subframes=1) or frames*subframes (subframes>1)"
+                    )
                 self.L_flow_spike = data['L_flow_spike'].to(self.device)
                 if self.L_flow_spike.ndim != 5 or self.L_flow_spike.size(2) != 25:
                     raise ValueError(

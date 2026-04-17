@@ -701,7 +701,10 @@ class VRT(nn.Module):
                 raise ValueError(f"SCFlow requires flow_spike ndim=5 [B,T,25,H,W], got {tuple(flow_spike.shape)}")
             if flow_spike.size(0) != b or flow_spike.size(1) != n:
                 raise ValueError(
-                    f"SCFlow requires flow_spike matching [B,T], got flow_spike={tuple(flow_spike.shape)} for x={tuple(x.shape)}"
+                    f"SCFlow flow_spike temporal dim mismatch: "
+                    f"flow_spike.shape={tuple(flow_spike.shape)}, x.shape={tuple(x.shape)}. "
+                    f"After early fusion, x has {n} temporal steps. "
+                    f"Ensure spike_flow.subframes matches spike_channels."
                 )
             if flow_spike.size(2) != 25:
                 raise ValueError(f"SCFlow requires flow_spike channels=25, got {flow_spike.size(2)}")
