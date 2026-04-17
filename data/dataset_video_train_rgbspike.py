@@ -10,7 +10,7 @@ import cv2
 import utils.utils_video as utils_video
 from data.spike_recc import SpikeStream, voxelize_spikes_tfp
 from data.spike_recc.middle_tfp.reconstructor import MiddleTFPReconstructor
-from data.spike_recc.encoding25 import validate_encoding25_tensor
+from data.spike_recc.encoding25 import validate_encoding25_tensor, validate_subframes_tensor
 
 
 class TrainDatasetRGBSpike(data.Dataset):
@@ -126,6 +126,13 @@ class TrainDatasetRGBSpike(data.Dataset):
                 f"[TrainDatasetRGBSpike] Conflicting channel settings: spike_channels={int(opt['spike_channels'])} "
                 f"vs spike.reconstruction.num_bins={int(nested_num_bins)}."
             )
+        if self.use_encoding25_flow and self.spike_flow_subframes > 1:
+            if self.spike_flow_subframes != self.spike_channels:
+                raise ValueError(
+                    f"spike_flow.subframes ({self.spike_flow_subframes}) must equal "
+                    f"spike_channels ({self.spike_channels}) for early-fusion temporal "
+                    f"axis alignment."
+                )
         self.spike_flipud = opt.get('spike_flipud', True)
         self.tfp_half_win_length = opt.get('tfp_half_win_length', 20)
         spike_reconstruction_cfg = spike_reconstruction_nested or opt.get('spike_reconstruction', 'spikecv_tfp')
@@ -343,9 +350,9 @@ class TrainDatasetRGBSpike(data.Dataset):
         flow_spikes_resized = []
         if self.use_encoding25_flow:
             for flow_spike in flow_spikes:
-                if flow_spike.ndim == 4:
+                if self.spike_flow_subframes > 1:
                     # Subframe mode: [S, 25, H, W] → crop each sub-window independently
-                    for s_idx in range(flow_spike.shape[0]):
+                    for s_idx in range(self.spike_flow_subframes):
                         sub_window = flow_spike[s_idx]  # [25, H, W]
                         validate_encoding25_tensor(sub_window)
                         flow_spikes_resized.append(_crop_resize_chw(sub_window, 25, "Flow spike"))
@@ -537,7 +544,6 @@ class TrainDatasetRGBSpike(data.Dataset):
                     "Run prepare_scflow_encoding25.py --subframes first."
                 )
             arr = np.load(path).astype(np.float32)
-            from data.spike_recc.encoding25 import validate_subframes_tensor
             validate_subframes_tensor(arr, self.spike_flow_subframes)
             return arr
         else:
