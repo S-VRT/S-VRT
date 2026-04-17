@@ -4,6 +4,12 @@
 **Status:** Draft  
 **Scope:** EarlyFusionAdapter 重设计 — 空间对齐、时间展开、选帧输出、训练策略
 
+> **Update (2026-04-16):** 本 spec 只涉及 restoration 主干的时间展开（N→N×S）。
+> 光流路径（SCFlow）的时间轴对齐由子帧 encoding25 设计补充：
+> `flow_spike` 也扩展到 `[B, N×S, 25, H, W]`，使 `get_flow_2frames()` 的时间维度自然匹配。
+> 约束：`spike_flow.subframes` 必须等于 `spike_channels`。
+> 详见 `docs/superpowers/specs/2026-04-16-scflow-subframe-encoding25-design.md`。
+
 ---
 
 ## 1. 背景与问题陈述

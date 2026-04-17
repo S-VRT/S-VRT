@@ -1,5 +1,11 @@
 # S-VRT SCFlow Strict Semantic Integration Design
 
+> **Update (2026-04-16):** 本 spec 的 encoding25 契约已被子帧扩展（subframe encoding25）所扩展。
+> 当 early fusion 启用时，`L_flow_spike` 的时间维度从 N 变为 N×S（S = `spike_flow.subframes`），
+> artifact 目录变为 `encoding25_dt{dt}_s{S}`。全局 `center_offset + k × dt` 索引方案已废弃，
+> 改为基于每个 `.dat` 自身 T_raw 的局部子中心选取。
+> 详见 `docs/superpowers/specs/2026-04-16-scflow-subframe-encoding25-design.md`。
+
 ## 1. Background
 
 Current SCFlow integration in S-VRT is contract-incomplete:
