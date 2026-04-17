@@ -141,7 +141,8 @@
       "spike_flow": {
         "representation": "encoding25",
         "dt": 10,
-        "root": "auto"
+        "root": "auto",
+        "subframes": 4
       }
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
@@ -266,7 +267,8 @@
       "spike_flow": {
         "representation": "encoding25",
         "dt": 10,
-        "root": "auto"
+        "root": "auto",
+        "subframes": 4
       }
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
