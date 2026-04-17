@@ -14,7 +14,9 @@ from data.spike_recc.encoding25 import (
 )
 from models.architectures.vrt.vrt import VRT
 from models.model_plain import ModelPlain
+from models.op.spatial_correlation import spatial_correlation_sample
 from models.optical_flow.scflow.wrapper import SCFlowWrapper
+from models.optical_flow.scflow.models.scflow import SpikeRepresentation
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +206,32 @@ def test_scflow_wrapper_forward_passes_dt_to_model():
     spk2 = torch.randn(1, 25, 16, 16)
     wrapper.forward(spk1, spk2)
     assert mock_model.received_dt == 10
+
+
+@pytest.mark.integration
+def test_scflow_spike_representation_warp_accepts_nchw_flow_layout():
+    rep = SpikeRepresentation(batchNorm=False)
+    seq = torch.randn(2, 25, 8, 8)
+    flow = torch.zeros(2, 2, 8, 8)
+    out = rep.warp_slices(seq, flow, dt=10)
+    assert tuple(out.shape) == tuple(seq.shape)
+
+
+@pytest.mark.integration
+def test_spatial_correlation_sample_zero_displacement_plane_matches_pointwise_dot():
+    x = torch.randn(1, 3, 5, 5)
+    out = spatial_correlation_sample(
+        x,
+        x,
+        kernel_size=1,
+        patch_size=9,
+        stride=1,
+        padding=0,
+        dilation_patch=1,
+    )
+    zero_disp = out[:, 4, 4, :, :]
+    expected = (x * x).sum(dim=1)
+    assert torch.allclose(zero_disp, expected)
 
 
 # ---------------------------------------------------------------------------

@@ -246,21 +246,33 @@ def main():
                                                    drop_last=True, seed=seed)  # 使用基础种子，不是 seed_rank
                 # 创建数据加载器
                 # 批次大小需要除以 GPU 数量，因为每个 GPU 处理一部分数据
-                train_loader = DataLoader(train_set,
-                                          batch_size=dataset_opt['dataloader_batch_size']//opt['num_gpu'],
-                                          shuffle=False,  # 分布式训练时由 sampler 控制打乱
-                                          num_workers=dataset_opt['dataloader_num_workers']//opt['num_gpu'],  # 每个 GPU 的工作进程数
-                                          drop_last=True,  # 丢弃最后一个不完整的批次
-                                          pin_memory=True,  # 将数据固定在内存中，加速 GPU 传输
-                                          sampler=train_sampler)  # 使用分布式采样器
+                per_gpu_train_workers = dataset_opt['dataloader_num_workers']//opt['num_gpu']
+                train_loader_kwargs = dict(
+                    batch_size=dataset_opt['dataloader_batch_size']//opt['num_gpu'],
+                    shuffle=False,  # 分布式训练时由 sampler 控制打乱
+                    num_workers=per_gpu_train_workers,  # 每个 GPU 的工作进程数
+                    drop_last=True,  # 丢弃最后一个不完整的批次
+                    pin_memory=True,  # 将数据固定在内存中，加速 GPU 传输
+                    sampler=train_sampler,  # 使用分布式采样器
+                )
+                if per_gpu_train_workers > 0:
+                    train_loader_kwargs['persistent_workers'] = dataset_opt.get('dataloader_persistent_workers', False)
+                    train_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
+                train_loader = DataLoader(train_set, **train_loader_kwargs)
             else:
                 # 单 GPU 训练模式
-                train_loader = DataLoader(train_set,
-                                          batch_size=dataset_opt['dataloader_batch_size'],
-                                          shuffle=dataset_opt['dataloader_shuffle'],
-                                          num_workers=dataset_opt['dataloader_num_workers'],
-                                          drop_last=True,
-                                          pin_memory=True)
+                train_num_workers = dataset_opt['dataloader_num_workers']
+                train_loader_kwargs = dict(
+                    batch_size=dataset_opt['dataloader_batch_size'],
+                    shuffle=dataset_opt['dataloader_shuffle'],
+                    num_workers=train_num_workers,
+                    drop_last=True,
+                    pin_memory=True,
+                )
+                if train_num_workers > 0:
+                    train_loader_kwargs['persistent_workers'] = dataset_opt.get('dataloader_persistent_workers', False)
+                    train_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
+                train_loader = DataLoader(train_set, **train_loader_kwargs)
 
         elif phase == 'test':
             # 创建测试/验证数据集
@@ -301,21 +313,31 @@ def main():
                 # 例如：9个样本，3个GPU -> 每个GPU分配3个样本
                 #      10个样本，3个GPU -> rank0:4个, rank1:3个, rank2:3个
                 # drop_last=False确保所有数据都会被处理，即使分配不完全均匀
-                test_loader = DataLoader(test_set,
-                                         batch_size=per_gpu_batch_size,
-                                         shuffle=False,
-                                         num_workers=per_gpu_num_workers,
-                                         drop_last=False,
-                                         pin_memory=True,
-                                         sampler=test_sampler)
+                test_loader_kwargs = dict(
+                    batch_size=per_gpu_batch_size,
+                    shuffle=False,
+                    num_workers=per_gpu_num_workers,
+                    drop_last=False,
+                    pin_memory=True,
+                    sampler=test_sampler,
+                )
+                if per_gpu_num_workers > 0:
+                    test_loader_kwargs['persistent_workers'] = dataset_opt.get('dataloader_persistent_workers', False)
+                    test_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
+                test_loader = DataLoader(test_set, **test_loader_kwargs)
             else:
                 # 单卡验证 / 测试
-                test_loader = DataLoader(test_set,
-                                         batch_size=test_batch_size,
-                                         shuffle=test_shuffle,
-                                         num_workers=test_num_workers,
-                                         drop_last=False,
-                                         pin_memory=True)
+                test_loader_kwargs = dict(
+                    batch_size=test_batch_size,
+                    shuffle=test_shuffle,
+                    num_workers=test_num_workers,
+                    drop_last=False,
+                    pin_memory=True,
+                )
+                if test_num_workers > 0:
+                    test_loader_kwargs['persistent_workers'] = dataset_opt.get('dataloader_persistent_workers', False)
+                    test_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
+                test_loader = DataLoader(test_set, **test_loader_kwargs)
         else:
             raise NotImplementedError("Phase [%s] is not recognized." % phase)
 

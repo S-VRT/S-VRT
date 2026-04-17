@@ -40,7 +40,9 @@ DEFAULT_GOPRO_ROOT="/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large"
 DEFAULT_SPIKE_ROOT="/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq"
 DEFAULT_GPU_COUNT=1
 
-if [[ -x ".venv/bin/python" ]]; then
+if command -v uv >/dev/null 2>&1 && uv run python -c "import sys" >/dev/null 2>&1; then
+    PYTHON_BIN="$(uv run python -c 'import sys; print(sys.executable)')"
+elif [[ -x ".venv/bin/python" ]]; then
     PYTHON_BIN="$(pwd)/.venv/bin/python"
 elif command -v python >/dev/null 2>&1; then
     PYTHON_BIN="$(command -v python)"
@@ -48,6 +50,12 @@ else
     echo "Python not found."
     exit 1
 fi
+
+export CUDA_HOME=/usr/local/cuda-13.0
+export PATH="$(dirname "$PYTHON_BIN"):/usr/local/cuda-13.0/bin:$PATH"
+export LD_LIBRARY_PATH="$(dirname "$PYTHON_BIN")/../lib/python3.11/site-packages/torch/lib:/usr/local/cuda-13.0/lib64:${LD_LIBRARY_PATH:-}"
+export TORCH_CUDA_ARCH_LIST=8.9
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Parse arguments
 GPU_COUNT=""
@@ -221,7 +229,12 @@ ensure_python_package() {
     fi
 
     echo "Dependency check: ${pip_name} missing, installing..."
-    "$PYTHON_BIN" -m pip install "${pip_name}"
+    if command -v uv >/dev/null 2>&1; then
+        uv pip install --python "$PYTHON_BIN" "${pip_name}"
+    else
+        "$PYTHON_BIN" -m ensurepip --upgrade
+        "$PYTHON_BIN" -m pip install "${pip_name}"
+    fi
 }
 
 ensure_python_package_version() {
@@ -254,7 +267,12 @@ PY
     fi
 
     echo "Dependency check: ${pip_name} incompatible or missing, installing..."
-    "$PYTHON_BIN" -m pip install "${pip_name}"
+    if command -v uv >/dev/null 2>&1; then
+        uv pip install --python "$PYTHON_BIN" "${pip_name}"
+    else
+        "$PYTHON_BIN" -m ensurepip --upgrade
+        "$PYTHON_BIN" -m pip install "${pip_name}"
+    fi
 }
 
 ensure_dcnv4_module() {
@@ -477,11 +495,11 @@ else
         echo "  GPUs: $GPU_COUNT"
         echo "  CUDA_VISIBLE_DEVICES: $GPU_LIST"
         echo ""
-        echo "Running: torchrun --nproc_per_node=$GPU_COUNT main_train_vrt.py --opt $RUNTIME_CONFIG"
+        echo "Running: $PYTHON_BIN -m torch.distributed.run --nproc_per_node=$GPU_COUNT main_train_vrt.py --opt $RUNTIME_CONFIG"
         echo "=========================================="
         
         CUDA_VISIBLE_DEVICES="$GPU_LIST" \
-        torchrun \
+        "$PYTHON_BIN" -m torch.distributed.run \
             --nproc_per_node="$GPU_COUNT" \
             --standalone \
             main_train_vrt.py --opt "$RUNTIME_CONFIG"

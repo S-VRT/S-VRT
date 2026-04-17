@@ -18,6 +18,13 @@ class SpikeRepresentation(nn.Module):
         self.conv_s1 = conv(self.batchNorm,  25, 32, kernel_size=3, stride=1)
         self.conv_s2 = conv(self.batchNorm,  32, 32, kernel_size=3, stride=1)
 
+    @staticmethod
+    def _warp_with_nchw_flow(x, flow):
+        """SCFlow tracks flow as [N,2,H,W]; adapt to the repo-wide flow_warp API."""
+        if flow.ndim != 4 or flow.size(1) != 2:
+            raise ValueError(f"SCFlow warp expects flow [N,2,H,W], got {tuple(flow.shape)}")
+        return flow_warp(x, flow.permute(0, 2, 3, 1).contiguous())
+
     def warp_slices(self, seq, flow, dt=10):
         b, c, h, w = seq.shape
         seq = seq.reshape([b*c, 1, h, w])
@@ -27,14 +34,14 @@ class SpikeRepresentation(nn.Module):
         flow = flow.unsqueeze(dim=1)
         factored_flow = flow * flow_factor
         factored_flow = factored_flow.reshape([b*c, 2, h, w])
-        seq = flow_warp(seq, factored_flow)
+        seq = self._warp_with_nchw_flow(seq, factored_flow)
         seq = seq.reshape([b, c, h, w])
         return seq
 
     def forward(self, seq, flow_input, dt=10, warp=False):
         # mask generation
         if warp:
-            flow_input = flow_warp(flow_input, -1*flow_input)
+            flow_input = self._warp_with_nchw_flow(flow_input, -1 * flow_input)
         
         flow = flow_input.clone().detach()
 
@@ -158,7 +165,7 @@ class SCFlow(nn.Module):
                 x2_warp = x2
             else:
                 flow = F.interpolate(flow * 2, scale_factor=2, mode='bilinear', align_corners=True)
-                x2_warp = flow_warp(x2, flow)
+                x2_warp = SpikeRepresentation._warp_with_nchw_flow(x2, flow)
             
             # correlation
             out_corr = corr(x1, x2_warp)

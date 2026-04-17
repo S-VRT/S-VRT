@@ -36,6 +36,7 @@ def _run_server_option_minimal_forward(
 
     dataset = TrainDatasetRGBSpike(train_opt)
     sample = dataset[0]
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if force_dual_pack_mode:
         assert "L" not in sample
@@ -74,10 +75,15 @@ def _run_server_option_minimal_forward(
         ),
         opt=opt,
     )
+    model = model.to(device)
+    x = x.to(device)
 
     model.eval()
+    flow_spike = sample.get("L_flow_spike", None)
+    if flow_spike is not None:
+        flow_spike = flow_spike.unsqueeze(0).to(device)
     with torch.no_grad():
-        y = model(x, flow_spike=sample.get("L_flow_spike", None).unsqueeze(0) if "L_flow_spike" in sample else None)
+        y = model(x, flow_spike=flow_spike)
 
     assert y.ndim == 5
     assert y.size(0) == 1

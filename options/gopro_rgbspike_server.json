@@ -116,7 +116,7 @@
       }
       // Spike 重建 bin 数：legacy 字段名仍叫 spike_channels，但语义上仅表示 Spike 表征宽度
       ,
-      "spike_channels": 8
+      "spike_channels": 4
       ,
       "input_pack_mode": "dual"
       ,
@@ -129,7 +129,7 @@
       "spike": {
         "reconstruction": {
           "type": "spikecv_tfp",
-          "num_bins": 8
+          "num_bins": 4
         }
       }
       // Spike 重建配置：使用字典级配置项
@@ -180,7 +180,7 @@
       "num_frame": 6
       // 真实标签图像尺寸：训练时裁剪的真实标签图像大小（像素）
       ,
-      "gt_size": 160
+      "gt_size": 64
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -206,7 +206,7 @@
       "dataloader_num_workers": 12
       // 批次大小：每个批次包含的样本数量
       ,
-      "dataloader_batch_size": 9
+      "dataloader_batch_size": 2
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -242,7 +242,7 @@
       "spike_w": 640
       // Spike 重建 bin 数：legacy 字段名仍叫 spike_channels，但语义上仅表示 Spike 表征宽度
       ,
-      "spike_channels": 8
+      "spike_channels": 4
       ,
       "input_pack_mode": "dual"
       ,
@@ -255,7 +255,7 @@
       "spike": {
         "reconstruction": {
           "type": "spikecv_tfp",
-          "num_bins": 8
+          "num_bins": 4
         }
       }
       // Spike 重建配置：使用字典级配置项
@@ -319,7 +319,7 @@
       "dataloader_num_workers": 12
       // 测试/验证批次大小：可根据显存调整
       ,
-      "dataloader_batch_size": 9
+      "dataloader_batch_size": 2
     }
   }
   // ========================================
@@ -333,7 +333,7 @@
     "input": {
       "strategy": "fusion",
       "mode": "dual",
-      "raw_ingress_chans": 11
+      "raw_ingress_chans": 7
     }
     ,
     // concat 与 fusion 是并列输入策略；当前配置选择 fusion，因此 concat 留空
@@ -352,7 +352,7 @@
     // 原始入口宽度：RGB 3 + Spike 重建 bins 8 = 11
     // 在 fusion 策略下，对齐前使用的是 raw ingress 宽度；进入 backbone 后会由 fusion.out_chans 决定主干宽度
     ,
-    "in_chans": 11
+    "in_chans": 7
     // 上采样倍数：1 表示不进行上采样（保持原始分辨率）
     ,
     "upscale": 1
@@ -360,8 +360,8 @@
     ,
     "img_size": [
       6,
-      160,
-      160
+      64,
+      64
     ]
     // 窗口大小：[时间, 高度, 宽度]，[4,8,8] 表示 4 帧时间窗口，8x8 空间窗口
     ,
@@ -623,7 +623,7 @@
     "num_frame_overlapping": 2
     // 测试时的补丁大小：160 表示将大图像分割成 160x160 的补丁进行测试
     ,
-    "size_patch_testing": 160
+    "size_patch_testing": 64
     // 测试时的补丁重叠大小：20 表示相邻测试补丁之间有 20 像素重叠（用于滑动窗口测试）
     ,
     "size_patch_overlapping": 20
