@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -124,3 +124,85 @@ def build_output_dir_subframes(clip_dir: Path, dt: int, num_subframes: int) -> P
     if dt <= 0:
         raise ValueError(f"dt must be > 0, got {dt}")
     return Path(clip_dir) / f"encoding25_dt{int(dt)}_s{int(num_subframes)}"
+
+
+def resolve_encoding25_format(
+    format_value: str,
+    *,
+    base_path: Path,
+) -> Tuple[str, Path]:
+    """Resolve artifact format and concrete path from a base path without extension."""
+    normalized = str(format_value or "auto").strip().lower()
+    if normalized not in {"auto", "npy", "dat"}:
+        raise ValueError(f"Unsupported encoding25 format: {format_value!r}")
+
+    npy_path = base_path.with_suffix(".npy")
+    dat_path = base_path.with_suffix(".dat")
+
+    if normalized == "npy":
+        return "npy", npy_path
+    if normalized == "dat":
+        return "dat", dat_path
+
+    if npy_path.exists():
+        return "npy", npy_path
+    if dat_path.exists():
+        return "dat", dat_path
+    raise FileNotFoundError(f"Missing encoding25 artifact: {npy_path} or {dat_path}")
+
+
+def _validate_binary_tensor(arr: np.ndarray) -> None:
+    if arr.dtype == np.bool_:
+        return
+    if np.issubdtype(arr.dtype, np.integer):
+        unique = np.unique(arr)
+        if unique.size <= 2 and np.all((unique == 0) | (unique == 1)):
+            return
+    raise ValueError(f"encoding25 .dat save expects binary spike tensor, got dtype={arr.dtype}")
+
+
+def save_encoding25_artifact(path: Path, arr: np.ndarray, artifact_format: str) -> None:
+    """Save encoding25 tensor as .npy or packed-binary .dat."""
+    normalized = str(artifact_format).strip().lower()
+    if normalized == "npy":
+        np.save(path.with_suffix(".npy"), arr)
+        return
+    if normalized != "dat":
+        raise ValueError(f"Unsupported encoding25 artifact format: {artifact_format!r}")
+
+    _validate_binary_tensor(arr)
+    bool_arr = arr.astype(bool, copy=False)
+    packed = np.packbits(bool_arr.reshape(-1).astype(np.uint8), bitorder="little")
+    path.with_suffix(".dat").write_bytes(packed.tobytes())
+
+
+def load_encoding25_artifact_with_shape(
+    base_path: Path,
+    *,
+    artifact_format: str = "auto",
+    num_subframes: int = 1,
+    spike_h: int,
+    spike_w: int,
+) -> np.ndarray:
+    """Load encoding25 tensor from .npy or packed-binary .dat with explicit spatial shape."""
+    resolved_format, path = resolve_encoding25_format(artifact_format, base_path=base_path)
+    if resolved_format == "npy":
+        arr = np.load(path).astype(np.float32)
+    else:
+        raw = np.fromfile(path, dtype=np.uint8)
+        expected_values = int(num_subframes) * WINDOW_LENGTH * int(spike_h) * int(spike_w)
+        unpacked = np.unpackbits(raw, bitorder="little")
+        if unpacked.size < expected_values:
+            raise ValueError(
+                f"encoding25 packed artifact too small: {path}, expected at least {expected_values} values, "
+                f"got {unpacked.size}"
+            )
+        if num_subframes > 1:
+            arr = unpacked[:expected_values].reshape(num_subframes, WINDOW_LENGTH, spike_h, spike_w).astype(np.float32)
+        else:
+            arr = unpacked[:expected_values].reshape(WINDOW_LENGTH, spike_h, spike_w).astype(np.float32)
+    if num_subframes > 1:
+        validate_subframes_tensor(arr, num_subframes)
+    else:
+        validate_encoding25_tensor(arr)
+    return arr

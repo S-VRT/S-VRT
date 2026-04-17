@@ -12,7 +12,7 @@ import utils.utils_video as utils_video
 from data.spike_recc import SpikeStream, voxelize_spikes_tfp
 from data.spike_recc.middle_tfp.reconstructor import MiddleTFPReconstructor
 from data.spike_recc.snn.reconstructor import SNNReconstructor
-from data.spike_recc.encoding25 import validate_encoding25_tensor
+from data.spike_recc.encoding25 import load_encoding25_artifact_with_shape, validate_encoding25_tensor
 
 
 class TestDataset(data.Dataset):
@@ -344,6 +344,7 @@ class TrainDatasetRGBSpike(data.Dataset):
         self.spike_flow_representation = str(spike_flow_cfg.get('representation', '')).strip().lower()
         self.spike_flow_dt = int(spike_flow_cfg.get('dt', 10))
         self.spike_flow_root = spike_flow_cfg.get('root', 'auto')
+        self.spike_flow_format = str(spike_flow_cfg.get('format', 'auto')).strip().lower()
         self.use_encoding25_flow = self.spike_flow_representation == 'encoding25'
 
         flow_module = str(optical_flow_module or '').strip().lower()
@@ -368,13 +369,20 @@ class TrainDatasetRGBSpike(data.Dataset):
 
         flow_tensors = []
         for frame_name in frame_names:
-            flow_path = os.path.join(flow_clip_dir, f'{frame_name}.npy')
-            if not os.path.exists(flow_path):
-                raise ValueError(
-                    f"Missing encoding25 artifact: {flow_path}. "
-                    "Run scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py first."
+            base_path = Path(flow_clip_dir) / frame_name
+            try:
+                arr = load_encoding25_artifact_with_shape(
+                    base_path,
+                    artifact_format=self.spike_flow_format,
+                    num_subframes=1,
+                    spike_h=self.spike_h,
+                    spike_w=self.spike_w,
                 )
-            arr = np.load(flow_path).astype(np.float32)
+            except FileNotFoundError as exc:
+                raise ValueError(
+                    f"Missing encoding25 artifact: {base_path}.npy or .dat. "
+                    "Run scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py first."
+                ) from exc
             validate_encoding25_tensor(arr)
             resized = []
             for ch in range(arr.shape[0]):

@@ -10,7 +10,11 @@ import cv2
 import utils.utils_video as utils_video
 from data.spike_recc import SpikeStream, voxelize_spikes_tfp
 from data.spike_recc.middle_tfp.reconstructor import MiddleTFPReconstructor
-from data.spike_recc.encoding25 import validate_encoding25_tensor, validate_subframes_tensor
+from data.spike_recc.encoding25 import (
+    load_encoding25_artifact_with_shape,
+    validate_encoding25_tensor,
+    validate_subframes_tensor,
+)
 
 
 class TrainDatasetRGBSpike(data.Dataset):
@@ -520,6 +524,7 @@ class TrainDatasetRGBSpike(data.Dataset):
         self.spike_flow_dt = int(spike_flow_cfg.get('dt', 10))
         self.spike_flow_root = spike_flow_cfg.get('root', 'auto')
         self.spike_flow_subframes = int(spike_flow_cfg.get('subframes', 1))
+        self.spike_flow_format = str(spike_flow_cfg.get('format', 'auto')).strip().lower()
         self.use_encoding25_flow = self.spike_flow_representation == 'encoding25'
 
         flow_module = str(optical_flow_module or '').strip().lower()
@@ -537,23 +542,37 @@ class TrainDatasetRGBSpike(data.Dataset):
 
         if self.spike_flow_subframes > 1:
             dir_name = f'encoding25_dt{self.spike_flow_dt}_s{self.spike_flow_subframes}'
-            path = flow_root / clip_name / dir_name / f'{frame_name}.npy'
-            if not path.exists():
-                raise ValueError(
-                    f"Missing subframe encoding25 artifact: {path}. "
-                    "Run prepare_scflow_encoding25.py --subframes first."
+            base_path = flow_root / clip_name / dir_name / frame_name
+            try:
+                arr = load_encoding25_artifact_with_shape(
+                    base_path,
+                    artifact_format=self.spike_flow_format,
+                    num_subframes=self.spike_flow_subframes,
+                    spike_h=self.spike_h,
+                    spike_w=self.spike_w,
                 )
-            arr = np.load(path).astype(np.float32)
+            except FileNotFoundError as exc:
+                raise ValueError(
+                    f"Missing subframe encoding25 artifact: {base_path}.npy or .dat. "
+                    "Run prepare_scflow_encoding25.py --subframes first."
+                ) from exc
             validate_subframes_tensor(arr, self.spike_flow_subframes)
             return arr
         else:
-            path = flow_root / clip_name / f'encoding25_dt{self.spike_flow_dt}' / f'{frame_name}.npy'
-            if not path.exists():
-                raise ValueError(
-                    f"Missing encoding25 artifact: {path}. "
-                    "Run scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py first."
+            base_path = flow_root / clip_name / f'encoding25_dt{self.spike_flow_dt}' / frame_name
+            try:
+                arr = load_encoding25_artifact_with_shape(
+                    base_path,
+                    artifact_format=self.spike_flow_format,
+                    num_subframes=1,
+                    spike_h=self.spike_h,
+                    spike_w=self.spike_w,
                 )
-            arr = np.load(path).astype(np.float32)
+            except FileNotFoundError as exc:
+                raise ValueError(
+                    f"Missing encoding25 artifact: {base_path}.npy or .dat. "
+                    "Run scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py first."
+                ) from exc
             validate_encoding25_tensor(arr)
             return arr
 
