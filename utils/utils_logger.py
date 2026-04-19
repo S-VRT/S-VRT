@@ -140,13 +140,14 @@ def logger_info(logger_name, log_path='default_logger.log', opt=None):
         log.addHandler(sh)
 
     if opt is not None:
-        bridge = _LogfireBridge(opt, logger=log)
-        log._svrt_logfire_bridge = bridge
+        bridge = getattr(log, '_svrt_logfire_bridge', None)
+        if bridge is None:
+            bridge = _LogfireBridge(opt, logger=log)
+            log._svrt_logfire_bridge = bridge
+
         existing_logfire_handlers = [
             handler for handler in log.handlers if isinstance(handler, _LogfireLoggingHandler)
         ]
-        for handler in existing_logfire_handlers:
-            handler.bridge = bridge
         if bridge.enabled and bridge.text_enabled and not existing_logfire_handlers:
             log.addHandler(_LogfireLoggingHandler(bridge))
 
@@ -175,7 +176,8 @@ def emit_launch_wrapper_log(
         'launch_command': launch_command,
     }
 
-    log_method = getattr(logger, str(level).lower(), logger.info)
+    effective_level = 'error' if str(launch_stream).lower() == 'stderr' else str(level).lower()
+    log_method = getattr(logger, effective_level, logger.info)
     log_method(message, extra=extra)
 
 

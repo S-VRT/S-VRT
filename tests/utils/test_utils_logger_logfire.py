@@ -392,6 +392,7 @@ def test_emit_launch_wrapper_log_uses_existing_main_logger(monkeypatch, tmp_path
     assert text_events[0][2]["launch_stream"] == "stdout"
     assert text_events[0][2]["launch_phase"] == "train"
     assert text_events[0][2]["launch_mode"] == "local_single"
+    assert text_events[0][2]["launch_command"] == "python main_train_vrt.py --opt opt.json"
 
 
 def test_emit_launch_wrapper_log_maps_stderr_to_error(monkeypatch, tmp_path):
@@ -399,7 +400,7 @@ def test_emit_launch_wrapper_log_maps_stderr_to_error(monkeypatch, tmp_path):
     monkeypatch.setattr(utils_logger, "LOGFIRE_AVAILABLE", True)
     monkeypatch.setattr(utils_logger, "logfire", fake)
 
-    logger_name = "train"
+    logger_name = "train_stderr"
     py_logger = logging.getLogger(logger_name)
     py_logger.handlers = []
     py_logger.propagate = False
@@ -409,7 +410,7 @@ def test_emit_launch_wrapper_log_maps_stderr_to_error(monkeypatch, tmp_path):
 
     utils_logger.emit_launch_wrapper_log(
         logger_name=logger_name,
-        level="error",
+        level="info",
         message="traceback line",
         log_origin="launch_wrapper",
         launch_stream="stderr",
@@ -427,3 +428,4 @@ def test_emit_launch_wrapper_log_maps_stderr_to_error(monkeypatch, tmp_path):
     assert error_events[0][2]["message"] == "traceback line"
     assert error_events[0][2]["launch_stream"] == "stderr"
     assert error_events[0][2]["launch_mode"] == "platform_ddp"
+    assert error_events[0][2]["launch_command"] == "python -u main_train_vrt.py --opt opt.json"
