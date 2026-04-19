@@ -176,8 +176,13 @@ def emit_launch_wrapper_log(
         'launch_command': launch_command,
     }
 
-    effective_level = 'error' if str(launch_stream).lower() == 'stderr' else str(level).lower()
-    log_method = getattr(logger, effective_level, logger.info)
+    effective_level = 'error' if (launch_stream and launch_stream.lower() == 'stderr') else str(level).lower()
+    valid_levels = {'debug', 'info', 'warning', 'error', 'critical'}
+    if effective_level not in valid_levels:
+        raise ValueError(
+            f'Invalid log level "{effective_level}". Must be one of {sorted(valid_levels)}.'
+        )
+    log_method = getattr(logger, effective_level)
     log_method(message, extra=extra)
 
 
