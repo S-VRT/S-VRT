@@ -173,7 +173,7 @@ def main():
     if opt['rank'] == 0:
         logger_name = 'train'
         # 设置日志文件路径
-        utils_logger.logger_info(logger_name, os.path.join(opt['path']['log'], logger_name+'.log'))
+        utils_logger.logger_info(logger_name, os.path.join(opt['path']['log'], logger_name+'.log'), opt=opt)
         logger = logging.getLogger(logger_name)
         # 记录完整的配置信息到日志
         logger.info(option.dict2str(opt))

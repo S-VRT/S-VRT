@@ -88,6 +88,22 @@ def parse(opt_path, is_train=True):
         opt['logging']['swanlab_run_id'] = None
     if 'swanlab_run_id_file' not in opt['logging']:
         opt['logging']['swanlab_run_id_file'] = None
+    if 'use_logfire' not in opt['logging']:
+        opt['logging']['use_logfire'] = False
+    if 'logfire_token' not in opt['logging']:
+        opt['logging']['logfire_token'] = None
+    if 'logfire_project_name' not in opt['logging']:
+        opt['logging']['logfire_project_name'] = None
+    if 'logfire_service_name' not in opt['logging']:
+        opt['logging']['logfire_service_name'] = 's-vrt'
+    if 'logfire_environment' not in opt['logging']:
+        opt['logging']['logfire_environment'] = None
+    if 'logfire_log_text' not in opt['logging']:
+        opt['logging']['logfire_log_text'] = True
+    if 'logfire_log_metrics' not in opt['logging']:
+        opt['logging']['logfire_log_metrics'] = True
+    if 'logfire_log_timings' not in opt['logging']:
+        opt['logging']['logfire_log_timings'] = True
 
     # ----------------------------------------
     # datasets
