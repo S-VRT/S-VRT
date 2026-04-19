@@ -427,7 +427,7 @@
     // 可变形卷积类型：选择使用的可变形卷积实现（DCNv2 或 DCNv4）
     //   - "DCNv2": 使用传统的 DCNv2 实现（默认）
     //   - "DCNv4": 使用新的 DCNv4 实现（速度更快，性能更好）
-    "dcn_type": "DCNv4"
+    "dcn_type": "DCNv2"
     ,
     // 当使用DCNv4时，启用DCNv4 + Softmax（更接近DCNv2行为）
     "dcn_apply_softmax": false
@@ -665,5 +665,29 @@
     // SwanLab 运行模式：支持 \"cloud\"、\"offline\"、\"local\"，留空自动推断
     ,
     "swanlab_mode": null
+    // 是否启用 Logfire：true 表示启用 Logfire 日志上报
+    ,
+    "use_logfire": true
+    // Logfire Token：请替换为你的真实 token
+    ,
+    "logfire_token": "pylf_v1_us_bttdb00LZTkWTw8T2hW9ygmxph9cgvTX3GbpQZ9yGltZ"
+    // Logfire 项目名称：可用于区分项目
+    ,
+    "logfire_project_name": "Deblur"
+    // Logfire 服务名称：默认 s-vrt
+    ,
+    "logfire_service_name": "s-vrt"
+    // Logfire 环境名称：可用于区分 local/server
+    ,
+    "logfire_environment": "local-debug"
+    // 是否将文本日志发送到 Logfire
+    ,
+    "logfire_log_text": true
+    // 是否将训练/验证标量指标发送到 Logfire
+    ,
+    "logfire_log_metrics": true
+    // 是否将计时指标发送到 Logfire
+    ,
+    "logfire_log_timings": true
   }
 }

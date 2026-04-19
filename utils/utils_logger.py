@@ -25,6 +25,13 @@ except Exception:
     swanlab = None
     SWANLAB_AVAILABLE = False
 
+try:
+    import logfire
+    LOGFIRE_AVAILABLE = True
+except Exception:
+    logfire = None
+    LOGFIRE_AVAILABLE = False
+
 
 '''
 # --------------------------------------------
@@ -47,7 +54,33 @@ def log(*args, **kwargs):
 '''
 
 
-def logger_info(logger_name, log_path='default_logger.log'):
+class _LogfireLoggingHandler(logging.Handler):
+    def __init__(self, bridge):
+        super().__init__()
+        self.bridge = bridge
+
+    def emit(self, record):
+        if getattr(record, '_svrt_skip_logfire', False):
+            return
+        if not self.bridge.enabled or not self.bridge.text_enabled:
+            return
+        try:
+            level_name = record.levelname.lower()
+            log_method = getattr(self.bridge.logfire, level_name, self.bridge.logfire.info)
+            log_method(
+                'svrt log record',
+                message=record.getMessage(),
+                logger_name=record.name,
+                level=record.levelname,
+                pathname=record.pathname,
+                lineno=record.lineno,
+                **self.bridge.context,
+            )
+        except Exception as e:
+            self.bridge._disable_channel('text', e)
+
+
+def logger_info(logger_name, log_path='default_logger.log', opt=None):
     ''' set up logger
     modified by Kai Zhang (github: https://github.com/cszn)
     Enhanced to create timestamped log files for each run
@@ -68,10 +101,10 @@ def logger_info(logger_name, log_path='default_logger.log'):
         print('LogHandlers setup!')
         level = logging.INFO
         formatter = logging.Formatter('%(asctime)s.%(msecs)03d : %(message)s', datefmt='%y-%m-%d %H:%M:%S')
-        
+
         # Generate timestamp for log file
         timestamp = datetime.datetime.now().strftime('_%y%m%d_%H%M%S')
-        
+
         # Process log_path to add timestamp
         if os.path.isdir(log_path):
             # If log_path is a directory, create log file with timestamp
@@ -84,12 +117,12 @@ def logger_info(logger_name, log_path='default_logger.log'):
                 os.makedirs(dir_name, exist_ok=True)
             name, ext = os.path.splitext(file_name)
             log_file = os.path.join(dir_name, name + timestamp + ext) if dir_name else (name + timestamp + ext)
-        
+
         # Ensure directory exists
         log_dir = os.path.dirname(log_file)
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
-        
+
         # Use 'w' mode to create a new file for each run instead of appending
         fh = logging.FileHandler(log_file, mode='w')
         fh.setFormatter(formatter)
@@ -100,6 +133,13 @@ def logger_info(logger_name, log_path='default_logger.log'):
         sh = logging.StreamHandler()
         sh.setFormatter(formatter)
         log.addHandler(sh)
+
+    if opt is not None and not hasattr(log, '_svrt_logfire_bridge'):
+        bridge = _LogfireBridge(opt, logger=log)
+        log._svrt_logfire_bridge = bridge
+        if bridge.enabled and bridge.text_enabled:
+            if not any(isinstance(handler, _LogfireLoggingHandler) for handler in log.handlers):
+                log.addHandler(_LogfireLoggingHandler(bridge))
 
 
 '''
@@ -120,6 +160,139 @@ class logger_print(object):
 
     def flush(self):
         pass
+
+
+def _compact_logfire_fields(fields):
+    return {k: v for k, v in fields.items() if v is not None}
+
+
+class _LogfireBridge:
+    def __init__(self, opt, logger=None):
+        self.logger = logger
+        self.logfire = None
+        self.enabled = False
+        self.text_enabled = False
+        self.metrics_enabled = False
+        self.timings_enabled = False
+        self._disabled_channels = set()
+        self._warned_messages = set()
+
+        logging_config = opt.get('logging', {})
+        rank = opt.get('rank', 0)
+        if rank != 0:
+            self.context = {}
+            return
+
+        if not logging_config.get('use_logfire', False):
+            self.context = {}
+            return
+
+        project_name = logging_config.get('logfire_project_name')
+        service_name = logging_config.get('logfire_service_name', 's-vrt')
+        environment = logging_config.get('logfire_environment')
+        run_name = (
+            logging_config.get('wandb_name')
+            or logging_config.get('swanlab_name')
+            or opt.get('task')
+        )
+
+        self.context = _compact_logfire_fields(
+            {
+                'task': opt.get('task'),
+                'opt_path': opt.get('opt_path'),
+                'rank': rank,
+                'world_size': opt.get('world_size'),
+                'is_train': opt.get('is_train'),
+                'project_name': project_name,
+                'service_name': service_name,
+                'environment': environment,
+                'run_name': run_name,
+            }
+        )
+
+        if not LOGFIRE_AVAILABLE or logfire is None:
+            self._warn_once('Logfire is not available. Please install logfire: pip install logfire')
+            return
+
+        configure_kwargs = _compact_logfire_fields(
+            {
+                'token': logging_config.get('logfire_token'),
+                'service_name': service_name,
+                'environment': environment,
+            }
+        )
+
+        try:
+            logfire.configure(**configure_kwargs)
+        except Exception as e:
+            self._warn_once(f'Failed to initialize Logfire: {e}')
+            return
+
+        self.logfire = logfire
+        self.enabled = True
+        self.text_enabled = logging_config.get('logfire_log_text', True)
+        self.metrics_enabled = logging_config.get('logfire_log_metrics', True)
+        self.timings_enabled = logging_config.get('logfire_log_timings', True)
+
+    def _warn_once(self, message):
+        if message in self._warned_messages:
+            return
+        self._warned_messages.add(message)
+        if self.logger:
+            self.logger.warning(message, extra={'_svrt_skip_logfire': True})
+        else:
+            print(f'Warning: {message}')
+
+    def _disable_channel(self, channel, exc):
+        if channel in self._disabled_channels:
+            return
+        self._disabled_channels.add(channel)
+        if channel == 'text':
+            self.text_enabled = False
+        elif channel == 'metrics':
+            self.metrics_enabled = False
+        elif channel == 'timings':
+            self.timings_enabled = False
+        self._warn_once(f'Disabling Logfire {channel} logging after error: {exc}')
+
+    def emit_metrics(self, step, scalar_dict, tag_prefix=''):
+        if not (self.enabled and self.metrics_enabled and self.logfire is not None):
+            return
+        if not scalar_dict:
+            return
+
+        prefix = tag_prefix.rstrip('/') + '/' if tag_prefix else ''
+        metrics = {
+            f'{prefix}{key}': value
+            for key, value in scalar_dict.items()
+            if value is not None
+        }
+        if not metrics:
+            return
+
+        try:
+            self.logfire.info('svrt metrics', step=step, metrics=metrics, **self.context)
+        except Exception as e:
+            self._disable_channel('metrics', e)
+
+    def emit_timings(self, step, timings_dict, prefix='timings'):
+        if not (self.enabled and self.timings_enabled and self.logfire is not None):
+            return
+        if not timings_dict:
+            return
+
+        timings = {
+            f'{prefix}/{key}': value
+            for key, value in timings_dict.items()
+            if value is not None
+        }
+        if not timings:
+            return
+
+        try:
+            self.logfire.info('svrt timings', step=step, timings=timings, **self.context)
+        except Exception as e:
+            self._disable_channel('timings', e)
 
 
 '''
@@ -149,6 +322,10 @@ class Logger(object):
         
         # Get logging configuration
         logging_config = opt.get('logging', {})
+        attached_bridge = getattr(logger, '_svrt_logfire_bridge', None) if logger is not None else None
+        self.logfire_bridge = attached_bridge if attached_bridge is not None else _LogfireBridge(opt, logger=logger)
+        if logger is not None and attached_bridge is None:
+            setattr(logger, '_svrt_logfire_bridge', self.logfire_bridge)
         self.use_tensorboard = logging_config.get('use_tensorboard', False)
         self.use_wandb = logging_config.get('use_wandb', False)
         self.use_swanlab = logging_config.get('use_swanlab', False)
@@ -349,6 +526,8 @@ class Logger(object):
                     else:
                         print(f'Warning: Failed to log scalars to SwanLab: {e}')
                     self.use_swanlab = False
+
+        self.logfire_bridge.emit_metrics(step, scalar_dict, tag_prefix=tag_prefix)
     
     def log_images(self, step, image_dict, tag_prefix=''):
         """
@@ -449,6 +628,8 @@ class Logger(object):
                 self.wandb_run.log(wandb_dict, step=step)
             except Exception:
                 pass
+
+        self.logfire_bridge.emit_timings(step=step, timings_dict=timings_dict, prefix=prefix)
     
     def log_config(self, config_dict):
         """
