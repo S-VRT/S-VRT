@@ -67,9 +67,10 @@ class _LogfireLoggingHandler(logging.Handler):
         try:
             level_name = record.levelname.lower()
             log_method = getattr(self.bridge.logfire, level_name, self.bridge.logfire.info)
+            event_message = record.getMessage()
             log_method(
-                'svrt log record',
-                message=record.getMessage(),
+                event_message,
+                message=event_message,
                 logger_name=record.name,
                 level=record.levelname,
                 pathname=record.pathname,
@@ -85,7 +86,7 @@ class _LogfireLoggingHandler(logging.Handler):
             self.bridge._disable_channel('text', e)
 
 
-def logger_info(logger_name, log_path='default_logger.log', opt=None):
+def logger_info(logger_name, log_path='default_logger.log', opt=None, add_stream_handler=True, verbose=True):
     ''' set up logger
     modified by Kai Zhang (github: https://github.com/cszn)
     Enhanced to create timestamped log files for each run
@@ -101,9 +102,11 @@ def logger_info(logger_name, log_path='default_logger.log', opt=None):
 
     log = logging.getLogger(logger_name)
     if log.hasHandlers():
-        print('LogHandlers exist!')
+        if verbose:
+            print('LogHandlers exist!')
     else:
-        print('LogHandlers setup!')
+        if verbose:
+            print('LogHandlers setup!')
         level = logging.INFO
         formatter = logging.Formatter('%(asctime)s.%(msecs)03d : %(message)s', datefmt='%y-%m-%d %H:%M:%S')
 
@@ -139,11 +142,13 @@ def logger_info(logger_name, log_path='default_logger.log', opt=None):
         log.setLevel(level)
         log.addHandler(fh)
         action = 'appending to' if file_mode == 'a' else 'created'
-        print(f'Log file {action}: {log_file}')
+        if verbose:
+            print(f'Log file {action}: {log_file}')
 
-        sh = logging.StreamHandler()
-        sh.setFormatter(formatter)
-        log.addHandler(sh)
+        if add_stream_handler:
+            sh = logging.StreamHandler()
+            sh.setFormatter(formatter)
+            log.addHandler(sh)
 
     if opt is not None:
         bridge = getattr(log, '_svrt_logfire_bridge', None)
@@ -182,7 +187,7 @@ def emit_launch_wrapper_log(
         'launch_command': launch_command,
     }
 
-    effective_level = 'error' if (launch_stream and launch_stream.lower() == 'stderr') else str(level).lower()
+    effective_level = str(level).lower()
     valid_levels = {'debug', 'info', 'warning', 'error', 'critical'}
     if effective_level not in valid_levels:
         raise ValueError(

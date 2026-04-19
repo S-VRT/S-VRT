@@ -190,12 +190,17 @@ def test_logger_info_attaches_single_logfire_text_handler(monkeypatch, tmp_path)
         for handler in py_logger.handlers
         if handler.__class__.__name__ == "_LogfireLoggingHandler"
     ]
-    text_events = [event for event in fake.events if event[1] == "svrt log record"]
+    text_events = [
+        event
+        for event in fake.events
+        if event[2].get("logger_name") == logger_name and event[2].get("message") == "hello logfire"
+    ]
 
     assert len(text_handlers) == 1
     assert len(text_events) == 1
     assert text_events[0][2]["message"] == "hello logfire"
     assert text_events[0][2]["logger_name"] == logger_name
+    assert text_events[0][1] == "hello logfire"
 
 
 def test_text_channel_disables_after_first_logfire_emit_error(monkeypatch, tmp_path):
@@ -223,7 +228,7 @@ def test_text_channel_disables_after_first_logfire_emit_error(monkeypatch, tmp_p
 
 
 def test_text_failure_does_not_disable_metrics_channel(monkeypatch, tmp_path):
-    fake = _SelectiveFailInfoLogfire(failing_event="svrt log record")
+    fake = _SelectiveFailInfoLogfire(failing_event="text event triggers selective failure")
     monkeypatch.setattr(utils_logger, "LOGFIRE_AVAILABLE", True)
     monkeypatch.setattr(utils_logger, "logfire", fake)
 
@@ -314,13 +319,17 @@ def test_timings_failure_disables_only_timings_channel(monkeypatch, tmp_path):
     assert bridge.metrics_enabled is True
     assert logger.logfire_bridge.metrics_enabled is True
 
-    text_events_before = [event for event in fake.events if event[1] == "svrt log record"]
+    text_events_before = [
+        event for event in fake.events if event[2].get("message") == "text survives timings failure"
+    ]
     metric_events_before = [event for event in fake.events if event[1] == "svrt metrics"]
 
     py_logger.info("text survives timings failure")
     logger.log_scalars(step=12, scalar_dict={"loss": 0.12}, tag_prefix="train")
 
-    text_events_after = [event for event in fake.events if event[1] == "svrt log record"]
+    text_events_after = [
+        event for event in fake.events if event[2].get("message") == "text survives timings failure"
+    ]
     metric_events_after = [event for event in fake.events if event[1] == "svrt metrics"]
 
     new_text_events = text_events_after[len(text_events_before):]
@@ -384,7 +393,7 @@ def test_emit_launch_wrapper_log_uses_existing_main_logger(monkeypatch, tmp_path
         launch_command="python main_train_vrt.py --opt opt.json",
     )
 
-    text_events = [event for event in fake.events if event[1] == "svrt log record"]
+    text_events = [event for event in fake.events if event[2].get("message") == "shell stdout line"]
 
     assert text_events
     assert text_events[0][2]["message"] == "shell stdout line"
@@ -395,7 +404,7 @@ def test_emit_launch_wrapper_log_uses_existing_main_logger(monkeypatch, tmp_path
     assert text_events[0][2]["launch_command"] == "python main_train_vrt.py --opt opt.json"
 
 
-def test_emit_launch_wrapper_log_maps_stderr_to_error(monkeypatch, tmp_path):
+def test_emit_launch_wrapper_log_keeps_stderr_as_text_by_default(monkeypatch, tmp_path):
     fake = _FakeLogfire()
     monkeypatch.setattr(utils_logger, "LOGFIRE_AVAILABLE", True)
     monkeypatch.setattr(utils_logger, "logfire", fake)
@@ -411,7 +420,7 @@ def test_emit_launch_wrapper_log_maps_stderr_to_error(monkeypatch, tmp_path):
     utils_logger.emit_launch_wrapper_log(
         logger_name=logger_name,
         level="info",
-        message="traceback line",
+        message="model summary line",
         log_origin="launch_wrapper",
         launch_stream="stderr",
         launch_phase="train",
@@ -419,13 +428,13 @@ def test_emit_launch_wrapper_log_maps_stderr_to_error(monkeypatch, tmp_path):
         launch_command="python -u main_train_vrt.py --opt opt.json",
     )
 
-    error_events = [
-        event for event in fake.events
-        if event[1] == "svrt log record" and event[2]["level"] == "ERROR"
-    ]
+    wrapper_events = [event for event in fake.events if event[2].get("launch_stream") == "stderr"]
 
-    assert error_events
-    assert error_events[0][2]["message"] == "traceback line"
-    assert error_events[0][2]["launch_stream"] == "stderr"
-    assert error_events[0][2]["launch_mode"] == "platform_ddp"
-    assert error_events[0][2]["launch_command"] == "python -u main_train_vrt.py --opt opt.json"
+    assert wrapper_events
+    assert wrapper_events[0][0] == "info"
+    assert wrapper_events[0][1] == "model summary line"
+    assert wrapper_events[0][2]["message"] == "model summary line"
+    assert wrapper_events[0][2]["level"] == "INFO"
+    assert wrapper_events[0][2]["launch_stream"] == "stderr"
+    assert wrapper_events[0][2]["launch_mode"] == "platform_ddp"
+    assert wrapper_events[0][2]["launch_command"] == "python -u main_train_vrt.py --opt opt.json"
