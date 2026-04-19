@@ -358,6 +358,20 @@
     }
     ,
     "input_mode": "dual"
+    ,
+    "output_mode": "restoration"
+    ,
+    "restoration_reducer": {
+      "type": "index",
+      "index": 4
+    }
+    ,
+    "spike_encoder": {
+      "enable": true,
+      "type": "pase",
+      "checkpoint": null,
+      "params": {}
+    }
     // 原始入口宽度：RGB 3 + Spike 重建 bins 8 = 11
     // 在 fusion 策略下，对齐前使用的是 raw ingress 宽度；进入 backbone 后会由 fusion.out_chans 决定主干宽度
     ,
@@ -521,6 +535,21 @@
     // 损失函数配置
     // 生成器损失函数类型："charbonnier" 表示使用 Charbonnier 损失（L1 损失的平滑版本）
     "G_lossfn_type": "charbonnier"
+    ,
+    "freeze_backbone": true
+    ,
+    "partial_load": true
+    ,
+    "use_lora": false
+    ,
+    "lora_rank": 8
+    ,
+    "lora_alpha": 16
+    ,
+    "lora_target_modules": [
+      "qkv",
+      "proj"
+    ]
     // 生成器损失函数权重：损失函数的权重系数
     ,
     "G_lossfn_weight": 1.0
@@ -683,5 +712,29 @@
     // SwanLab 运行模式：可设置 cloud/offline/local；留空自动根据 API key 决定
     ,
     "swanlab_mode": null
+    // 是否启用 Logfire：true 表示启用 Logfire 日志上报
+    ,
+    "use_logfire": true
+    // Logfire Token：请替换为你的真实 token
+    ,
+    "logfire_token": "REPLACE_WITH_YOUR_LOGFIRE_TOKEN"
+    // Logfire 项目名称：可用于区分项目
+    ,
+    "logfire_project_name": "Deblur"
+    // Logfire 服务名称：默认 s-vrt
+    ,
+    "logfire_service_name": "s-vrt"
+    // Logfire 环境名称：可用于区分 local/server
+    ,
+    "logfire_environment": "server"
+    // 是否将文本日志发送到 Logfire
+    ,
+    "logfire_log_text": true
+    // 是否将训练/验证标量指标发送到 Logfire
+    ,
+    "logfire_log_metrics": true
+    // 是否将计时指标发送到 Logfire
+    ,
+    "logfire_log_timings": true
   }
 }

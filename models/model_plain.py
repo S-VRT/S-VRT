@@ -15,10 +15,13 @@ from utils.utils_regularizers import regularizer_orth, regularizer_clip
 from utils.utils_timer import Timer
 
 
+_TRAINABLE_NAME_MARKERS = ("fusion_adapter", "fusion_operator", "lora_A", "lora_B")
+
+
 def freeze_backbone(model):
-    """Freeze all backbone params and keep fusion-specific params trainable."""
+    """Freeze backbone params; keep fusion adapters and LoRA adapters trainable."""
     for name, param in model.named_parameters():
-        if "fusion_adapter" in name or "fusion_operator" in name:
+        if any(marker in name for marker in _TRAINABLE_NAME_MARKERS):
             param.requires_grad = True
         else:
             param.requires_grad = False
@@ -168,12 +171,27 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     def init_train(self):
         self.load()                           # load model
-        if self.opt.get('train', {}).get('freeze_backbone', False):
-            bare_model = self.get_bare_model(self.netG)
+        train_opt = self.opt.get('train', {})
+        bare_model = self.get_bare_model(self.netG)
+
+        if train_opt.get('use_lora', False):
+            from models.lora import inject_lora
+            targets = train_opt.get('lora_target_modules', ['qkv', 'proj'])
+            rank = int(train_opt.get('lora_rank', 8))
+            alpha = float(train_opt.get('lora_alpha', 16))
+            replaced = inject_lora(bare_model, targets, rank=rank, alpha=alpha)
+            print(f'[Stage C] Injected LoRA(rank={rank}, alpha={alpha}) into '
+                  f'{len(replaced)} Linear layers; targets={targets}')
+            # Mirror into netE so EMA has matching structure for load/save
+            if train_opt.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
+                bare_e = self.get_bare_model(self.netE)
+                inject_lora(bare_e, targets, rank=rank, alpha=alpha)
+
+        if train_opt.get('freeze_backbone', False):
             freeze_backbone(bare_model)
             frozen_count = sum(1 for p in bare_model.parameters() if not p.requires_grad)
             trainable_count = sum(1 for p in bare_model.parameters() if p.requires_grad)
-            print(f'[Stage A] Frozen {frozen_count} params, trainable {trainable_count} params')
+            print(f'[Stage A/C] Frozen {frozen_count} params, trainable {trainable_count} params')
         self.netG.train()                     # set training mode,for BN
         self.define_loss()                    # define loss
         self.define_optimizer()               # define optimizer
@@ -226,6 +244,36 @@ class ModelPlain(ModelBase):
             self.save_network(self.save_dir, self.netE, 'E', iter_label)
         if self.opt_train['G_optimizer_reuse']:
             self.save_optimizer(self.save_dir, self.G_optimizer, 'optimizerG', iter_label)
+
+    def save_merged(self, iter_label):
+        """Export LoRA-merged checkpoint (`{iter}_G_merged.pth` / `{iter}_E_merged.pth`).
+
+        Produces state_dicts that are structurally identical to the non-LoRA VRT,
+        so non-LoRA code paths can load them directly.
+        Rank-0 only under DDP; no-op when use_lora is disabled.
+        """
+        import os
+        import copy as _copy
+        if not self.opt.get('train', {}).get('use_lora', False):
+            return
+        if self.opt.get('rank', 0) != 0:
+            return
+        from models.lora import merge_lora
+
+        pairs = [(self.netG, 'G')]
+        if self.opt_train.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
+            pairs.append((self.netE, 'E'))
+
+        for net, tag in pairs:
+            bare = self.get_bare_model(net)
+            net_copy = _copy.deepcopy(bare)
+            merge_lora(net_copy)
+            state_dict = {k: v.detach().cpu() for k, v in net_copy.state_dict().items()}
+            save_path = os.path.join(self.save_dir, f'{iter_label}_{tag}_merged.pth')
+            tmp_path = save_path + '.tmp'
+            torch.save(state_dict, tmp_path)
+            os.replace(tmp_path, save_path)
+            print(f'[Stage C] Saved merged ckpt -> {save_path}')
 
     # ----------------------------------------
     # define loss

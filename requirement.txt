@@ -11,5 +11,6 @@ einops
 tensorboard
 wandb
 swanlab
+logfire
 matplotlib
 snntorch

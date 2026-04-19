@@ -173,7 +173,7 @@ def main():
     if opt['rank'] == 0:
         logger_name = 'train'
         # 设置日志文件路径
-        utils_logger.logger_info(logger_name, os.path.join(opt['path']['log'], logger_name+'.log'))
+        utils_logger.logger_info(logger_name, os.path.join(opt['path']['log'], logger_name+'.log'), opt=opt)
         logger = logging.getLogger(logger_name)
         # 记录完整的配置信息到日志
         logger.info(option.dict2str(opt))
@@ -716,6 +716,8 @@ def main():
                 if opt['rank'] == 0:
                     logger.info('Finish training.')
                     model.save(current_step)  # 保存最终模型
+                    if hasattr(model, 'save_merged'):
+                        model.save_merged(current_step)
                     if tb_logger is not None:
                         tb_logger.close()  # 关闭日志记录器
                 sys.exit()  # 退出程序
