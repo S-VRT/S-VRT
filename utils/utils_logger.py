@@ -74,6 +74,11 @@ class _LogfireLoggingHandler(logging.Handler):
                 level=record.levelname,
                 pathname=record.pathname,
                 lineno=record.lineno,
+                log_origin=getattr(record, 'log_origin', 'train_core'),
+                launch_stream=getattr(record, 'launch_stream', None),
+                launch_phase=getattr(record, 'launch_phase', None),
+                launch_mode=getattr(record, 'launch_mode', None),
+                launch_command=getattr(record, 'launch_command', None),
                 **self.bridge.context,
             )
         except Exception as e:
@@ -134,12 +139,44 @@ def logger_info(logger_name, log_path='default_logger.log', opt=None):
         sh.setFormatter(formatter)
         log.addHandler(sh)
 
-    if opt is not None and not hasattr(log, '_svrt_logfire_bridge'):
+    if opt is not None:
         bridge = _LogfireBridge(opt, logger=log)
         log._svrt_logfire_bridge = bridge
-        if bridge.enabled and bridge.text_enabled:
-            if not any(isinstance(handler, _LogfireLoggingHandler) for handler in log.handlers):
-                log.addHandler(_LogfireLoggingHandler(bridge))
+        existing_logfire_handlers = [
+            handler for handler in log.handlers if isinstance(handler, _LogfireLoggingHandler)
+        ]
+        for handler in existing_logfire_handlers:
+            handler.bridge = bridge
+        if bridge.enabled and bridge.text_enabled and not existing_logfire_handlers:
+            log.addHandler(_LogfireLoggingHandler(bridge))
+
+
+def emit_launch_wrapper_log(
+    logger_name,
+    level,
+    message,
+    log_origin='launch_wrapper',
+    launch_stream=None,
+    launch_phase=None,
+    launch_mode=None,
+    launch_command=None,
+):
+    logger = logging.getLogger(logger_name)
+    if not logger.handlers:
+        raise RuntimeError(
+            f'Logger "{logger_name}" is not initialized. Call logger_info() first.'
+        )
+
+    extra = {
+        'log_origin': log_origin,
+        'launch_stream': launch_stream,
+        'launch_phase': launch_phase,
+        'launch_mode': launch_mode,
+        'launch_command': launch_command,
+    }
+
+    log_method = getattr(logger, str(level).lower(), logger.info)
+    log_method(message, extra=extra)
 
 
 '''

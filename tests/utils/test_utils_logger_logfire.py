@@ -358,3 +358,72 @@ def test_timings_channel_disables_after_first_logfire_error(monkeypatch, tmp_pat
     logger.log_timings(step=2, timings_dict={"data": 0.2}, prefix="time")
 
     assert logger.logfire_bridge.timings_enabled is False
+
+
+def test_emit_launch_wrapper_log_uses_existing_main_logger(monkeypatch, tmp_path):
+    fake = _FakeLogfire()
+    monkeypatch.setattr(utils_logger, "LOGFIRE_AVAILABLE", True)
+    monkeypatch.setattr(utils_logger, "logfire", fake)
+
+    logger_name = "train"
+    py_logger = logging.getLogger(logger_name)
+    py_logger.handlers = []
+    py_logger.propagate = False
+
+    opt = _make_opt(tmp_path, use_logfire=True, logfire_log_text=True)
+    utils_logger.logger_info(logger_name, str(tmp_path / "train.log"), opt=opt)
+
+    utils_logger.emit_launch_wrapper_log(
+        logger_name=logger_name,
+        level="info",
+        message="shell stdout line",
+        log_origin="launch_wrapper",
+        launch_stream="stdout",
+        launch_phase="train",
+        launch_mode="local_single",
+        launch_command="python main_train_vrt.py --opt opt.json",
+    )
+
+    text_events = [event for event in fake.events if event[1] == "svrt log record"]
+
+    assert text_events
+    assert text_events[0][2]["message"] == "shell stdout line"
+    assert text_events[0][2]["log_origin"] == "launch_wrapper"
+    assert text_events[0][2]["launch_stream"] == "stdout"
+    assert text_events[0][2]["launch_phase"] == "train"
+    assert text_events[0][2]["launch_mode"] == "local_single"
+
+
+def test_emit_launch_wrapper_log_maps_stderr_to_error(monkeypatch, tmp_path):
+    fake = _FakeLogfire()
+    monkeypatch.setattr(utils_logger, "LOGFIRE_AVAILABLE", True)
+    monkeypatch.setattr(utils_logger, "logfire", fake)
+
+    logger_name = "train"
+    py_logger = logging.getLogger(logger_name)
+    py_logger.handlers = []
+    py_logger.propagate = False
+
+    opt = _make_opt(tmp_path, use_logfire=True, logfire_log_text=True)
+    utils_logger.logger_info(logger_name, str(tmp_path / "train.log"), opt=opt)
+
+    utils_logger.emit_launch_wrapper_log(
+        logger_name=logger_name,
+        level="error",
+        message="traceback line",
+        log_origin="launch_wrapper",
+        launch_stream="stderr",
+        launch_phase="train",
+        launch_mode="platform_ddp",
+        launch_command="python -u main_train_vrt.py --opt opt.json",
+    )
+
+    error_events = [
+        event for event in fake.events
+        if event[1] == "svrt log record" and event[2]["level"] == "ERROR"
+    ]
+
+    assert error_events
+    assert error_events[0][2]["message"] == "traceback line"
+    assert error_events[0][2]["launch_stream"] == "stderr"
+    assert error_events[0][2]["launch_mode"] == "platform_ddp"
