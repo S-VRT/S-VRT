@@ -358,8 +358,8 @@ try:
     )
     log_path = existing[-1] if existing else f"{log_dir}/{logger_name}.log"
     utils_logger.logger_info(logger_name, log_path, opt=opt)
-except Exception:
-    pass
+except Exception as e:
+    print(f"[launch_wrapper] logger bootstrap failed: {e}", file=sys.stderr)
 utils_logger.emit_launch_wrapper_log(
     logger_name=logger_name,
     level=level,
@@ -409,7 +409,18 @@ run_with_wrapper() {
     done < "$stderr_pipe" &
     local stderr_reader_pid=$!
 
-    "${cmd[@]}" > "$stdout_pipe" 2> "$stderr_pipe"
+    # Open write ends of the pipes in the current shell so the command can start
+    # without blocking, even if the background readers haven't opened their read
+    # ends yet.  We close our copies immediately after launching the command so
+    # the readers see EOF when the command exits.
+    exec 3>"$stdout_pipe" 4>"$stderr_pipe"
+
+    "${cmd[@]}" >&3 2>&4 &
+    local cmd_pid=$!
+
+    exec 3>&- 4>&-  # close our copies so readers see EOF when cmd exits
+
+    wait "$cmd_pid"
     local cmd_exit_code=$?
 
     wait "$stdout_reader_pid"
@@ -457,6 +468,8 @@ echo ""
 
 # Bootstrap the launch logger early so data-prep and training both have handlers.
 # RUNTIME_CONFIG is not yet available here, so use CONFIG_PATH and a derived log dir.
+# PREP_LOG_DIR uses the options (config) directory for the pre-training phase since
+# RUNTIME_CONFIG has not been materialised yet.
 PREP_LOG_DIR="$(dirname "$CONFIG_PATH")"
 ensure_launch_logger "train" "$PREP_LOG_DIR" "$CONFIG_PATH"
 
@@ -584,6 +597,10 @@ else
 fi
 
 TRAIN_LOG_DIR="$(dirname "$RUNTIME_CONFIG")"
+# Re-call ensure_launch_logger with the RUNTIME_CONFIG log dir.  For handlers
+# this is intentionally a no-op (they were already attached above), but it
+# ensures the correct RUNTIME_CONFIG-derived log directory is used for any
+# log files written during the training phase.
 ensure_launch_logger "train" "$TRAIN_LOG_DIR" "$CONFIG_PATH"
 
 # Check if we're in platform DDP mode
