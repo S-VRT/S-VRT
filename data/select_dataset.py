@@ -11,6 +11,7 @@
 
 def define_Dataset(dataset_opt):
     dataset_type = dataset_opt['dataset_type'].lower()
+    phase = str(dataset_opt.get('phase', '')).lower()
     
     # -----------------------------------------
     # video restoration
@@ -18,7 +19,10 @@ def define_Dataset(dataset_opt):
     if dataset_type in ['traindataset']:
         from data.dataset_video_train import TrainDataset as D
     elif dataset_type in ['traindatasetrgbspike']:
-        from data.dataset_video_train_rgbspike import TrainDatasetRGBSpike as D
+        if phase == 'test':
+            from data.dataset_video_test import TrainDatasetRGBSpike as D
+        else:
+            from data.dataset_video_train_rgbspike import TrainDatasetRGBSpike as D
     elif dataset_type in ['testdataset']:
         from data.dataset_video_test import TestDataset as D
     elif dataset_type in ['singletestdataset']:

@@ -130,6 +130,11 @@
         "reconstruction": {
           "type": "spikecv_tfp",
           "num_bins": 4
+        },
+        "precomputed": {
+          "enable": true,
+          "root": "auto",
+          "format": "npy"
         }
       }
       // Spike 重建配置：使用字典级配置项
@@ -147,6 +152,10 @@
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
+      ,
+      "tfp_device": "cpu"
+      ,
+      "tfp_devices": ["cuda:0","cuda:1","cuda:2"]
       // 归一化设置：RGB 使用 ImageNet 均值方差，Spike 通道目前保持恒等缩放
       ,
       "rgb_normalize": "imagenet"

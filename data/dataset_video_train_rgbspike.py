@@ -94,6 +94,7 @@ class TrainDatasetRGBSpike(data.Dataset):
         self.spike_h = opt.get('spike_h', 360)
         self.spike_w = opt.get('spike_w', 640)
         spike_cfg = opt.get('spike', {}) if isinstance(opt.get('spike', {}), dict) else {}
+        spike_precomputed_cfg = spike_cfg.get('precomputed', {}) if isinstance(spike_cfg.get('precomputed', {}), dict) else {}
         compat_cfg = opt.get('compat', {}) if isinstance(opt.get('compat', {}), dict) else {}
         spike_reconstruction_nested = spike_cfg.get('reconstruction', {})
         if not isinstance(spike_reconstruction_nested, dict):
@@ -139,6 +140,13 @@ class TrainDatasetRGBSpike(data.Dataset):
                 )
         self.spike_flipud = opt.get('spike_flipud', True)
         self.tfp_half_win_length = opt.get('tfp_half_win_length', 20)
+        self.use_precomputed_spike = bool(spike_precomputed_cfg.get('enable', False))
+        self.precomputed_spike_format = str(spike_precomputed_cfg.get('format', 'npy')).strip().lower()
+        precomputed_root_value = spike_precomputed_cfg.get('root', 'auto')
+        if str(precomputed_root_value).strip().lower() == 'auto':
+            self.precomputed_spike_root = self.spike_root
+        else:
+            self.precomputed_spike_root = Path(precomputed_root_value)
         spike_reconstruction_cfg = spike_reconstruction_nested or opt.get('spike_reconstruction', 'spikecv_tfp')
         if isinstance(spike_reconstruction_cfg, dict):
             self.spike_reconstruction = str(spike_reconstruction_cfg.get('type', 'spikecv_tfp')).strip().lower()
@@ -460,27 +468,7 @@ class TrainDatasetRGBSpike(data.Dataset):
         # get Spike data
         spike_file = self.spike_root / clip_name / 'spike' / f'{neighbor:{self.filename_tmpl}}.dat'
         if spike_file.exists():
-            spike_stream = SpikeStream(
-                offline=True,
-                filepath=str(spike_file),
-                spike_h=self.spike_h,
-                spike_w=self.spike_w,
-                print_dat_detail=False,
-            )
-            spike_matrix = spike_stream.get_spike_matrix(flipud=self.spike_flipud)  # (T, H, W)
-            if self.spike_reconstruction in {'middle_tfp', 'middle-tfp'}:
-                spike_frame = self._middle_tfp_reconstructor(spike_matrix)  # (H, W)
-                spike_voxel = spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
-            elif self.spike_reconstruction == 'snn':
-                spike_frame = self._snn_reconstructor(spike_matrix)  # (H, W)
-                spike_voxel = spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
-            else:
-                spike_voxel = voxelize_spikes_tfp(
-                    spike_matrix,
-                    num_channels=self.spike_channels,
-                    device=self._select_tfp_device(),
-                    half_win_length=self.tfp_half_win_length,
-                )  # (S, H, W)
+            spike_voxel = self._load_spike_voxel(clip_name, neighbor, spike_file)
         else:
             # If spike file doesn't exist, create zeros
             spike_voxel = np.zeros((self.spike_channels, self.spike_h, self.spike_w), dtype=np.float32)
@@ -491,6 +479,66 @@ class TrainDatasetRGBSpike(data.Dataset):
             'spike': spike_voxel,
             'gt_path': img_gt_path,
         }
+
+    def _load_spike_voxel(self, clip_name, neighbor, spike_file):
+        if self.use_precomputed_spike:
+            precomputed = self._load_precomputed_spike_voxel(clip_name, neighbor)
+            if precomputed is not None:
+                return precomputed
+
+        spike_stream = SpikeStream(
+            offline=True,
+            filepath=str(spike_file),
+            spike_h=self.spike_h,
+            spike_w=self.spike_w,
+            print_dat_detail=False,
+        )
+        spike_matrix = spike_stream.get_spike_matrix(flipud=self.spike_flipud)  # (T, H, W)
+        if self.spike_reconstruction in {'middle_tfp', 'middle-tfp'}:
+            spike_frame = self._middle_tfp_reconstructor(spike_matrix)  # (H, W)
+            return spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+        if self.spike_reconstruction == 'snn':
+            spike_frame = self._snn_reconstructor(spike_matrix)  # (H, W)
+            return spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+        return voxelize_spikes_tfp(
+            spike_matrix,
+            num_channels=self.spike_channels,
+            device=self._select_tfp_device(),
+            half_win_length=self.tfp_half_win_length,
+        )  # (S, H, W)
+
+    def _build_precomputed_spike_base_path(self, clip_name, frame_idx):
+        dir_name = f'tfp_b{self.spike_channels}_hw{self.tfp_half_win_length}'
+        frame_name = f'{frame_idx:{self.filename_tmpl}}'
+        return self.precomputed_spike_root / clip_name / dir_name / frame_name
+
+    def _load_precomputed_spike_voxel(self, clip_name, frame_idx):
+        base_path = self._build_precomputed_spike_base_path(clip_name, frame_idx)
+        if self.precomputed_spike_format == 'npy':
+            path = base_path.with_suffix('.npy')
+            if not path.exists():
+                return None
+            spike_voxel = np.load(path)
+        elif self.precomputed_spike_format == 'npz':
+            path = base_path.with_suffix('.npz')
+            if not path.exists():
+                return None
+            with np.load(path) as data:
+                spike_voxel = data['spike_voxel']
+        else:
+            raise ValueError(f"Unsupported precomputed spike format: {self.precomputed_spike_format!r}")
+
+        spike_voxel = np.asarray(spike_voxel, dtype=np.float32)
+        if spike_voxel.ndim != 3:
+            raise ValueError(
+                f"Precomputed spike voxel must be [C,H,W], got {spike_voxel.shape} from {path}"
+            )
+        if spike_voxel.shape[0] != self.spike_channels:
+            raise ValueError(
+                f"Precomputed spike voxel channels mismatch: expected {self.spike_channels}, "
+                f"got {spike_voxel.shape[0]} from {path}"
+            )
+        return spike_voxel
 
     def _validate_raw_rgb_spike_pair(self, rgb_hwc, spike_hwc):
         if rgb_hwc.ndim != 3 or spike_hwc.ndim != 3:
