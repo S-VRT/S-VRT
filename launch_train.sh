@@ -329,6 +329,102 @@ PYINIT
     fi
 }
 
+WRAPPER_LOG_DIR="${WRAPPER_LOG_DIR:-/tmp/s-vrt-launch-wrapper}"
+mkdir -p "$WRAPPER_LOG_DIR"
+
+emit_wrapper_line() {
+    local logger_name="$1"
+    local level="$2"
+    local message="$3"
+    local launch_stream="$4"
+    local launch_phase="$5"
+    local launch_mode="$6"
+    local launch_command="$7"
+
+    "$PYTHON_BIN" - "$logger_name" "$level" "$message" "$launch_stream" "$launch_phase" "$launch_mode" "$launch_command" <<'PY'
+import sys
+from utils import utils_logger
+
+logger_name, level, message, launch_stream, launch_phase, launch_mode, launch_command = sys.argv[1:8]
+utils_logger.emit_launch_wrapper_log(
+    logger_name=logger_name,
+    level=level,
+    message=message,
+    log_origin="launch_wrapper",
+    launch_stream=launch_stream or None,
+    launch_phase=launch_phase or None,
+    launch_mode=launch_mode or None,
+    launch_command=launch_command or None,
+)
+PY
+}
+
+run_with_wrapper() {
+    local logger_name="$1"
+    local launch_phase="$2"
+    local launch_mode="$3"
+    shift 3
+
+    local cmd=("$@")
+    local command_str="${cmd[*]}"
+    local timestamp
+    timestamp="$(date +%y%m%d_%H%M%S)"
+    local stdout_log="$WRAPPER_LOG_DIR/${launch_phase}_${launch_mode}_${timestamp}.stdout.log"
+    local stderr_log="$WRAPPER_LOG_DIR/${launch_phase}_${launch_mode}_${timestamp}.stderr.log"
+
+    emit_wrapper_line "$logger_name" "info" "launch wrapper started: ${command_str}" "stdout" "$launch_phase" "$launch_mode" "$command_str"
+
+    local stdout_pipe stderr_pipe
+    stdout_pipe="$(mktemp -u /tmp/s-vrt-wrapper-stdout.XXXXXX)"
+    stderr_pipe="$(mktemp -u /tmp/s-vrt-wrapper-stderr.XXXXXX)"
+    mkfifo "$stdout_pipe" "$stderr_pipe"
+
+    while IFS= read -r line; do
+        printf '%s\n' "$line"
+        printf '%s\n' "$line" >> "$stdout_log"
+        emit_wrapper_line "$logger_name" "info" "$line" "stdout" "$launch_phase" "$launch_mode" "$command_str"
+    done < "$stdout_pipe" &
+    local stdout_reader_pid=$!
+
+    while IFS= read -r line; do
+        printf '%s\n' "$line" >&2
+        printf '%s\n' "$line" >> "$stderr_log"
+        emit_wrapper_line "$logger_name" "error" "$line" "stderr" "$launch_phase" "$launch_mode" "$command_str"
+    done < "$stderr_pipe" &
+    local stderr_reader_pid=$!
+
+    "${cmd[@]}" > "$stdout_pipe" 2> "$stderr_pipe"
+    local cmd_exit_code=$?
+
+    wait "$stdout_reader_pid"
+    wait "$stderr_reader_pid"
+    rm -f "$stdout_pipe" "$stderr_pipe"
+
+    if [[ $cmd_exit_code -eq 0 ]]; then
+        emit_wrapper_line "$logger_name" "info" "launch wrapper completed successfully: ${command_str}" "stdout" "$launch_phase" "$launch_mode" "$command_str"
+    else
+        emit_wrapper_line "$logger_name" "error" "launch wrapper failed with exit code ${cmd_exit_code}: ${command_str}" "stderr" "$launch_phase" "$launch_mode" "$command_str"
+    fi
+
+    return "$cmd_exit_code"
+}
+
+ensure_launch_logger() {
+    local logger_name="$1"
+    local log_dir="$2"
+    local opt_path="$3"
+
+    mkdir -p "$log_dir"
+    "$PYTHON_BIN" - "$logger_name" "$log_dir" "$opt_path" <<'PY'
+import sys
+from utils import utils_option, utils_logger
+
+logger_name, log_dir, opt_path = sys.argv[1:4]
+opt = utils_option.parse(opt_path, is_train=True)
+utils_logger.logger_info(logger_name, f"{log_dir}/{logger_name}.log", opt=opt)
+PY
+}
+
 echo "=========================================="
 echo "VRT Training Launch Script"
 echo "=========================================="
@@ -376,8 +472,9 @@ if [[ "$PREPARE_DATA" == true ]]; then
     echo "Command: python scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS"
     echo ""
     
-    "$PYTHON_BIN" scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS
-    
+    run_with_wrapper "train" "prepare" "local_single" \
+        "$PYTHON_BIN" scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS
+
     PREP_EXIT_CODE=$?
     echo ""
     
@@ -465,6 +562,9 @@ else
     echo "Warning: Python not found to rewrite config paths; using original config."
 fi
 
+TRAIN_LOG_DIR="$(dirname "$RUNTIME_CONFIG")"
+ensure_launch_logger "train" "$TRAIN_LOG_DIR" "$CONFIG_PATH"
+
 # Check if we're in platform DDP mode
 if [[ -n "${WORLD_SIZE:-}" && "${WORLD_SIZE:-0}" -gt 1 ]]; then
     # ========================================
@@ -481,7 +581,8 @@ if [[ -n "${WORLD_SIZE:-}" && "${WORLD_SIZE:-0}" -gt 1 ]]; then
     echo "=========================================="
     
     # Platform has already set up environment, just run python directly
-    "$PYTHON_BIN" -u main_train_vrt.py --opt "$RUNTIME_CONFIG"
+    run_with_wrapper "train" "train" "platform_ddp" \
+        "$PYTHON_BIN" -u main_train_vrt.py --opt "$RUNTIME_CONFIG"
 
 else
     # ========================================
@@ -498,11 +599,12 @@ else
         echo "Running: $PYTHON_BIN -m torch.distributed.run --nproc_per_node=$GPU_COUNT main_train_vrt.py --opt $RUNTIME_CONFIG"
         echo "=========================================="
         
-        CUDA_VISIBLE_DEVICES="$GPU_LIST" \
-        "$PYTHON_BIN" -m torch.distributed.run \
-            --nproc_per_node="$GPU_COUNT" \
-            --standalone \
-            main_train_vrt.py --opt "$RUNTIME_CONFIG"
+        run_with_wrapper "train" "train" "local_multi" \
+            env CUDA_VISIBLE_DEVICES="$GPU_LIST" \
+            "$PYTHON_BIN" -m torch.distributed.run \
+                --nproc_per_node="$GPU_COUNT" \
+                --standalone \
+                main_train_vrt.py --opt "$RUNTIME_CONFIG"
     else
         # Single GPU: plain python
         echo "Single GPU training"
@@ -511,8 +613,10 @@ else
         echo ""
         echo "Running: $PYTHON_BIN main_train_vrt.py --opt $RUNTIME_CONFIG"
         echo "=========================================="
-        
-        CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" "$PYTHON_BIN" main_train_vrt.py --opt "$RUNTIME_CONFIG"
+
+        run_with_wrapper "train" "train" "local_single" \
+            env CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" \
+            "$PYTHON_BIN" main_train_vrt.py --opt "$RUNTIME_CONFIG"
     fi
 fi
 
