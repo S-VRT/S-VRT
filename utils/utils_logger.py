@@ -111,7 +111,10 @@ def logger_info(logger_name, log_path='default_logger.log', opt=None):
         timestamp = datetime.datetime.now().strftime('_%y%m%d_%H%M%S')
 
         # Process log_path to add timestamp
-        if os.path.isdir(log_path):
+        if os.path.isfile(log_path):
+            # Caller passed an existing file — use it directly (append mode).
+            log_file = log_path
+        elif os.path.isdir(log_path):
             # If log_path is a directory, create log file with timestamp
             log_file = os.path.join(log_path, logger_name + timestamp + '.log')
         else:
@@ -128,12 +131,15 @@ def logger_info(logger_name, log_path='default_logger.log', opt=None):
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
 
-        # Use 'w' mode to create a new file for each run instead of appending
-        fh = logging.FileHandler(log_file, mode='w')
+        # Use 'a' mode if the file already exists (e.g. wrapper subprocesses
+        # appending to a log created by ensure_launch_logger), otherwise 'w'.
+        file_mode = 'a' if os.path.exists(log_file) else 'w'
+        fh = logging.FileHandler(log_file, mode=file_mode)
         fh.setFormatter(formatter)
         log.setLevel(level)
         log.addHandler(fh)
-        print(f'Log file created: {log_file}')
+        action = 'appending to' if file_mode == 'a' else 'created'
+        print(f'Log file {action}: {log_file}')
 
         sh = logging.StreamHandler()
         sh.setFormatter(formatter)

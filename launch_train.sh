@@ -344,13 +344,20 @@ emit_wrapper_line() {
     local opt_path="$9"
 
     "$PYTHON_BIN" - "$logger_name" "$level" "$message" "$launch_stream" "$launch_phase" "$launch_mode" "$launch_command" "$log_dir" "$opt_path" <<'PY'
-import sys
+import sys, glob, os
 from utils import utils_logger, utils_option
 
 logger_name, level, message, launch_stream, launch_phase, launch_mode, launch_command, log_dir, opt_path = sys.argv[1:10]
 try:
     opt = utils_option.parse(opt_path, is_train=True) if opt_path else None
-    utils_logger.logger_info(logger_name, f"{log_dir}/{logger_name}.log", opt=opt)
+    # Find the existing timestamped log file created by ensure_launch_logger so
+    # we append to it rather than creating a new file per wrapper line.
+    existing = sorted(
+        glob.glob(os.path.join(log_dir, f"{logger_name}_*.log")),
+        key=os.path.getmtime,
+    )
+    log_path = existing[-1] if existing else f"{log_dir}/{logger_name}.log"
+    utils_logger.logger_info(logger_name, log_path, opt=opt)
 except Exception:
     pass
 utils_logger.emit_launch_wrapper_log(
