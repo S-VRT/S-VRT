@@ -13,7 +13,11 @@ import utils.utils_video as utils_video
 from data.spike_recc import SpikeStream, voxelize_spikes_tfp
 from data.spike_recc.middle_tfp.reconstructor import MiddleTFPReconstructor
 from data.spike_recc.snn.reconstructor import SNNReconstructor
-from data.spike_recc.encoding25 import load_encoding25_artifact_with_shape, validate_encoding25_tensor
+from data.spike_recc.encoding25 import (
+    load_encoding25_artifact_with_shape,
+    validate_encoding25_tensor,
+    validate_subframes_tensor,
+)
 
 
 class TestDataset(data.Dataset):
@@ -164,6 +168,13 @@ class TrainDatasetRGBSpike(data.Dataset):
                 f"[TrainDatasetRGBSpike] Conflicting channel settings: spike_channels={int(opt['spike_channels'])} "
                 f"vs spike.reconstruction.num_bins={int(nested_num_bins)}."
             )
+        if self.use_encoding25_flow and self.spike_flow_subframes > 1:
+            if self.spike_flow_subframes != self.spike_channels:
+                raise ValueError(
+                    f"spike_flow.subframes ({self.spike_flow_subframes}) must equal "
+                    f"spike_channels ({self.spike_channels}) for early-fusion temporal "
+                    f"axis alignment."
+                )
         self.spike_flipud = opt.get('spike_flipud', True)
         self.spike_folder = opt.get('spike_folder_name', 'spike')
         self.spike_ext = opt.get('spike_filename_ext', 'dat')
@@ -308,7 +319,7 @@ class TrainDatasetRGBSpike(data.Dataset):
         }
         if flow_seq is not None:
             if flow_seq.ndim != 4 or flow_seq.size(1) != 25:
-                raise ValueError(f"Expected L_flow_spike [T,25,H,W], got {tuple(flow_seq.shape)}")
+                raise ValueError(f"Expected L_flow_spike [T*S,25,H,W], got {tuple(flow_seq.shape)}")
             sample['L_flow_spike'] = flow_seq
         return sample
 
@@ -345,6 +356,7 @@ class TrainDatasetRGBSpike(data.Dataset):
         self.spike_flow_representation = str(spike_flow_cfg.get('representation', '')).strip().lower()
         self.spike_flow_dt = int(spike_flow_cfg.get('dt', 10))
         self.spike_flow_root = spike_flow_cfg.get('root', 'auto')
+        self.spike_flow_subframes = int(spike_flow_cfg.get('subframes', 1))
         self.spike_flow_format = str(spike_flow_cfg.get('format', 'auto')).strip().lower()
         self.use_encoding25_flow = self.spike_flow_representation == 'encoding25'
 
@@ -362,7 +374,11 @@ class TrainDatasetRGBSpike(data.Dataset):
             return self.flow_spike_cache[folder]
 
         flow_root = self.spike_root if str(self.spike_flow_root).strip().lower() == 'auto' else self.spike_flow_root
-        flow_clip_dir = os.path.join(flow_root, folder, f'encoding25_dt{self.spike_flow_dt}')
+        if self.spike_flow_subframes > 1:
+            flow_dir_name = f'encoding25_dt{self.spike_flow_dt}_s{self.spike_flow_subframes}'
+        else:
+            flow_dir_name = f'encoding25_dt{self.spike_flow_dt}'
+        flow_clip_dir = os.path.join(flow_root, folder, flow_dir_name)
 
         frame_names = self.frame_basenames.get(folder, [])
         if frame_names and len(frame_names) != expected_len:
@@ -375,7 +391,7 @@ class TrainDatasetRGBSpike(data.Dataset):
                 arr = load_encoding25_artifact_with_shape(
                     base_path,
                     artifact_format=self.spike_flow_format,
-                    num_subframes=1,
+                    num_subframes=self.spike_flow_subframes,
                     spike_h=self.spike_h,
                     spike_w=self.spike_w,
                 )
@@ -384,7 +400,18 @@ class TrainDatasetRGBSpike(data.Dataset):
                     f"Missing encoding25 artifact: {base_path}.npy or .dat. "
                     "Run scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py first."
                 ) from exc
-            validate_encoding25_tensor(arr)
+            if self.spike_flow_subframes > 1:
+                validate_subframes_tensor(arr, self.spike_flow_subframes)
+                resized_subframes = []
+                for sub_idx in range(self.spike_flow_subframes):
+                    resized = []
+                    for ch in range(arr.shape[1]):
+                        resized.append(cv2.resize(arr[sub_idx, ch], (target_w, target_h), interpolation=cv2.INTER_LINEAR))
+                    resized_subframes.append(np.stack(resized, axis=0).astype(np.float32))
+                flow_tensors.extend(torch.from_numpy(item) for item in resized_subframes)
+                continue
+            else:
+                validate_encoding25_tensor(arr)
             resized = []
             for ch in range(arr.shape[0]):
                 resized.append(cv2.resize(arr[ch], (target_w, target_h), interpolation=cv2.INTER_LINEAR))

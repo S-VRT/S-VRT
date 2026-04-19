@@ -344,61 +344,9 @@ launch_echo() {
 
     if [[ "$level" == "error" ]]; then
         printf '%s\n' "$message" >&2
-        emit_wrapper_line "$logger_name" "error" "$message" "stderr" "$launch_phase" "$launch_mode" "shell-echo" "$log_dir" "$opt_path"
     else
         printf '%s\n' "$message"
-        emit_wrapper_line "$logger_name" "info" "$message" "stdout" "$launch_phase" "$launch_mode" "shell-echo" "$log_dir" "$opt_path"
     fi
-}
-
-emit_wrapper_line() {
-    local logger_name="$1"
-    local level="$2"
-    local message="$3"
-    local launch_stream="$4"
-    local launch_phase="$5"
-    local launch_mode="$6"
-    local launch_command="$7"
-    local log_dir="$8"
-    local opt_path="$9"
-
-    "$PYTHON_BIN" - "$logger_name" "$level" "$message" "$launch_stream" "$launch_phase" "$launch_mode" "$launch_command" "$log_dir" "$opt_path" <<'PY'
-import contextlib
-import glob
-import io
-import os
-import sys
-from utils import utils_logger, utils_option
-
-logger_name, level, message, launch_stream, launch_phase, launch_mode, launch_command, log_dir, opt_path = sys.argv[1:10]
-try:
-    with contextlib.redirect_stdout(io.StringIO()):
-        opt = utils_option.parse(opt_path, is_train=True) if opt_path else None
-        existing = sorted(
-            glob.glob(os.path.join(log_dir, f"{logger_name}_*.log")),
-            key=os.path.getmtime,
-        )
-        log_path = existing[-1] if existing else f"{log_dir}/{logger_name}.log"
-        utils_logger.logger_info(
-            logger_name,
-            log_path,
-            opt=opt,
-            add_stream_handler=False,
-            verbose=False,
-        )
-except Exception as e:
-    print(f"[launch_wrapper] logger bootstrap failed: {e}", file=sys.stderr)
-utils_logger.emit_launch_wrapper_log(
-    logger_name=logger_name,
-    level=level,
-    message=message,
-    log_origin="launch_wrapper",
-    launch_stream=launch_stream or None,
-    launch_phase=launch_phase or None,
-    launch_mode=launch_mode or None,
-    launch_command=launch_command or None,
-)
-PY
 }
 
 run_with_wrapper() {
@@ -416,8 +364,6 @@ run_with_wrapper() {
     local stdout_log="$WRAPPER_LOG_DIR/${launch_phase}_${launch_mode}_${timestamp}.stdout.log"
     local stderr_log="$WRAPPER_LOG_DIR/${launch_phase}_${launch_mode}_${timestamp}.stderr.log"
 
-    emit_wrapper_line "$logger_name" "info" "launch wrapper started: ${command_str}" "stdout" "$launch_phase" "$launch_mode" "$command_str" "$log_dir" "$opt_path"
-
     local stdout_pipe stderr_pipe
     stdout_pipe="$(mktemp -u /tmp/s-vrt-wrapper-stdout.XXXXXX)"
     stderr_pipe="$(mktemp -u /tmp/s-vrt-wrapper-stderr.XXXXXX)"
@@ -426,14 +372,12 @@ run_with_wrapper() {
     while IFS= read -r line; do
         printf '%s\n' "$line"
         printf '%s\n' "$line" >> "$stdout_log"
-        emit_wrapper_line "$logger_name" "info" "$line" "stdout" "$launch_phase" "$launch_mode" "$command_str" "$log_dir" "$opt_path"
     done < "$stdout_pipe" &
     local stdout_reader_pid=$!
 
     while IFS= read -r line; do
         printf '%s\n' "$line" >&2
         printf '%s\n' "$line" >> "$stderr_log"
-        emit_wrapper_line "$logger_name" "error" "$line" "stderr" "$launch_phase" "$launch_mode" "$command_str" "$log_dir" "$opt_path"
     done < "$stderr_pipe" &
     local stderr_reader_pid=$!
 
@@ -454,12 +398,6 @@ run_with_wrapper() {
     wait "$stdout_reader_pid"
     wait "$stderr_reader_pid"
     rm -f "$stdout_pipe" "$stderr_pipe"
-
-    if [[ $cmd_exit_code -eq 0 ]]; then
-        emit_wrapper_line "$logger_name" "info" "launch wrapper completed successfully: ${command_str}" "stdout" "$launch_phase" "$launch_mode" "$command_str" "$log_dir" "$opt_path"
-    else
-        emit_wrapper_line "$logger_name" "error" "launch wrapper failed with exit code ${cmd_exit_code}: ${command_str}" "stderr" "$launch_phase" "$launch_mode" "$command_str" "$log_dir" "$opt_path"
-    fi
 
     return "$cmd_exit_code"
 }

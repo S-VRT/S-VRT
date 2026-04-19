@@ -203,6 +203,35 @@ def test_logger_info_attaches_single_logfire_text_handler(monkeypatch, tmp_path)
     assert text_events[0][1] == "hello logfire"
 
 
+def test_logger_info_reuses_exact_log_file_path_without_creating_second_timestamped_log(monkeypatch, tmp_path):
+    fake = _FakeLogfire()
+    monkeypatch.setattr(utils_logger, "LOGFIRE_AVAILABLE", True)
+    monkeypatch.setattr(utils_logger, "logfire", fake)
+
+    logger_name = "test_single_file_reuse"
+    py_logger = logging.getLogger(logger_name)
+    py_logger.handlers = []
+    py_logger.propagate = False
+
+    opt = _make_opt(tmp_path, use_logfire=True, logfire_log_text=True)
+    log_path = tmp_path / "train_260419_204845.log"
+
+    utils_logger.logger_info(logger_name, str(log_path), opt=opt)
+    utils_logger.logger_info(logger_name, str(log_path), opt=opt)
+    py_logger.info("single-file logger reuse")
+
+    created_logs = sorted(tmp_path.glob("train*.log"))
+    assert created_logs == [log_path]
+    assert "single-file logger reuse" in log_path.read_text(encoding="utf-8")
+
+    text_handlers = [
+        handler
+        for handler in py_logger.handlers
+        if handler.__class__.__name__ == "_LogfireLoggingHandler"
+    ]
+    assert len(text_handlers) == 1
+
+
 def test_text_channel_disables_after_first_logfire_emit_error(monkeypatch, tmp_path):
     fake = _FailingInfoLogfire()
     monkeypatch.setattr(utils_logger, "LOGFIRE_AVAILABLE", True)

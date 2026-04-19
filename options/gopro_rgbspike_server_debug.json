@@ -3,7 +3,7 @@
   // 基础配置
   // ========================================
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
-  "task": "gopro_tfp8_scflow_gated_dcn4_debug"
+  "task": "gopro_tfp4_scflow_gated_dcn4_debug"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
   ,
   "model": "vrt"
@@ -658,7 +658,7 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_tfp8_scflow_gated_dcn4"
+    "wandb_name": "gopro_tfp4_scflow_gated_dcn4"
     // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
     ,
     "wandb_mode": null
@@ -676,12 +676,36 @@
     "swanlab_workspace": null
     // SwanLab 运行名称：用于区分不同实验
     ,
-    "swanlab_name": "gopro_tfp8_scflow_gated_dcn4"
+    "swanlab_name": "gopro_tfp4_scflow_gated_dcn4"
     // SwanLab 实验描述：可选文本信息
     ,
     "swanlab_description": "early fusion gated + scflow"
     // SwanLab 运行模式：可设置 cloud/offline/local；留空自动根据 API key 决定
     ,
     "swanlab_mode": null
+    // 是否启用 Logfire：true 表示启用 Logfire 日志上报
+    ,
+    "use_logfire": true
+    // Logfire Token：请替换为你的真实 token
+    ,
+    "logfire_token": "pylf_v1_us_tKLqw6SSVrXQtH7Ts1xDyG2vz2n0pCPRBScS1fbXTwMx"
+    // Logfire 项目名称：可用于区分项目
+    ,
+    "logfire_project_name": "Deblur"
+    // Logfire 服务名称：默认 s-vrt
+    ,
+    "logfire_service_name": "s-vrt"
+    // Logfire 环境名称：可用于区分 server-debug
+    ,
+    "logfire_environment": "server-debug"
+    // 是否将文本日志发送到 Logfire
+    ,
+    "logfire_log_text": true
+    // 是否将训练/验证标量指标发送到 Logfire
+    ,
+    "logfire_log_metrics": true
+    // 是否将计时指标发送到 Logfire
+    ,
+    "logfire_log_timings": true
   }
 }
