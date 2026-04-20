@@ -1,4 +1,7 @@
 from collections import OrderedDict
+from pathlib import Path
+import cv2
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import lr_scheduler
@@ -8,9 +11,16 @@ from models.select_network import define_G
 from models.model_plain import ModelPlain
 from models.loss import CharbonnierLoss
 from models.loss_ssim import SSIMLoss
+from data.spike_recc.encoding25 import load_encoding25_artifact_with_shape
 
 from utils.utils_model import test_mode
 from utils.utils_regularizers import regularizer_orth, regularizer_clip
+
+
+def _tensor_gb(tensor):
+    if tensor is None:
+        return 0.0
+    return tensor.numel() * tensor.element_size() / (1024 ** 3)
 
 
 class ModelVRT(ModelPlain):
@@ -22,6 +32,17 @@ class ModelVRT(ModelPlain):
         self.fix_unflagged = True
 
     def feed_data(self, data, need_H=True):
+        self.L_flow_spike_meta = None
+        if self._flow_module_name() == 'scflow' and 'L_flow_spike_meta' in data and 'L_flow_spike' not in data:
+            with self.timer.timer('data_load'):
+                self.L = self._build_model_input_tensor(data).to(self.device)
+                self._assert_lq_channels(self.L, 'Feed Data')
+                self.L_flow_spike = None
+                self.L_flow_spike_meta = self._normalize_flow_spike_meta(data['L_flow_spike_meta'])
+                if need_H:
+                    self.H = data['H'].to(self.device)
+            return
+
         # Keep VRT data ingress aligned with ModelPlain dual/concat input routing.
         super(ModelVRT, self).feed_data(data, need_H=need_H)
 
@@ -103,13 +124,16 @@ class ModelVRT(ModelPlain):
             self.L = torch.cat([self.L, self.L.flip(1)], dim=1)
 
         flow_spike = getattr(self, 'L_flow_spike', None)
+        flow_spike_meta = getattr(self, 'L_flow_spike_meta', None)
         if pad_seq and flow_spike is not None:
             flow_spike = torch.cat([flow_spike, flow_spike[:, -1:, :, :, :]], dim=1)
         if flip_seq and flow_spike is not None:
             flow_spike = torch.cat([flow_spike, flow_spike.flip(1)], dim=1)
+        if (pad_seq or flip_seq) and flow_spike_meta is not None:
+            raise NotImplementedError("Lazy validation flow metadata does not support pad_seq/flip_seq.")
 
         with torch.no_grad():
-            self.E = self._test_video(self.L, flow_spike=flow_spike)
+            self.E = self._test_video(self.L, flow_spike=flow_spike, flow_spike_meta=flow_spike_meta)
 
         if flip_seq:
             output_1 = self.E[:, :n, :, :, :]
@@ -125,10 +149,15 @@ class ModelVRT(ModelPlain):
 
         self.netG.train()
 
-    def _test_video(self, lq, flow_spike=None):
+    def _test_video(self, lq, flow_spike=None, flow_spike_meta=None):
         '''test the video as a whole or as clips (divided temporally). '''
 
         self._assert_lq_channels(lq, 'Test Video Input')
+        print(
+            f'[VAL_MODEL] _test_video start lq={tuple(lq.shape)} '
+            f'flow_spike={None if flow_spike is None else tuple(flow_spike.shape)} '
+            f'lazy_flow={flow_spike_meta is not None}'
+        )
 
         num_frame_testing = self.opt['val'].get('num_frame_testing', 0)
 
@@ -148,11 +177,23 @@ class ModelVRT(ModelPlain):
             for d_idx in d_idx_list:
                 lq_clip = lq[:, d_idx:d_idx+num_frame_testing, ...]
                 flow_spike_clip = None if flow_spike is None else flow_spike[:, d_idx:d_idx+num_frame_testing, ...]
-                out_clip = self._test_clip(lq_clip, flow_spike=flow_spike_clip)
+                out_clip = self._test_clip(
+                    lq_clip,
+                    flow_spike=flow_spike_clip,
+                    flow_spike_meta=flow_spike_meta,
+                    temporal_offset=d_idx,
+                    full_h=h,
+                    full_w=w,
+                )
                 if E is None:
                     c_out = out_clip.size(2)
                     E = torch.zeros(b, d, c_out, h*sf, w*sf)
                     W = torch.zeros(b, d, 1, 1, 1)
+                    print(
+                        '[VAL_MODEL] _test_video allocated '
+                        f'E={tuple(E.shape)} ({_tensor_gb(E):.2f} GB) '
+                        f'W={tuple(W.shape)} ({_tensor_gb(W):.6f} GB)'
+                    )
                 out_clip_mask = torch.ones((b, min(num_frame_testing, d), 1, 1, 1))
 
                 if not_overlap_border:
@@ -174,15 +215,20 @@ class ModelVRT(ModelPlain):
             lq = torch.cat([lq, torch.flip(lq[:, -d_pad:, ...], [1])], 1)
             if flow_spike is not None:
                 flow_spike = torch.cat([flow_spike, torch.flip(flow_spike[:, -d_pad:, ...], [1])], 1)
-            output = self._test_clip(lq, flow_spike=flow_spike)
+            output = self._test_clip(lq, flow_spike=flow_spike, flow_spike_meta=flow_spike_meta)
             output = output[:, :d_old, :, :, :]
 
         return output
 
-    def _test_clip(self, lq, flow_spike=None):
+    def _test_clip(self, lq, flow_spike=None, flow_spike_meta=None, temporal_offset=0, full_h=None, full_w=None):
         ''' test the clip as a whole or as patches. '''
 
         self._assert_lq_channels(lq, 'Test Clip Input')
+        print(
+            f'[VAL_MODEL] _test_clip start lq={tuple(lq.shape)} '
+            f'flow_spike={None if flow_spike is None else tuple(flow_spike.shape)} '
+            f'lazy_flow={flow_spike_meta is not None}'
+        )
 
         sf = self.opt['scale']
         window_size = self.opt['netG'].get('window_size', [6,8,8])
@@ -191,41 +237,107 @@ class ModelVRT(ModelPlain):
 
         if size_patch_testing:
             # divide the clip to patches (spatially only, tested patch by patch)
-            overlap_size = 20
+            overlap_size = int(self.opt['val'].get('size_patch_overlapping', 20))
+            if overlap_size < 0 or overlap_size >= size_patch_testing:
+                raise ValueError(
+                    f"size_patch_overlapping must be in [0, size_patch_testing), "
+                    f"got overlap={overlap_size}, patch={size_patch_testing}"
+                )
             not_overlap_border = True
 
-            # test patch by patch
+            # Test the same spatial patches as KAIR/VRT, but optionally group
+            # independent patches into one GPU forward to reduce Python overhead.
             b, d, c, h, w = lq.size()
+            if b != 1:
+                raise NotImplementedError("Validation patch batching expects dataloader_batch_size=1.")
             c = c - 1 if self.opt['netG'].get('nonblind_denoising', False) else c
             c_out = self.opt['netG'].get('out_chans', c)
             stride = size_patch_testing - overlap_size
             h_idx_list = list(range(0, h-size_patch_testing, stride)) + [max(0, h-size_patch_testing)]
             w_idx_list = list(range(0, w-size_patch_testing, stride)) + [max(0, w-size_patch_testing)]
+            patch_coords = [(h_idx, w_idx) for h_idx in h_idx_list for w_idx in w_idx_list]
+            patch_batch_size = max(1, int(self.opt['val'].get('patch_batch_size', 1)))
+            cache_flow_patches_cpu = bool(self.opt['val'].get('cache_flow_patches_cpu', False))
+            print(
+                f'[VAL_MODEL] _test_clip patches={len(patch_coords)} '
+                f'patch_batch_size={patch_batch_size} patch={size_patch_testing} overlap={overlap_size} '
+                f'cache_flow_patches_cpu={cache_flow_patches_cpu}'
+            )
             E = None
             W = None
+            lazy_flow_clip = None
+            flow_patch_cache = None
+            if flow_spike_meta is not None:
+                lazy_flow_clip = self._load_lazy_flow_clip(flow_spike_meta, temporal_offset, d)
+                if cache_flow_patches_cpu:
+                    flow_patch_cache = [
+                        self._crop_resize_lazy_flow_patch_cpu(
+                            lazy_flow_clip,
+                            h_idx,
+                            w_idx,
+                            size_patch_testing,
+                            size_patch_testing,
+                            full_h or h,
+                            full_w or w,
+                        )
+                        for h_idx, w_idx in patch_coords
+                    ]
+                    cached_gb = sum(_tensor_gb(patch) for patch in flow_patch_cache)
+                    print(
+                        '[VAL_MODEL] _test_clip cached flow patches on CPU '
+                        f'count={len(flow_patch_cache)} total={cached_gb:.2f} GB'
+                    )
 
-            for h_idx in h_idx_list:
-                for w_idx in w_idx_list:
+            for coord_start in range(0, len(patch_coords), patch_batch_size):
+                coord_batch = patch_coords[coord_start:coord_start + patch_batch_size]
+                in_patches = []
+                flow_patches = []
+                for patch_offset, (h_idx, w_idx) in enumerate(coord_batch):
                     in_patch = lq[..., h_idx:h_idx+size_patch_testing, w_idx:w_idx+size_patch_testing]
+                    in_patches.append(in_patch)
                     flow_patch = None
                     if flow_spike is not None:
                         flow_patch = flow_spike[..., h_idx:h_idx+size_patch_testing, w_idx:w_idx+size_patch_testing]
-                    if hasattr(self, 'netE'):
-                        if flow_patch is not None:
-                            out_patch = self.netE(in_patch, flow_spike=flow_patch).detach().cpu()
-                        else:
-                            out_patch = self.netE(in_patch).detach().cpu()
+                    elif flow_patch_cache is not None:
+                        flow_patch = flow_patch_cache[coord_start + patch_offset]
+                    elif flow_spike_meta is not None:
+                        flow_patch = self._crop_resize_lazy_flow_patch(
+                            lazy_flow_clip,
+                            h_idx,
+                            w_idx,
+                            size_patch_testing,
+                            size_patch_testing,
+                            full_h or h,
+                            full_w or w,
+                        )
+                    if flow_patch is not None:
+                        flow_patches.append(flow_patch)
+
+                in_batch = torch.cat(in_patches, dim=0)
+                flow_batch = torch.cat(flow_patches, dim=0).to(self.device) if flow_patches else None
+                if hasattr(self, 'netE'):
+                    if flow_batch is not None:
+                        out_batch = self.netE(in_batch, flow_spike=flow_batch).detach()
                     else:
-                        if flow_patch is not None:
-                            out_patch = self.netG(in_patch, flow_spike=flow_patch).detach().cpu()
-                        else:
-                            out_patch = self.netG(in_patch).detach().cpu()
+                        out_batch = self.netE(in_batch).detach()
+                else:
+                    if flow_batch is not None:
+                        out_batch = self.netG(in_batch, flow_spike=flow_batch).detach()
+                    else:
+                        out_batch = self.netG(in_batch).detach()
 
-                    if E is None:
-                        c_out = out_patch.size(2)
-                        E = torch.zeros(b, d, c_out, h*sf, w*sf)
-                        W = torch.zeros_like(E)
+                if E is None:
+                    c_out = out_batch.size(2)
+                    E = torch.zeros(b, d, c_out, h*sf, w*sf, device=out_batch.device, dtype=out_batch.dtype)
+                    W = torch.zeros_like(E)
+                    print(
+                        '[VAL_MODEL] _test_clip allocated '
+                        f'E={tuple(E.shape)} ({_tensor_gb(E):.2f} GB) '
+                        f'W={tuple(W.shape)} ({_tensor_gb(W):.2f} GB)'
+                    )
 
+                for patch_idx, (h_idx, w_idx) in enumerate(coord_batch):
+                    out_patch = out_batch[patch_idx:patch_idx + 1]
                     out_patch_mask = torch.ones_like(out_patch)
 
                     if not_overlap_border:
@@ -244,7 +356,7 @@ class ModelVRT(ModelPlain):
 
                     E[..., h_idx*sf:(h_idx+size_patch_testing)*sf, w_idx*sf:(w_idx+size_patch_testing)*sf].add_(out_patch)
                     W[..., h_idx*sf:(h_idx+size_patch_testing)*sf, w_idx*sf:(w_idx+size_patch_testing)*sf].add_(out_patch_mask)
-            output = E.div_(W)
+            output = E.div_(W).cpu()
 
         else:
             _, _, _, h_old, w_old = lq.size()
@@ -256,6 +368,8 @@ class ModelVRT(ModelPlain):
             if flow_spike is not None:
                 flow_spike = torch.cat([flow_spike, torch.flip(flow_spike[:, :, :, -h_pad:, :], [3])], 3)
                 flow_spike = torch.cat([flow_spike, torch.flip(flow_spike[:, :, :, :, -w_pad:], [4])], 4)
+            if flow_spike_meta is not None:
+                raise NotImplementedError("Lazy validation flow metadata requires size_patch_testing > 0.")
 
             if hasattr(self, 'netE'):
                 if flow_spike is not None:
@@ -271,6 +385,135 @@ class ModelVRT(ModelPlain):
             output = output[:, :, :, :h_old*sf, :w_old*sf]
 
         return output
+
+    def _normalize_flow_spike_meta(self, raw_meta):
+        def _first(value):
+            if isinstance(value, (list, tuple)):
+                return _first(value[0])
+            return value
+
+        meta = {}
+        for key, value in raw_meta.items():
+            if key == 'frame_names':
+                if isinstance(value, (list, tuple)) and value and isinstance(value[0], (list, tuple)):
+                    value = [item[0] for item in value]
+                meta[key] = [str(item) for item in value]
+            elif key in {'subframes', 'source_h', 'source_w', 'target_h', 'target_w'}:
+                meta[key] = int(_first(value))
+            else:
+                meta[key] = str(_first(value))
+        return meta
+
+    def _load_lazy_flow_patch(
+        self,
+        meta,
+        temporal_offset,
+        clip_len,
+        h_idx,
+        w_idx,
+        patch_h,
+        patch_w,
+        full_h,
+        full_w,
+    ):
+        src_h = int(meta['source_h'])
+        src_w = int(meta['source_w'])
+        src_top = round(h_idx * src_h / full_h)
+        src_left = round(w_idx * src_w / full_w)
+        src_crop_h = max(round(patch_h * src_h / full_h), 1)
+        src_crop_w = max(round(patch_w * src_w / full_w), 1)
+        src_top = max(min(src_top, src_h - src_crop_h), 0)
+        src_left = max(min(src_left, src_w - src_crop_w), 0)
+
+        flow_tensors = []
+        frame_names = meta['frame_names'][temporal_offset:temporal_offset + clip_len]
+        for frame_name in frame_names:
+            base_path = Path(meta['flow_clip_dir']) / frame_name
+            arr = load_encoding25_artifact_with_shape(
+                base_path,
+                artifact_format=meta['format'],
+                num_subframes=int(meta['subframes']),
+                spike_h=src_h,
+                spike_w=src_w,
+            )
+            if int(meta['subframes']) > 1:
+                for sub_idx in range(int(meta['subframes'])):
+                    flow_tensors.append(
+                        torch.from_numpy(self._crop_resize_flow_chw(arr[sub_idx], src_top, src_left, src_crop_h, src_crop_w, patch_h, patch_w))
+                    )
+            else:
+                flow_tensors.append(
+                    torch.from_numpy(self._crop_resize_flow_chw(arr, src_top, src_left, src_crop_h, src_crop_w, patch_h, patch_w))
+                )
+        flow_patch = torch.stack(flow_tensors, dim=0).unsqueeze(0).to(self.device)
+        return flow_patch.float()
+
+    def _load_lazy_flow_clip(self, meta, temporal_offset, clip_len):
+        src_h = int(meta['source_h'])
+        src_w = int(meta['source_w'])
+        flow_tensors = []
+        frame_names = meta['frame_names'][temporal_offset:temporal_offset + clip_len]
+        for frame_name in frame_names:
+            base_path = Path(meta['flow_clip_dir']) / frame_name
+            arr = load_encoding25_artifact_with_shape(
+                base_path,
+                artifact_format=meta['format'],
+                num_subframes=int(meta['subframes']),
+                spike_h=src_h,
+                spike_w=src_w,
+            )
+            if int(meta['subframes']) > 1:
+                for sub_idx in range(int(meta['subframes'])):
+                    flow_tensors.append(torch.from_numpy(np.asarray(arr[sub_idx], dtype=np.float32)))
+            else:
+                flow_tensors.append(torch.from_numpy(np.asarray(arr, dtype=np.float32)))
+        return torch.stack(flow_tensors, dim=0)
+
+    def _crop_resize_lazy_flow_patch(self, flow_clip, h_idx, w_idx, patch_h, patch_w, full_h, full_w):
+        src_h = flow_clip.size(-2)
+        src_w = flow_clip.size(-1)
+        src_top = round(h_idx * src_h / full_h)
+        src_left = round(w_idx * src_w / full_w)
+        src_crop_h = max(round(patch_h * src_h / full_h), 1)
+        src_crop_w = max(round(patch_w * src_w / full_w), 1)
+        src_top = max(min(src_top, src_h - src_crop_h), 0)
+        src_left = max(min(src_left, src_w - src_crop_w), 0)
+        cropped = flow_clip[..., src_top:src_top + src_crop_h, src_left:src_left + src_crop_w]
+        resized = torch.nn.functional.interpolate(
+            cropped,
+            size=(patch_h, patch_w),
+            mode='bilinear',
+            align_corners=False,
+        )
+        return resized.unsqueeze(0).to(self.device).float()
+
+    def _crop_resize_lazy_flow_patch_cpu(self, flow_clip, h_idx, w_idx, patch_h, patch_w, full_h, full_w):
+        src_h = flow_clip.size(-2)
+        src_w = flow_clip.size(-1)
+        src_top = round(h_idx * src_h / full_h)
+        src_left = round(w_idx * src_w / full_w)
+        src_crop_h = max(round(patch_h * src_h / full_h), 1)
+        src_crop_w = max(round(patch_w * src_w / full_w), 1)
+        src_top = max(min(src_top, src_h - src_crop_h), 0)
+        src_left = max(min(src_left, src_w - src_crop_w), 0)
+        cropped = flow_clip[..., src_top:src_top + src_crop_h, src_left:src_left + src_crop_w]
+        resized = torch.nn.functional.interpolate(
+            cropped,
+            size=(patch_h, patch_w),
+            mode='bilinear',
+            align_corners=False,
+        )
+        return resized.unsqueeze(0).float()
+
+    @staticmethod
+    def _crop_resize_flow_chw(arr_chw, src_top, src_left, src_crop_h, src_crop_w, patch_h, patch_w):
+        arr_chw = np.asarray(arr_chw)
+        cropped = arr_chw[:, src_top:src_top + src_crop_h, src_left:src_left + src_crop_w]
+        resized = [
+            cv2.resize(cropped[ch], (patch_w, patch_h), interpolation=cv2.INTER_LINEAR)
+            for ch in range(cropped.shape[0])
+        ]
+        return np.stack(resized, axis=0).astype(np.float32)
 
     # ----------------------------------------
     # load the state_dict of the network
@@ -305,4 +548,3 @@ class ModelVRT(ModelPlain):
                     print(f'Size different, ignore [{k}]: crt_net: '
                                    f'{crt_net[k].shape}; load_net: {load_net[k].shape}')
                     load_net[k + '.ignore'] = load_net.pop(k)
-

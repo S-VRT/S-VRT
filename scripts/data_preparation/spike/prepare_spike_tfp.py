@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -17,9 +19,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--half-win-length", type=int, default=20)
     parser.add_argument("--device", default="cpu", help="TFP reconstruction device, e.g. cpu or cuda:0.")
     parser.add_argument("--format", choices=["npy", "npz"], default="npy")
+    parser.add_argument(
+        "--storage-dtype",
+        choices=["uint8", "float32"],
+        default="uint8",
+        help="On-disk dtype for precomputed artifacts. uint8 stores the native 0..255 TFP output losslessly.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--clip", default=None, help="Optional single clip name to process.")
     parser.add_argument("--limit", type=int, default=0, help="Optional max number of .dat files to process.")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=max(1, min((os.cpu_count() or 1), 64)),
+        help="Number of worker processes. Each worker uses a single CPU thread internally.",
+    )
     return parser.parse_args()
 
 
@@ -39,14 +53,67 @@ def build_output_base(spike_root: Path, clip_name: str, num_bins: int, half_win_
     return out_dir / frame_stem
 
 
-def save_artifact(base_path: Path, spike_voxel: np.ndarray, artifact_format: str) -> Path:
+def _encode_spike_voxel(spike_voxel: np.ndarray, storage_dtype: str) -> np.ndarray:
+    if storage_dtype == "uint8":
+        return np.rint(np.asarray(spike_voxel, dtype=np.float32) * 255.0).astype(np.uint8)
+    return np.asarray(spike_voxel, dtype=np.float32)
+
+
+def save_artifact(base_path: Path, spike_voxel: np.ndarray, artifact_format: str, storage_dtype: str) -> Path:
+    encoded = _encode_spike_voxel(spike_voxel, storage_dtype)
     if artifact_format == "npy":
         out_path = base_path.with_suffix(".npy")
-        np.save(out_path, spike_voxel.astype(np.float32))
+        np.save(out_path, encoded)
         return out_path
     out_path = base_path.with_suffix(".npz")
-    np.savez_compressed(out_path, spike_voxel=spike_voxel.astype(np.float32))
+    np.savez_compressed(out_path, spike_voxel=encoded)
     return out_path
+
+
+def _worker_init() -> None:
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+
+def _process_one(
+    spike_root_str: str,
+    clip_name: str,
+    dat_path_str: str,
+    spike_h: int,
+    spike_w: int,
+    num_bins: int,
+    half_win_length: int,
+    device: str,
+    artifact_format: str,
+    storage_dtype: str,
+    overwrite: bool,
+) -> str:
+    spike_root = Path(spike_root_str)
+    dat_path = Path(dat_path_str)
+    frame_stem = dat_path.stem
+    out_base = build_output_base(spike_root, clip_name, num_bins, half_win_length, frame_stem)
+    out_path = out_base.with_suffix(f".{artifact_format}")
+    if out_path.exists() and not overwrite:
+        return "skipped"
+
+    spike_stream = SpikeStream(
+        offline=True,
+        filepath=str(dat_path),
+        spike_h=spike_h,
+        spike_w=spike_w,
+        print_dat_detail=False,
+    )
+    spike_matrix = spike_stream.get_spike_matrix(flipud=True)
+    spike_voxel = voxelize_spikes_tfp(
+        spike_matrix,
+        num_channels=num_bins,
+        device=device,
+        half_win_length=half_win_length,
+    )
+    save_artifact(out_base, spike_voxel, artifact_format, storage_dtype)
+    return "processed"
 
 
 def main() -> None:
@@ -55,34 +122,44 @@ def main() -> None:
     processed = 0
     skipped = 0
 
-    for clip_name, dat_path in iter_dat_files(spike_root, args.clip):
-        frame_stem = dat_path.stem
-        out_base = build_output_base(spike_root, clip_name, args.num_bins, args.half_win_length, frame_stem)
-        out_path = out_base.with_suffix(f".{args.format}")
-        if out_path.exists() and not args.overwrite:
-            skipped += 1
-            continue
+    jobs = list(iter_dat_files(spike_root, args.clip))
+    if args.limit:
+        jobs = jobs[: args.limit]
 
-        spike_stream = SpikeStream(
-            offline=True,
-            filepath=str(dat_path),
-            spike_h=args.spike_h,
-            spike_w=args.spike_w,
-            print_dat_detail=False,
-        )
-        spike_matrix = spike_stream.get_spike_matrix(flipud=True)
-        spike_voxel = voxelize_spikes_tfp(
-            spike_matrix,
-            num_channels=args.num_bins,
-            device=args.device,
-            half_win_length=args.half_win_length,
-        )
-        save_artifact(out_base, spike_voxel, args.format)
-        processed += 1
-        if processed % 100 == 0:
-            print(f"[prepare_spike_tfp] processed={processed} skipped={skipped} last={dat_path}")
-        if args.limit and processed >= args.limit:
-            break
+    worker_count = max(1, int(args.workers))
+    print(f"[prepare_spike_tfp] start jobs={len(jobs)} workers={worker_count} format={args.format} storage_dtype={args.storage_dtype}")
+
+    with ProcessPoolExecutor(max_workers=worker_count, initializer=_worker_init) as executor:
+        futures = {
+            executor.submit(
+                _process_one,
+                str(spike_root),
+                clip_name,
+                str(dat_path),
+                args.spike_h,
+                args.spike_w,
+                args.num_bins,
+                args.half_win_length,
+                args.device,
+                args.format,
+                args.storage_dtype,
+                args.overwrite,
+            ): (clip_name, dat_path)
+            for clip_name, dat_path in jobs
+        }
+
+        for idx, future in enumerate(as_completed(futures), start=1):
+            clip_name, dat_path = futures[future]
+            result = future.result()
+            if result == "processed":
+                processed += 1
+            elif result == "skipped":
+                skipped += 1
+            if idx % 100 == 0 or idx == len(jobs):
+                print(
+                    f"[prepare_spike_tfp] completed={idx}/{len(jobs)} processed={processed} "
+                    f"skipped={skipped} last={clip_name}/{dat_path.name}"
+                )
 
     print(f"[prepare_spike_tfp] done processed={processed} skipped={skipped}")
 

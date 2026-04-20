@@ -89,7 +89,7 @@ class _LogfireLoggingHandler(logging.Handler):
 def logger_info(logger_name, log_path='default_logger.log', opt=None, add_stream_handler=True, verbose=True):
     ''' set up logger
     modified by Kai Zhang (github: https://github.com/cszn)
-    Enhanced to create timestamped log files for each run
+    Console-only logger setup. File-based logging is intentionally disabled.
     '''
     # Avoid attaching handlers on non-master processes to prevent duplicate logs
     try:
@@ -109,41 +109,7 @@ def logger_info(logger_name, log_path='default_logger.log', opt=None, add_stream
             print('LogHandlers setup!')
         level = logging.INFO
         formatter = logging.Formatter('%(asctime)s.%(msecs)03d : %(message)s', datefmt='%y-%m-%d %H:%M:%S')
-
-        # Generate timestamp for log file
-        timestamp = datetime.datetime.now().strftime('_%y%m%d_%H%M%S')
-
-        # Process log_path to add timestamp
-        if os.path.isfile(log_path):
-            # Caller passed an existing file — use it directly (append mode).
-            log_file = log_path
-        elif os.path.isdir(log_path):
-            # If log_path is a directory, create log file with timestamp
-            log_file = os.path.join(log_path, logger_name + timestamp + '.log')
-        else:
-            # If log_path is a file path, insert timestamp before extension
-            dir_name = os.path.dirname(log_path)
-            file_name = os.path.basename(log_path)
-            if dir_name:
-                os.makedirs(dir_name, exist_ok=True)
-            name, ext = os.path.splitext(file_name)
-            log_file = os.path.join(dir_name, name + timestamp + ext) if dir_name else (name + timestamp + ext)
-
-        # Ensure directory exists
-        log_dir = os.path.dirname(log_file)
-        if log_dir:
-            os.makedirs(log_dir, exist_ok=True)
-
-        # Use 'a' mode if the file already exists (e.g. wrapper subprocesses
-        # appending to a log created by ensure_launch_logger), otherwise 'w'.
-        file_mode = 'a' if os.path.exists(log_file) else 'w'
-        fh = logging.FileHandler(log_file, mode=file_mode)
-        fh.setFormatter(formatter)
         log.setLevel(level)
-        log.addHandler(fh)
-        action = 'appending to' if file_mode == 'a' else 'created'
-        if verbose:
-            print(f'Log file {action}: {log_file}')
 
         if add_stream_handler:
             sh = logging.StreamHandler()

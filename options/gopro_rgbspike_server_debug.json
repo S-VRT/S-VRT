@@ -67,7 +67,7 @@
     //   - "auto"：自动查找 models 目录中的最新检查点（用于恢复训练）
     //   - "path/to/model.pth"：使用指定的预训练模型路径
     ,
-    "pretrained_netG": null
+    "pretrained_netG": "weights/vrt/006_VRT_videodeblurring_GoPro.pth"
     // 预训练的编码器（Encoder）模型路径，支持三种模式：
     //   - null：不使用预训练编码器，不自动查找检查点
     //   - "auto"：自动查找 models 目录中的最新检查点（用于恢复训练）
@@ -212,10 +212,10 @@
       // 注意：在DDP模式下，每个GPU会创建 dataloader_num_workers // num_gpu 个worker
       // 建议值：每个GPU 4-8个worker，3卡DDP建议设置为12-24
       ,
-      "dataloader_num_workers": 0
+      "dataloader_num_workers": 20
       // 批次大小：每个批次包含的样本数量
       ,
-      "dataloader_batch_size": 2
+      "dataloader_batch_size": 4
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -265,6 +265,11 @@
         "reconstruction": {
           "type": "spikecv_tfp",
           "num_bins": 4
+        },
+        "precomputed": {
+          "enable": true,
+          "root": "auto",
+          "format": "npy"
         }
       }
       // Spike 重建配置：使用字典级配置项
@@ -325,10 +330,10 @@
       // 注意：在DDP模式下，每个GPU会创建 dataloader_num_workers // num_gpu 个worker
       // 建议值：每个GPU 4-8个worker，3卡DDP建议设置为12-24
       ,
-      "dataloader_num_workers": 0
+      "dataloader_num_workers": 20
       // 测试/验证批次大小：可根据显存调整
       ,
-      "dataloader_batch_size": 2
+      "dataloader_batch_size": 1
     }
   }
   // ========================================
@@ -573,7 +578,7 @@
     // 学习率调度器配置
     // 总迭代次数：训练的总迭代步数
     ,
-    "total_iter": 10
+    "total_iter": 1
     // 生成器学习率调度器类型："CosineAnnealingWarmRestarts" 表示带重启的余弦退火调度器
     ,
     "G_scheduler_type": "CosineAnnealingWarmRestarts"
@@ -593,14 +598,14 @@
     // 参数严格匹配配置
     // 生成器参数严格匹配：true 表示加载预训练模型时严格匹配参数名称
     ,
-    "G_param_strict": true
+    "G_param_strict": false
     // 编码器参数严格匹配：true 表示加载预训练模型时严格匹配参数名称
     ,
     "E_param_strict": true
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 10
+    "checkpoint_test": 1
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 2
@@ -626,16 +631,22 @@
     "center_frame_only": false
     // 测试时使用的帧数：18 表示测试时处理 18 帧视频
     ,
-    "num_frame_testing": 24
+    "num_frame_testing": 18
     // 测试时的重叠帧数：2 表示相邻测试窗口之间有 2 帧重叠（用于滑动窗口测试）
     ,
     "num_frame_overlapping": 2
     // 测试时的补丁大小：160 表示将大图像分割成 160x160 的补丁进行测试
     ,
-    "size_patch_testing": 64
+    "size_patch_testing": 128
     // 测试时的补丁重叠大小：20 表示相邻测试补丁之间有 20 像素重叠（用于滑动窗口测试）
     ,
     "size_patch_overlapping": 20
+    // 测试时将多个空间补丁合并为一个 batch 推理；不改变补丁划分、重叠或指标计算
+    ,
+    "patch_batch_size": 1
+    // 是否在每个 temporal clip 开始时把全部 flow patches 预构造成 CPU 缓存，减少 patch loop 内逐 patch resize
+    ,
+    "cache_flow_patches_cpu": true
   }
   // ========================================
   // 日志记录配置

@@ -209,6 +209,7 @@ class TrainDatasetRGBSpike(data.Dataset):
         self.input_pack_mode = normalized_input_pack_mode
         self.keep_legacy_l = bool(compat_cfg.get('keep_legacy_L', opt.get('keep_legacy_l', True)))
         self._dual_mode = self.input_pack_mode == 'dual'
+        self._precomputed_spike_warned = set()
         # Raw ingress width remains RGB 3 + spike bins; dual mode may still emit the
         # concatenated `L` tensor for compatibility when keep_legacy_l=True.
         self.expected_lq_channels = 3 + self.spike_channels
@@ -517,18 +518,39 @@ class TrainDatasetRGBSpike(data.Dataset):
         if self.precomputed_spike_format == 'npy':
             path = base_path.with_suffix('.npy')
             if not path.exists():
+                warn_key = (clip_name, 'npy')
+                if warn_key not in self._precomputed_spike_warned:
+                    self._precomputed_spike_warned.add(warn_key)
+                    print(
+                        f"[TRAIN_DATASET] precomputed spike miss for clip={clip_name}: "
+                        f"expected {path}; falling back to raw .dat reconstruction.",
+                        flush=True,
+                    )
                 return None
             spike_voxel = np.load(path)
         elif self.precomputed_spike_format == 'npz':
             path = base_path.with_suffix('.npz')
             if not path.exists():
+                warn_key = (clip_name, 'npz')
+                if warn_key not in self._precomputed_spike_warned:
+                    self._precomputed_spike_warned.add(warn_key)
+                    print(
+                        f"[TRAIN_DATASET] precomputed spike miss for clip={clip_name}: "
+                        f"expected {path}; falling back to raw .dat reconstruction.",
+                        flush=True,
+                    )
                 return None
             with np.load(path) as data:
                 spike_voxel = data['spike_voxel']
         else:
             raise ValueError(f"Unsupported precomputed spike format: {self.precomputed_spike_format!r}")
 
-        spike_voxel = np.asarray(spike_voxel, dtype=np.float32)
+        spike_voxel_arr = np.asarray(spike_voxel)
+        if np.issubdtype(spike_voxel_arr.dtype, np.integer):
+            # Precomputed uint8 artifacts store the original 0..255 TFP output losslessly.
+            spike_voxel = spike_voxel_arr.astype(np.float32) / 255.0
+        else:
+            spike_voxel = spike_voxel_arr.astype(np.float32)
         if spike_voxel.ndim != 3:
             raise ValueError(
                 f"Precomputed spike voxel must be [C,H,W], got {spike_voxel.shape} from {path}"

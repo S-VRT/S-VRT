@@ -51,6 +51,29 @@ def log_memory_stage(logger, stage_name, rank=0):
     return 0.0
 
 
+def log_validation_probe(logger, label, rank=0):
+    """Log a compact validation-stage probe with process and CUDA memory state."""
+    if rank != 0 or logger is None:
+        return
+    try:
+        process = psutil.Process(os.getpid())
+        rss_gb = process.memory_info().rss / (1024 ** 3)
+        vms_gb = process.memory_info().vms / (1024 ** 3)
+        cuda_parts = []
+        if torch.cuda.is_available():
+            for dev_idx in range(torch.cuda.device_count()):
+                try:
+                    alloc_gb = torch.cuda.memory_allocated(dev_idx) / (1024 ** 3)
+                    reserved_gb = torch.cuda.memory_reserved(dev_idx) / (1024 ** 3)
+                    cuda_parts.append(f'cuda:{dev_idx} alloc={alloc_gb:.2f}GB reserved={reserved_gb:.2f}GB')
+                except Exception as cuda_exc:
+                    cuda_parts.append(f'cuda:{dev_idx} error={cuda_exc}')
+        cuda_summary = '; '.join(cuda_parts) if cuda_parts else 'cuda:unavailable'
+        logger.info(f'[VAL_PROBE] {label} | rss={rss_gb:.2f}GB vms={vms_gb:.2f}GB | {cuda_summary}')
+    except Exception as exc:
+        logger.warning(f'[VAL_PROBE] {label} probe failed: {exc}')
+
+
 def main():
     """
     主训练函数，接收命令行参数指定的配置文件路径
@@ -258,6 +281,7 @@ def main():
                 if per_gpu_train_workers > 0:
                     train_loader_kwargs['persistent_workers'] = dataset_opt.get('dataloader_persistent_workers', False)
                     train_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
+                    train_loader_kwargs['multiprocessing_context'] = 'spawn'
                 train_loader = DataLoader(train_set, **train_loader_kwargs)
             else:
                 # 单 GPU 训练模式
@@ -272,6 +296,7 @@ def main():
                 if train_num_workers > 0:
                     train_loader_kwargs['persistent_workers'] = dataset_opt.get('dataloader_persistent_workers', False)
                     train_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
+                    train_loader_kwargs['multiprocessing_context'] = 'spawn'
                 train_loader = DataLoader(train_set, **train_loader_kwargs)
 
         elif phase == 'test':
@@ -324,6 +349,7 @@ def main():
                 if per_gpu_num_workers > 0:
                     test_loader_kwargs['persistent_workers'] = dataset_opt.get('dataloader_persistent_workers', False)
                     test_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
+                    test_loader_kwargs['multiprocessing_context'] = 'spawn'
                 test_loader = DataLoader(test_set, **test_loader_kwargs)
             else:
                 # 单卡验证 / 测试
@@ -337,6 +363,7 @@ def main():
                 if test_num_workers > 0:
                     test_loader_kwargs['persistent_workers'] = dataset_opt.get('dataloader_persistent_workers', False)
                     test_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
+                    test_loader_kwargs['multiprocessing_context'] = 'spawn'
                 test_loader = DataLoader(test_set, **test_loader_kwargs)
         else:
             raise NotImplementedError("Phase [%s] is not recognized." % phase)
@@ -478,10 +505,30 @@ def main():
 
                 # 遍历测试数据
                 for idx, test_data in enumerate(test_loader):
+                    if idx < 2:
+                        log_validation_probe(logger, f'before feed_data batch={idx}', opt['rank'])
+                        if opt['rank'] == 0:
+                            batch_summary = []
+                            for key, value in test_data.items():
+                                if hasattr(value, 'shape'):
+                                    batch_summary.append(f'{key}:{tuple(value.shape)}')
+                                elif isinstance(value, (list, tuple)):
+                                    batch_summary.append(f'{key}:len={len(value)}')
+                                else:
+                                    batch_summary.append(f'{key}:{type(value).__name__}')
+                            logger.info(f'[VAL_BATCH] idx={idx} contents: {", ".join(batch_summary)}')
                     # 将测试数据送入模型
                     model.feed_data(test_data)
+                    if idx < 2:
+                        log_validation_probe(logger, f'after feed_data batch={idx}', opt['rank'])
                     # 执行测试（前向传播，不更新梯度）
+                    if idx < 2 and opt['rank'] == 0:
+                        logger.info(f'[VAL_BATCH] idx={idx} entering model.test()')
                     model.test()
+                    if idx < 2:
+                        log_validation_probe(logger, f'after model.test batch={idx}', opt['rank'])
+                        if opt['rank'] == 0:
+                            logger.info(f'[VAL_BATCH] idx={idx} model.test() completed')
 
                     # 获取模型输出和真实标签
                     visuals = model.current_visuals()

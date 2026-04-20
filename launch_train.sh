@@ -57,6 +57,23 @@ export LD_LIBRARY_PATH="$(dirname "$PYTHON_BIN")/../lib/python3.11/site-packages
 export TORCH_CUDA_ARCH_LIST=8.9
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+sanitize_positive_thread_env() {
+    local name="$1"
+    local default_value="$2"
+    local current_value="${!name:-}"
+    if [[ -z "$current_value" || ! "$current_value" =~ ^[1-9][0-9]*$ ]]; then
+        export "$name=$default_value"
+    fi
+}
+
+# External shells may inject invalid values such as OMP_NUM_THREADS=0. Keep
+# per-process thread pools bounded because DataLoader workers also inherit them.
+CPU_THREADS_PER_PROCESS="${CPU_THREADS_PER_PROCESS:-4}"
+sanitize_positive_thread_env OMP_NUM_THREADS "$CPU_THREADS_PER_PROCESS"
+sanitize_positive_thread_env MKL_NUM_THREADS "$CPU_THREADS_PER_PROCESS"
+sanitize_positive_thread_env OPENBLAS_NUM_THREADS "$CPU_THREADS_PER_PROCESS"
+sanitize_positive_thread_env NUMEXPR_NUM_THREADS "$CPU_THREADS_PER_PROCESS"
+
 # Parse arguments
 GPU_COUNT=""
 CONFIG_PATH=""
