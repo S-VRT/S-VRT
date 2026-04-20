@@ -164,6 +164,66 @@ scale = max_displacement / (displacement + 1e-6)
 
 CharbonnierLoss 在 autocast 外计算（天然 fp32），但 eps 值会从 config 传入，保持代码不变，通过 config 修正：两个 server.json 中的 `G_charbonnier_eps: 1e-9` → `1e-6`。
 
+### 4.6 flow.py — grid `.float()` 导致 dtype 不匹配（`models/utils/flow.py:26`）**[RuntimeError]**
+
+`flow_warp` 被 VRT 主 forward 路径大量调用（`stages.py`, `vrt.py`），在 autocast 下必然 crash：
+
+```python
+# line 25: grid_y, grid_x 已用 dtype=x.dtype（fp16）
+# line 26 修改前（会 crash）：
+grid = torch.stack((grid_x, grid_y), 2).float()  # 强制 fp32
+# line 29: vgrid = grid(fp32) + flow(fp16) → RuntimeError: expected scalar type Float but found Half
+
+# 修改后：去掉 .float()，grid 保持 x.dtype
+grid = torch.stack((grid_x, grid_y), 2)
+```
+
+坐标值范围 0~分辨率上限，fp16 最大值 ~65504，完全安全。归一化后坐标在 [-1, 1]，fp16 精度也足够。
+
+### 4.7 SCFlowWrapper — 退出 autocast 上下文（`models/optical_flow/scflow/wrapper.py`）**[RuntimeError]**
+
+SCFlow 是冻结预训练模型，在 `eval()` 模式下运行，应完全在 fp32 下执行。当前 `torch.no_grad()` 不阻断外层 autocast 上下文，导致内部张量变为 fp16。修复方式：显式退出 autocast 并将输入转为 fp32。
+
+```python
+def forward(self, spk1, spk2):
+    self._validate_spike_pair(spk1, spk2)
+    try:
+        device = next(self.model.parameters()).device
+    except StopIteration:
+        device = self.device
+
+    spk1 = spk1.to(device=device, dtype=torch.float32)
+    spk2 = spk2.to(device=device, dtype=torch.float32)
+
+    b, _, h, w = spk1.shape
+    flow_init = torch.zeros(b, 2, h, w, device=device, dtype=torch.float32)
+
+    with torch.no_grad(), torch.autocast("cuda", enabled=False):
+        flows, _ = self.model(spk1, spk2, flow_init, dt=self.dt)
+
+    return flows[:4]
+```
+
+### 4.8 scflow.py — 内部 dtype 清理（`models/optical_flow/scflow/models/scflow.py`）
+
+在 wrapper 已退出 autocast 的情况下，以下修改作为防御性修复，防止该模型在其他上下文中被调用时出错：
+
+**line 159**：去掉 `.float()`，让 flow tensor 保持与 features 一致的 dtype：
+```python
+# 修改前
+flow = torch.zeros(b, 2, h, w, dtype=init_dtype, device=init_device).float()
+# 修改后
+flow = torch.zeros(b, 2, h, w, dtype=init_dtype, device=init_device)
+```
+
+**line 32**：linspace 加 `dtype=seq.dtype`，避免与 seq 的隐式 upcast：
+```python
+# 修改前
+flow_factor = (torch.linspace(-12, 12, steps=25, device=seq.device) / dt)
+# 修改后
+flow_factor = (torch.linspace(-12, 12, steps=25, dtype=seq.dtype, device=seq.device) / dt)
+```
+
 ---
 
 ## 第五节：无需修改的模块（已排除）
@@ -179,7 +239,7 @@ CharbonnierLoss 在 autocast 外计算（天然 fp32），但 eps 值会从 conf
 | attention.py 位置编码累加 | 已有 `dtype=torch.float32` 显式保护 |
 | corr.py 相关性除法（除以 32） | 结果 0.03125，fp16 安全 |
 | snn.py TFP 归一化 | 在 CPU dataloader 中用 numpy/float32，不在 GPU forward 路径 |
-| SCFlow wrapper | `torch.no_grad()` + `eval()` 模式，与训练 autocast 隔离 |
+| SCFlow wrapper | 已修复为显式退出 autocast，fp32 运行 |
 | gated.py sigmoid | PyTorch autocast 处理 |
 | AffineDropPath init_scale=1e-4 | fp16 可表示（> fp16 最小正数 ~6e-5） |
 
@@ -193,6 +253,9 @@ CharbonnierLoss 在 autocast 外计算（天然 fp32），但 eps 值会从 conf
 | `options/006_train_vrt_videodeblurring_gopro_rgbspike.json` | 同上 |
 | `models/model_plain.py` | AMP 初始化、optimize_parameters、checkpoint |
 | `models/model_vrt.py` | optimize_parameters 同步 AMP 逻辑 |
+| `models/utils/flow.py` | 去掉 grid `.float()`，修复全局 flow_warp dtype 不匹配 **[crash fix]** |
+| `models/optical_flow/scflow/wrapper.py` | 加 `autocast(enabled=False)`，输入转 fp32 **[crash fix]** |
+| `models/optical_flow/scflow/models/scflow.py` | 去掉 flow zeros `.float()`；linspace 加 dtype **[防御性修复]** |
 | `models/optical_flow/sea_raft.py` | channels_first LayerNorm fp32 cast；layer_scale_init 1e-6→1e-4；eps 1e-6→1e-5 |
 | `models/blocks/sgp.py` | 自定义 LayerNorm forward fp32 cast |
 | `models/optical_flow/base.py` | postprocess_flow eps 1e-8→1e-6 |
