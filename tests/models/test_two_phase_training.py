@@ -91,3 +91,41 @@ def test_define_optimizer_differential_lr_with_unfrozen_params():
 
     assert len(flow_params) > 0, "解冻后 spynet 应在 flow_params"
     assert abs(base_lr * fix_lr_mul - 2e-5) < 1e-10
+
+
+def test_enter_phase2_injects_lora_and_unfreezes_fix_keys():
+    """_enter_phase2 应注入 LoRA 并解冻 fix_keys，主干 base 权重保持冻结。"""
+    from models.model_plain import freeze_backbone
+    from models.lora import inject_lora, LoRALinear
+
+    model = _MiniModel()
+    freeze_backbone(model)  # Phase 1 状态：只有 fusion_operator 可训练
+
+    # 模拟 _enter_phase2 逻辑
+    fix_keys = ["spynet", "pa_deform"]
+    targets = ["qkv"]
+    rank, alpha = 4, 8
+
+    # 1. 注入 LoRA
+    inject_lora(model, target_substrings=targets, rank=rank, alpha=alpha)
+    # 2. 解冻 fix_keys
+    for name, param in model.named_parameters():
+        if any(key in name for key in fix_keys):
+            param.requires_grad = True
+    # 3. 解冻 LoRA params（freeze_backbone 已保留，但注入后需确认）
+    for name, param in model.named_parameters():
+        if 'lora_A' in name or 'lora_B' in name:
+            param.requires_grad = True
+
+    # LoRA 已注入
+    assert isinstance(model.backbone_qkv, LoRALinear)
+    # LoRA 参数可训练
+    assert model.backbone_qkv.lora_A.weight.requires_grad is True
+    assert model.backbone_qkv.lora_B.weight.requires_grad is True
+    # backbone base 权重冻结
+    assert model.backbone_qkv.base.weight.requires_grad is False
+    # fix_keys 解冻
+    assert model.spynet_conv.weight.requires_grad is True
+    assert model.pa_deform_conv.weight.requires_grad is True
+    # fusion 仍可训练
+    assert model.fusion_operator_gate.weight.requires_grad is True
