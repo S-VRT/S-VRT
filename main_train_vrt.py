@@ -380,8 +380,9 @@ def main():
     model.init_train()
     if opt['rank'] == 0:
         # 记录网络结构和参数信息
-        logger.info(model.info_network())  # 网络架构信息
-        logger.info(model.info_params())  # 参数数量信息
+        # logger.info(model.info_network())  # 网络架构信息
+        # logger.info(model.info_params())  # 参数数量信息
+        pass
 
     '''
     # ----------------------------------------
