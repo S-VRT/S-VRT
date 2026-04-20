@@ -58,15 +58,15 @@ class ModelVRT(ModelPlain):
             normal_params = []
             flow_params = []
             for name, param in self.netG.named_parameters():
-                if not param.requires_grad:
-                    continue
+                # Include ALL params (even frozen) so they're in optimizer when unfrozen later
                 if any([key in name for key in self.fix_keys]):
                     flow_params.append(param)
                 else:
                     normal_params.append(param)
-            G_optim_params = [{'params': normal_params, 'lr': self.opt_train['G_optimizer_lr']}]
-            if flow_params:
-                G_optim_params.append({'params': flow_params, 'lr': self.opt_train['G_optimizer_lr'] * fix_lr_mul})
+            G_optim_params = [
+                {'params': normal_params, 'lr': self.opt_train['G_optimizer_lr']},
+                {'params': flow_params, 'lr': self.opt_train['G_optimizer_lr'] * fix_lr_mul},
+            ]
             if self.opt_train['G_optimizer_type'] == 'adam':
                 self.G_optimizer = Adam(G_optim_params, lr=self.opt_train['G_optimizer_lr'],
                                         betas=self.opt_train['G_optimizer_betas'],
@@ -89,47 +89,23 @@ class ModelVRT(ModelPlain):
                         param.requires_grad_(False)
             elif current_step == self.fix_iter:
                 if self.opt_train.get('phase2_lora_mode', False):
-                    self._enter_phase2()
+                    bare = self.get_bare_model(self.netG)
+                    for name, param in bare.named_parameters():
+                        if any(key in name for key in self.fix_keys):
+                            param.requires_grad_(True)
+                        if 'lora_A' in name or 'lora_B' in name:
+                            param.requires_grad_(True)
+                    trainable = sum(p.requires_grad for p in bare.parameters())
+                    print(f'[Phase 2] Unfrozen fix_keys={self.fix_keys} + LoRA at iter {self.fix_iter}. '
+                          f'Trainable params: {trainable}')
                 else:
                     print(f'Train all the parameters from {self.fix_iter} iters.')
                     self.netG.requires_grad_(True)
-                    if self.opt.get('dist', False) and self.opt.get('use_static_graph', False):
-                        print('Re-wrapping DDP for static graph change...')
-                        self.netG = self.model_to_device(self.get_bare_model(self.netG))
+                if self.opt.get('dist', False) and self.opt.get('use_static_graph', False):
+                    print('Re-wrapping DDP for static graph change...')
+                    self.netG = self.model_to_device(self.get_bare_model(self.netG))
 
         super(ModelVRT, self).optimize_parameters(current_step)
-
-    def _enter_phase2(self):
-        """Phase 1 → Phase 2 相变：注入 LoRA，解冻 fix_keys，重建 optimizer+scheduler。"""
-        print(f'[Phase 2] Entering Phase 2 at iter {self.fix_iter}.')
-        bare_model = self.get_bare_model(self.netG)
-
-        if self.opt_train.get('use_lora', False):
-            from models.lora import inject_lora
-            targets = self.opt_train.get('lora_target_modules', ['qkv', 'proj'])
-            rank = int(self.opt_train.get('lora_rank', 8))
-            alpha = float(self.opt_train.get('lora_alpha', 16))
-            replaced = inject_lora(bare_model, targets, rank=rank, alpha=alpha)
-            print(f'[Phase 2] Injected LoRA(rank={rank}, alpha={alpha}) into {len(replaced)} layers')
-            if self.opt_train.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
-                inject_lora(self.get_bare_model(self.netE), targets, rank=rank, alpha=alpha)
-
-        for name, param in bare_model.named_parameters():
-            if any(key in name for key in self.fix_keys):
-                param.requires_grad_(True)
-            if 'lora_A' in name or 'lora_B' in name:
-                param.requires_grad_(True)
-
-        trainable = sum(p.requires_grad for p in bare_model.parameters())
-        print(f'[Phase 2] Trainable params after phase transition: {trainable}')
-
-        if self.opt.get('dist', False) and self.opt.get('use_static_graph', False):
-            print('[Phase 2] Re-wrapping DDP for static graph change...')
-            self.netG = self.model_to_device(bare_model)
-
-        self.define_optimizer()
-        self.schedulers.clear()
-        self.define_scheduler()
 
     # ----------------------------------------
     # test / inference
