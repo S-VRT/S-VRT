@@ -45,7 +45,7 @@ class ModelPlain(ModelBase):
         self.amp_train_enabled = bool(amp_train_opt.get('enable', False)) and self.device.type == 'cuda'
         self.amp_train_dtype = self._resolve_amp_dtype(amp_train_opt.get('dtype', 'float16'))
         scaler_enabled = self.amp_train_enabled and self.amp_train_dtype == torch.float16
-        self.grad_scaler = torch.cuda.amp.GradScaler(enabled=scaler_enabled)
+        self.grad_scaler = torch.amp.GradScaler('cuda', enabled=scaler_enabled)
         amp_val_opt = self.opt.get('val', {}).get('amp', {})
         self.amp_val_enabled = bool(amp_val_opt.get('enable', False)) and self.device.type == 'cuda'
         self.amp_val_dtype = self._resolve_amp_dtype(amp_val_opt.get('dtype', amp_train_opt.get('dtype', 'float16')))
