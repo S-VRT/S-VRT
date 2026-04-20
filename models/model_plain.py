@@ -1,4 +1,5 @@
 from collections import OrderedDict
+from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -40,6 +41,14 @@ class ModelPlain(ModelBase):
         if self.opt_train['E_decay'] > 0:
             self.netE = define_G(opt).to(self.device).eval()
         self.L_flow_spike = None
+        amp_train_opt = self.opt_train.get('amp', {})
+        self.amp_train_enabled = bool(amp_train_opt.get('enable', False)) and self.device.type == 'cuda'
+        self.amp_train_dtype = self._resolve_amp_dtype(amp_train_opt.get('dtype', 'float16'))
+        scaler_enabled = self.amp_train_enabled and self.amp_train_dtype == torch.float16
+        self.grad_scaler = torch.amp.GradScaler('cuda', enabled=scaler_enabled)
+        amp_val_opt = self.opt.get('val', {}).get('amp', {})
+        self.amp_val_enabled = bool(amp_val_opt.get('enable', False)) and self.device.type == 'cuda'
+        self.amp_val_dtype = self._resolve_amp_dtype(amp_val_opt.get('dtype', amp_train_opt.get('dtype', 'float16')))
 
     def _assert_lq_channels(self, tensor, tensor_name):
         """Validate the raw model-ingress tensor against configured input width."""
@@ -238,6 +247,12 @@ class ModelPlain(ModelBase):
         if load_path_optimizerG is not None and self.opt_train['G_optimizer_reuse']:
             print('Loading optimizerG [{:s}] ...'.format(load_path_optimizerG))
             self.load_optimizer(load_path_optimizerG, self.G_optimizer)
+        if self.grad_scaler.is_enabled() and load_path_optimizerG is not None:
+            import os
+            scaler_path = load_path_optimizerG.replace('_optimizerG.pth', '_scaler.pth')
+            if os.path.exists(scaler_path):
+                self.grad_scaler.load_state_dict(torch.load(scaler_path, map_location='cpu'))
+                print(f'Loading GradScaler state from [{scaler_path}]')
 
     # ----------------------------------------
     # save model / optimizer(optional)
@@ -248,6 +263,10 @@ class ModelPlain(ModelBase):
             self.save_network(self.save_dir, self.netE, 'E', iter_label)
         if self.opt_train['G_optimizer_reuse']:
             self.save_optimizer(self.save_dir, self.G_optimizer, 'optimizerG', iter_label)
+        if self.grad_scaler.is_enabled():
+            import os
+            scaler_path = os.path.join(self.save_dir, f'{iter_label}_scaler.pth')
+            torch.save(self.grad_scaler.state_dict(), scaler_path)
 
     def save_merged(self, iter_label):
         """Export LoRA-merged checkpoint (`{iter}_G_merged.pth` / `{iter}_E_merged.pth`).
@@ -370,10 +389,11 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     def netG_forward(self):
         with self.timer.timer('forward'):
-            if self.L_flow_spike is not None:
-                self.E = self.netG(self.L, flow_spike=self.L_flow_spike)
-            else:
-                self.E = self.netG(self.L)
+            with self._autocast_context(enabled=self.amp_train_enabled, dtype=self.amp_train_dtype):
+                if self.L_flow_spike is not None:
+                    self.E = self.netG(self.L, flow_spike=self.L_flow_spike)
+                else:
+                    self.E = self.netG(self.L)
 
     # ----------------------------------------
     # update parameters and get loss
@@ -389,9 +409,12 @@ class ModelPlain(ModelBase):
         
         with self.timer.timer('loss_compute'):
             G_loss = self.G_lossfn_weight * self.G_lossfn(self.E, self.H)
-        
+
         with self.timer.timer('backward'):
-            G_loss.backward()
+            if self.grad_scaler.is_enabled():
+                self.grad_scaler.scale(G_loss).backward()
+            else:
+                G_loss.backward()
 
         # ------------------------------------
         # clip_grad
@@ -400,10 +423,16 @@ class ModelPlain(ModelBase):
         G_optimizer_clipgrad = self.opt_train['G_optimizer_clipgrad'] if self.opt_train['G_optimizer_clipgrad'] else 0
         if G_optimizer_clipgrad > 0:
             with self.timer.timer('clip_grad'):
+                if self.grad_scaler.is_enabled():
+                    self.grad_scaler.unscale_(self.G_optimizer)
                 torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.opt_train['G_optimizer_clipgrad'], norm_type=2)
 
         with self.timer.timer('optimizer_step'):
-            self.G_optimizer.step()
+            if self.grad_scaler.is_enabled():
+                self.grad_scaler.step(self.G_optimizer)
+                self.grad_scaler.update()
+            else:
+                self.G_optimizer.step()
 
         # ------------------------------------
         # regularizer

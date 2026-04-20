@@ -74,19 +74,14 @@ class LayerNorm(nn.Module):
     def forward(self, x):
         assert x.dim() == 3
         assert x.shape[1] == self.num_channels
-
-        # normalization along C channels
-        mu = torch.mean(x, dim=1, keepdim=True)
-        res_x = x - mu
+        x_fp32 = x.float()
+        mu = torch.mean(x_fp32, dim=1, keepdim=True)
+        res_x = x_fp32 - mu
         sigma = torch.mean(res_x ** 2, dim=1, keepdim=True)
         out = res_x / torch.sqrt(sigma + self.eps)
-
-        # apply weight and bias
         if self.affine:
-            out *= self.weight
-            out += self.bias
-
-        return out
+            out = out * self.weight.float() + self.bias.float()
+        return out.to(x.dtype)
 
 
 class SGPBlock(nn.Module):

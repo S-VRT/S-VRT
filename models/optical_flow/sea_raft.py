@@ -16,7 +16,7 @@ def coords_grid(batch, ht, wd, device=None):
     # return a grid of (x, y) coordinates shaped (N, 2, ht, wd)
     y = torch.arange(ht, device=device).view(1, ht, 1).expand(N, ht, wd)
     x = torch.arange(wd, device=device).view(1, 1, wd).expand(N, ht, wd)
-    coords = torch.stack([x, y], dim=3).float()            # (N, ht, wd, 2)
+    coords = torch.stack([x, y], dim=3)                    # (N, ht, wd, 2)
     coords = coords.permute(0, 3, 1, 2).contiguous()       # (N, 2, ht, wd)
     return coords
 
@@ -44,7 +44,7 @@ def conv3x3(in_planes, out_planes, stride=1):
 
 
 class LayerNorm(nn.Module):
-    def __init__(self, normalized_shape, eps=1e-6, data_format="channels_last"):
+    def __init__(self, normalized_shape, eps=1e-5, data_format="channels_last"):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(normalized_shape))
         self.bias = nn.Parameter(torch.zeros(normalized_shape))
@@ -58,18 +58,19 @@ class LayerNorm(nn.Module):
         if self.data_format == "channels_last":
             return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
         elif self.data_format == "channels_first":
+            x = x.float()
             u = x.mean(1, keepdim=True)
             s = (x - u).pow(2).mean(1, keepdim=True)
             x = (x - u) / torch.sqrt(s + self.eps)
-            x = self.weight[:, None, None] * x + self.bias[:, None, None]
-            return x
+            x = self.weight[:, None, None].float() * x + self.bias[:, None, None].float()
+            return x.to(self.weight.dtype)
 
 
 class ConvNextBlock(nn.Module):
-    def __init__(self, dim, output_dim, layer_scale_init_value=1e-6):
+    def __init__(self, dim, output_dim, layer_scale_init_value=1e-4):
         super().__init__()
         self.dwconv = nn.Conv2d(dim, dim, kernel_size=7, padding=3, groups=dim)
-        self.norm = LayerNorm(dim, eps=1e-6)
+        self.norm = LayerNorm(dim, eps=1e-5)
         self.pwconv1 = nn.Linear(dim, 4 * output_dim)
         self.act = nn.GELU()
         self.pwconv2 = nn.Linear(4 * output_dim, dim)

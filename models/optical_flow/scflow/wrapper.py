@@ -54,26 +54,20 @@ class SCFlowWrapper(OpticalFlowModule):
         """
         self._validate_spike_pair(spk1, spk2)
 
-        # Determine runtime device
         try:
             device = next(self.model.parameters()).device
         except StopIteration:
             device = self.device
-            
-        spk1 = spk1.to(device)
-        spk2 = spk2.to(device)
-        
-        # SCFlow requires an initial flow input
+
+        spk1 = spk1.to(device=device, dtype=torch.float32)
+        spk2 = spk2.to(device=device, dtype=torch.float32)
+
         b, _, h, w = spk1.shape
-        flow_init = torch.zeros(b, 2, h, w, device=device)
-        
-        with torch.no_grad():
-            # SCFlow.forward returns (flows[::-1], res_dict)
-            # flows[::-1] is [fine -> coarse] which matches VRT expectations
+        flow_init = torch.zeros(b, 2, h, w, device=device, dtype=torch.float32)
+
+        with torch.no_grad(), torch.autocast("cuda", enabled=False):
             flows, _ = self.model(spk1, spk2, flow_init, dt=self.dt)
-            
-        # Post-process if necessary (SCFlow already returns list of 4 scales)
-        # Ensure we return exactly 4 scales as expected by VRT
+
         return flows[:4]
 
     def load_checkpoint(self, path: str) -> None:
