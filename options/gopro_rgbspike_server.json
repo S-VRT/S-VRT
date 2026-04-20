@@ -557,7 +557,12 @@
     "G_lossfn_weight": 1.0
     // Charbonnier 损失的 epsilon 参数：用于平滑 L1 损失的小常数
     ,
-    "G_charbonnier_eps": 1e-9
+    "G_charbonnier_eps": 1e-6
+    ,
+    "amp": {
+      "enable": true,
+      "dtype": "bfloat16"
+    }
     // 随机种子：用于保证实验的可重复性
     ,
     "manual_seed": 19931005
