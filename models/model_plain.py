@@ -185,7 +185,7 @@ class ModelPlain(ModelBase):
             if train_opt.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
                 bare_e = self.get_bare_model(self.netE)
                 inject_lora(bare_e, targets, rank=rank, alpha=alpha)
-        elif train_opt.get('phase2_lora_mode', False):
+        elif train_opt.get('use_lora', False) and train_opt.get('phase2_lora_mode', False):
             print(f'[Phase 1] LoRA injection deferred to iter {train_opt.get("fix_iter", 0)} (phase2_lora_mode=true)')
 
         if train_opt.get('freeze_backbone', False):
