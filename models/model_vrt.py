@@ -64,10 +64,9 @@ class ModelVRT(ModelPlain):
                     flow_params.append(param)
                 else:
                     normal_params.append(param)
-            G_optim_params = [
-                {'params': normal_params, 'lr': self.opt_train['G_optimizer_lr']},
-                {'params': flow_params, 'lr': self.opt_train['G_optimizer_lr'] * fix_lr_mul},
-            ]
+            G_optim_params = [{'params': normal_params, 'lr': self.opt_train['G_optimizer_lr']}]
+            if flow_params:
+                G_optim_params.append({'params': flow_params, 'lr': self.opt_train['G_optimizer_lr'] * fix_lr_mul})
             if self.opt_train['G_optimizer_type'] == 'adam':
                 self.G_optimizer = Adam(G_optim_params, lr=self.opt_train['G_optimizer_lr'],
                                         betas=self.opt_train['G_optimizer_betas'],
