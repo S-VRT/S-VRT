@@ -21,6 +21,26 @@ class ModelBase():
         
         self.is_train = opt['is_train']        # training or not
         self.schedulers = []                   # schedulers
+        self._amp_dtypes = {
+            'float16': torch.float16,
+            'fp16': torch.float16,
+            'half': torch.float16,
+            'bfloat16': torch.bfloat16,
+            'bf16': torch.bfloat16,
+        }
+
+    def _resolve_amp_dtype(self, raw_dtype, default='float16'):
+        key = str(raw_dtype or default).strip().lower()
+        if key not in self._amp_dtypes:
+            raise ValueError(
+                f'Unsupported AMP dtype {raw_dtype!r}. '
+                f'Expected one of {sorted(self._amp_dtypes.keys())}.'
+            )
+        return self._amp_dtypes[key]
+
+    def _autocast_context(self, enabled=False, dtype=torch.float16):
+        enabled = bool(enabled) and self.device.type == 'cuda'
+        return torch.amp.autocast(device_type='cuda', enabled=enabled, dtype=dtype)
 
     """
     # ----------------------------------------

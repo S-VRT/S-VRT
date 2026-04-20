@@ -380,6 +380,7 @@ def main():
     model.init_train()
     if opt['rank'] == 0:
         # 关闭初始化阶段的网络结构/参数明细打印，避免训练日志开头过长。
+        # 记录网络结构和参数信息。
         # logger.info(model.info_network())  # 网络架构信息
         # logger.info(model.info_params())  # 参数/权重统计信息
         pass

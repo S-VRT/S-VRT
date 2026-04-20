@@ -11,6 +11,8 @@ except ImportError as e:
 
 
 def corr(input1, input2):
+    if input2.dtype != input1.dtype:
+        input2 = input2.to(dtype=input1.dtype)
     out_corr = spatial_correlation_sample(input1,
                                           input2,
                                           kernel_size=1,

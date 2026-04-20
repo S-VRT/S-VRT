@@ -65,7 +65,9 @@ class SCFlowWrapper(OpticalFlowModule):
         
         # SCFlow requires an initial flow input
         b, _, h, w = spk1.shape
-        flow_init = torch.zeros(b, 2, h, w, device=device)
+        # Keep the initial flow in the same runtime dtype as spike inputs so
+        # mixed precision does not introduce a Float/Half split before SCFlow.
+        flow_init = torch.zeros(b, 2, h, w, device=device, dtype=spk1.dtype)
         
         with torch.no_grad():
             # SCFlow.forward returns (flows[::-1], res_dict)
@@ -74,7 +76,7 @@ class SCFlowWrapper(OpticalFlowModule):
             
         # Post-process if necessary (SCFlow already returns list of 4 scales)
         # Ensure we return exactly 4 scales as expected by VRT
-        return flows[:4]
+        return [flow.to(dtype=spk1.dtype) for flow in flows[:4]]
 
     def load_checkpoint(self, path: str) -> None:
         if not path:
