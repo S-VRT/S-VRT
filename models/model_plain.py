@@ -174,7 +174,7 @@ class ModelPlain(ModelBase):
         train_opt = self.opt.get('train', {})
         bare_model = self.get_bare_model(self.netG)
 
-        if train_opt.get('use_lora', False) and not train_opt.get('phase2_lora_mode', False):
+        if train_opt.get('use_lora', False):
             from models.lora import inject_lora
             targets = train_opt.get('lora_target_modules', ['qkv', 'proj'])
             rank = int(train_opt.get('lora_rank', 8))
@@ -185,11 +185,14 @@ class ModelPlain(ModelBase):
             if train_opt.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
                 bare_e = self.get_bare_model(self.netE)
                 inject_lora(bare_e, targets, rank=rank, alpha=alpha)
-        elif train_opt.get('use_lora', False) and train_opt.get('phase2_lora_mode', False):
-            print(f'[Phase 1] LoRA injection deferred to iter {train_opt.get("fix_iter", 0)} (phase2_lora_mode=true)')
 
         if train_opt.get('freeze_backbone', False):
             freeze_backbone(bare_model)
+            if train_opt.get('phase2_lora_mode', False):
+                for name, param in bare_model.named_parameters():
+                    if 'lora_A' in name or 'lora_B' in name:
+                        param.requires_grad = False
+                print(f'[Phase 1] LoRA params frozen until iter {train_opt.get("fix_iter", 0)}')
             frozen_count = sum(1 for p in bare_model.parameters() if not p.requires_grad)
             trainable_count = sum(1 for p in bare_model.parameters() if p.requires_grad)
             print(f'[Stage A/C] Frozen {frozen_count} params, trainable {trainable_count} params')
