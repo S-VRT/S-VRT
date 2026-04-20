@@ -22,8 +22,11 @@ def flow_warp(x, flow, interp_mode='bilinear', padding_mode='zeros', align_corne
         Tensor: Warped image or feature map.
     """
     n, _, h, w = x.size()
-    grid_y, grid_x = torch.meshgrid(torch.arange(0, h, dtype=x.dtype, device=x.device), torch.arange(0, w, dtype=x.dtype, device=x.device))
-    grid = torch.stack((grid_x, grid_y), 2).float()
+    grid_y, grid_x = torch.meshgrid(
+        torch.arange(0, h, dtype=flow.dtype, device=flow.device),
+        torch.arange(0, w, dtype=flow.dtype, device=flow.device),
+    )
+    grid = torch.stack((grid_x, grid_y), 2)
     grid.requires_grad = False
 
     vgrid = grid + flow
@@ -49,5 +52,4 @@ def flow_warp(x, flow, interp_mode='bilinear', padding_mode='zeros', align_corne
 
 
 __all__ = ['flow_warp']
-
 

@@ -316,16 +316,17 @@ class ModelVRT(ModelPlain):
 
                 in_batch = torch.cat(in_patches, dim=0)
                 flow_batch = torch.cat(flow_patches, dim=0).to(self.device) if flow_patches else None
-                if hasattr(self, 'netE'):
-                    if flow_batch is not None:
-                        out_batch = self.netE(in_batch, flow_spike=flow_batch).detach()
+                with self._autocast_context(enabled=self.amp_val_enabled, dtype=self.amp_val_dtype):
+                    if hasattr(self, 'netE'):
+                        if flow_batch is not None:
+                            out_batch = self.netE(in_batch, flow_spike=flow_batch).detach()
+                        else:
+                            out_batch = self.netE(in_batch).detach()
                     else:
-                        out_batch = self.netE(in_batch).detach()
-                else:
-                    if flow_batch is not None:
-                        out_batch = self.netG(in_batch, flow_spike=flow_batch).detach()
-                    else:
-                        out_batch = self.netG(in_batch).detach()
+                        if flow_batch is not None:
+                            out_batch = self.netG(in_batch, flow_spike=flow_batch).detach()
+                        else:
+                            out_batch = self.netG(in_batch).detach()
 
                 if E is None:
                     c_out = out_batch.size(2)
@@ -372,16 +373,17 @@ class ModelVRT(ModelPlain):
             if flow_spike_meta is not None:
                 raise NotImplementedError("Lazy validation flow metadata requires size_patch_testing > 0.")
 
-            if hasattr(self, 'netE'):
-                if flow_spike is not None:
-                    output = self.netE(lq, flow_spike=flow_spike).detach().cpu()
+            with self._autocast_context(enabled=self.amp_val_enabled, dtype=self.amp_val_dtype):
+                if hasattr(self, 'netE'):
+                    if flow_spike is not None:
+                        output = self.netE(lq, flow_spike=flow_spike).detach().cpu()
+                    else:
+                        output = self.netE(lq).detach().cpu()
                 else:
-                    output = self.netE(lq).detach().cpu()
-            else:
-                if flow_spike is not None:
-                    output = self.netG(lq, flow_spike=flow_spike).detach().cpu()
-                else:
-                    output = self.netG(lq).detach().cpu()
+                    if flow_spike is not None:
+                        output = self.netG(lq, flow_spike=flow_spike).detach().cpu()
+                    else:
+                        output = self.netG(lq).detach().cpu()
 
             output = output[:, :, :, :h_old*sf, :w_old*sf]
 

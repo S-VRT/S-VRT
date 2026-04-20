@@ -29,7 +29,9 @@ class SpikeRepresentation(nn.Module):
         b, c, h, w = seq.shape
         seq = seq.reshape([b*c, 1, h, w])
         # Use .to(device) instead of .cuda() for device-agnostic code
-        flow_factor = (torch.linspace(-12, 12, steps=25, device=seq.device) / dt)
+        flow_factor = (
+            torch.linspace(-12, 12, steps=25, device=seq.device, dtype=flow.dtype) / dt
+        )
         flow_factor = flow_factor.reshape([1, c, 1, 1, 1])
         flow = flow.unsqueeze(dim=1)
         factored_flow = flow * flow_factor
@@ -156,7 +158,9 @@ class SCFlow(nn.Module):
         b, c, h, w = x1_pym[0].shape
         init_dtype = x1_pym[0].dtype
         init_device = x1_pym[0].device
-        flow = torch.zeros(b, 2, h, w, dtype=init_dtype, device=init_device).float()
+        # Keep flow dtype aligned with autocast-selected feature dtype so the
+        # correlation op does not see mixed Half/Float inputs.
+        flow = torch.zeros(b, 2, h, w, dtype=init_dtype, device=init_device)
 
         for l, (x1, x2) in enumerate(zip(x1_pym, x2_pym)):
 
