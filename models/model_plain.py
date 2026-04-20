@@ -188,7 +188,7 @@ class ModelPlain(ModelBase):
 
         if train_opt.get('freeze_backbone', False):
             freeze_backbone(bare_model)
-            if train_opt.get('phase2_lora_mode', False):
+            if train_opt.get('use_lora', False) and train_opt.get('phase2_lora_mode', False):
                 for name, param in bare_model.named_parameters():
                     if 'lora_A' in name or 'lora_B' in name:
                         param.requires_grad = False
