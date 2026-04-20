@@ -51,30 +51,23 @@ class ModelVRT(ModelPlain):
     # ----------------------------------------
     def define_optimizer(self):
         self.fix_keys = self.opt_train.get('fix_keys', [])
-        if self.opt_train.get('fix_iter', 0) and len(self.fix_keys) > 0:
-            fix_lr_mul = self.opt_train['fix_lr_mul']
+        fix_lr_mul = self.opt_train.get('fix_lr_mul', 1.0)
+        use_split_lr = len(self.fix_keys) > 0 and fix_lr_mul != 1.0
+        if use_split_lr:
             print(f'Multiple the learning rate for keys: {self.fix_keys} with {fix_lr_mul}.')
-            if fix_lr_mul == 1:
-                G_optim_params = self.netG.parameters()
-            else:  # separate flow params and normal params for different lr
-                normal_params = []
-                flow_params = []
-                for name, param in self.netG.named_parameters():
-                    if any([key in name for key in self.fix_keys]):
-                        flow_params.append(param)
-                    else:
-                        normal_params.append(param)
-                G_optim_params = [
-                    {  # add normal params first
-                        'params': normal_params,
-                        'lr': self.opt_train['G_optimizer_lr']
-                    },
-                    {
-                        'params': flow_params,
-                        'lr': self.opt_train['G_optimizer_lr'] * fix_lr_mul
-                    },
-                ]
-
+            normal_params = []
+            flow_params = []
+            for name, param in self.netG.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if any([key in name for key in self.fix_keys]):
+                    flow_params.append(param)
+                else:
+                    normal_params.append(param)
+            G_optim_params = [
+                {'params': normal_params, 'lr': self.opt_train['G_optimizer_lr']},
+                {'params': flow_params, 'lr': self.opt_train['G_optimizer_lr'] * fix_lr_mul},
+            ]
             if self.opt_train['G_optimizer_type'] == 'adam':
                 self.G_optimizer = Adam(G_optim_params, lr=self.opt_train['G_optimizer_lr'],
                                         betas=self.opt_train['G_optimizer_betas'],

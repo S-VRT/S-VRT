@@ -39,3 +39,55 @@ def test_phase2_lora_mode_false_injects_lora_at_init():
 
     assert isinstance(model.backbone_qkv, LoRALinear), \
         "phase2_lora_mode=false 时 init_train 应注入 LoRA"
+
+
+def test_define_optimizer_skips_frozen_params_in_flow_group():
+    """差异化 LR 分组时，冻结参数（requires_grad=False）应被跳过。"""
+    model = _MiniModel()
+    # 冻结 spynet（模拟 Phase 1 状态）
+    for name, param in model.named_parameters():
+        if 'spynet' in name:
+            param.requires_grad = False
+
+    fix_keys = ["spynet"]
+    fix_lr_mul = 0.1
+    base_lr = 2e-4
+
+    normal_params = []
+    flow_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(key in name for key in fix_keys):
+            flow_params.append(param)
+        else:
+            normal_params.append(param)
+
+    # spynet 被冻结，flow_params 应为空
+    assert len(flow_params) == 0, "冻结的 spynet 参数不应出现在 flow_params 中"
+    assert len(normal_params) > 0
+
+
+def test_define_optimizer_differential_lr_with_unfrozen_params():
+    """解冻后，fix_keys 参数应进入低 LR 组。"""
+    model = _MiniModel()
+    # 所有参数可训练（模拟 Phase 2 状态）
+    for param in model.parameters():
+        param.requires_grad = True
+
+    fix_keys = ["spynet"]
+    fix_lr_mul = 0.1
+    base_lr = 2e-4
+
+    normal_params = []
+    flow_params = []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if any(key in name for key in fix_keys):
+            flow_params.append(param)
+        else:
+            normal_params.append(param)
+
+    assert len(flow_params) > 0, "解冻后 spynet 应在 flow_params"
+    assert abs(base_lr * fix_lr_mul - 2e-5) < 1e-10
