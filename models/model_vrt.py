@@ -87,7 +87,7 @@ class ModelVRT(ModelPlain):
                     if any([key in name for key in self.fix_keys]):
                         param.requires_grad_(False)
             elif current_step == self.fix_iter:
-                if self.opt_train.get('phase2_lora_mode', False):
+                if self.opt_train.get('phase2_lora_mode', False) and self.opt_train.get('use_lora', False):
                     bare = self.get_bare_model(self.netG)
                     for name, param in bare.named_parameters():
                         if any(key in name for key in self.fix_keys):
