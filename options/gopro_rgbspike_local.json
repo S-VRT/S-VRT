@@ -592,7 +592,7 @@
     // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
     ,
     "fix_lr_mul": 0.1
-    // 需要固定的参数键：["spynet", "deform"] 表示固定光流网络（SpyNet）和可变形对齐模块（DCNv2PackFlowGuided）
+    // 需要固定的参数键：["spynet", "pa_deform"] 表示固定光流网络（SCFlow）和可变形对齐模块（DCNv4）
     // 在前 fix_iter 次迭代中，这些模块的参数不会被更新，学习率会被乘以 fix_lr_mul
     ,
     "fix_keys": [
