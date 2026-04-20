@@ -247,6 +247,12 @@ class ModelPlain(ModelBase):
         if load_path_optimizerG is not None and self.opt_train['G_optimizer_reuse']:
             print('Loading optimizerG [{:s}] ...'.format(load_path_optimizerG))
             self.load_optimizer(load_path_optimizerG, self.G_optimizer)
+        if self.grad_scaler.is_enabled() and load_path_optimizerG is not None:
+            import os
+            scaler_path = load_path_optimizerG.replace('_optimizerG.pth', '_scaler.pth')
+            if os.path.exists(scaler_path):
+                self.grad_scaler.load_state_dict(torch.load(scaler_path, map_location='cpu'))
+                print(f'Loading GradScaler state from [{scaler_path}]')
 
     # ----------------------------------------
     # save model / optimizer(optional)
@@ -257,6 +263,10 @@ class ModelPlain(ModelBase):
             self.save_network(self.save_dir, self.netE, 'E', iter_label)
         if self.opt_train['G_optimizer_reuse']:
             self.save_optimizer(self.save_dir, self.G_optimizer, 'optimizerG', iter_label)
+        if self.grad_scaler.is_enabled():
+            import os
+            scaler_path = os.path.join(self.save_dir, f'{iter_label}_scaler.pth')
+            torch.save(self.grad_scaler.state_dict(), scaler_path)
 
     def save_merged(self, iter_label):
         """Export LoRA-merged checkpoint (`{iter}_G_merged.pth` / `{iter}_E_merged.pth`).
@@ -398,8 +408,7 @@ class ModelPlain(ModelBase):
         self.netG_forward()
         
         with self.timer.timer('loss_compute'):
-            with self._autocast_context(enabled=self.amp_train_enabled, dtype=self.amp_train_dtype):
-                G_loss = self.G_lossfn_weight * self.G_lossfn(self.E, self.H)
+            G_loss = self.G_lossfn_weight * self.G_lossfn(self.E, self.H)
 
         with self.timer.timer('backward'):
             if self.grad_scaler.is_enabled():

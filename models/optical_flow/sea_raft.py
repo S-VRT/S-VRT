@@ -16,7 +16,7 @@ def coords_grid(batch, ht, wd, device=None):
     # return a grid of (x, y) coordinates shaped (N, 2, ht, wd)
     y = torch.arange(ht, device=device).view(1, ht, 1).expand(N, ht, wd)
     x = torch.arange(wd, device=device).view(1, 1, wd).expand(N, ht, wd)
-    coords = torch.stack([x, y], dim=3).float()            # (N, ht, wd, 2)
+    coords = torch.stack([x, y], dim=3)                    # (N, ht, wd, 2)
     coords = coords.permute(0, 3, 1, 2).contiguous()       # (N, 2, ht, wd)
     return coords
 

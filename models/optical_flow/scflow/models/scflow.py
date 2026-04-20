@@ -158,8 +158,7 @@ class SCFlow(nn.Module):
         b, c, h, w = x1_pym[0].shape
         init_dtype = x1_pym[0].dtype
         init_device = x1_pym[0].device
-        # Keep flow dtype aligned with autocast-selected feature dtype so the
-        # correlation op does not see mixed Half/Float inputs.
+        # dtype matches features; autocast is disabled in SCFlowWrapper so this is always float32
         flow = torch.zeros(b, 2, h, w, dtype=init_dtype, device=init_device)
 
         for l, (x1, x2) in enumerate(zip(x1_pym, x2_pym)):
