@@ -540,7 +540,9 @@
     ,
     "partial_load": true
     ,
-    "use_lora": false
+    "phase2_lora_mode": true
+    ,
+    "use_lora": true
     ,
     "lora_rank": 8
     ,
@@ -569,7 +571,7 @@
     "G_optimizer_type": "adam"
     // 生成器学习率：初始学习率
     ,
-    "G_optimizer_lr": 4e-4
+    "G_optimizer_lr": 2e-4
     // Adam 优化器的 beta 参数：[beta1, beta2]，用于计算梯度的一阶和二阶矩估计
     ,
     "G_optimizer_betas": [
@@ -591,13 +593,13 @@
     "fix_iter": 20000
     // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
     ,
-    "fix_lr_mul": 0.125
-    // 需要固定的参数键：["spynet", "deform"] 表示固定光流网络（SpyNet）和可变形对齐模块（DCNv2PackFlowGuided）
+    "fix_lr_mul": 0.1
+    // 需要固定的参数键：["spynet", "pa_deform"] 表示固定光流网络（SCFlow）和可变形对齐模块（DCNv4）
     // 在前 fix_iter 次迭代中，这些模块的参数不会被更新，学习率会被乘以 fix_lr_mul
     ,
     "fix_keys": [
       "spynet",
-      "deform"
+      "pa_deform"
     ]
     // 学习率调度器配置
     // 总迭代次数：训练的总迭代步数
