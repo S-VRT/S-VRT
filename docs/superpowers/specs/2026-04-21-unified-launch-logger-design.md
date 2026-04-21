@@ -89,16 +89,15 @@ launch_echo() {
     local logger_name="$1"
     local launch_phase="$2"
     local launch_mode="$3"
-    local log_dir="$4"   # unused after refactor, kept for signature compat during transition
-    local opt_path="$5"  # unused after refactor
-    local level="$6"
-    shift 6
+    local level="$4"
+    shift 4
     local message="$*"
 
     "$PYTHON_BIN" - "$logger_name" "$level" "$message" "$launch_phase" "$launch_mode" <<'PY'
 import sys
 from utils import utils_logger
 logger_name, level, message, phase, mode = sys.argv[1:6]
+
 utils_logger.emit_launch_wrapper_log(logger_name, level, message,
     launch_phase=phase, launch_mode=mode)
 PY

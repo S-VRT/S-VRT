@@ -189,7 +189,7 @@
       "num_frame": 6
       // 真实标签图像尺寸：训练时裁剪的真实标签图像大小（像素）
       ,
-      "gt_size": 64
+      "gt_size": 96
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -215,7 +215,7 @@
       "dataloader_num_workers": 12
       // 批次大小：每个批次包含的样本数量
       ,
-      "dataloader_batch_size": 2
+      "dataloader_batch_size": 4
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -354,7 +354,20 @@
       "operator": "gated",
       "mode": "replace",
       "out_chans": 3,
-      "operator_params": {}
+      "operator_params": {},
+      "debug": {
+        "enable": true,
+        "save_images": true,
+        "trigger": "phase1_last",
+        "source": "val_full_frame",
+        "full_frame": true,
+        "subdir": "fusion_phase1_last_full",
+        "max_batches": 1,
+        "max_frames": 24,
+        "val_overrides": {
+          "size_patch_testing": 0
+        }
+      }
     }
     ,
     "input_mode": "dual"
@@ -383,8 +396,8 @@
     ,
     "img_size": [
       6,
-      64,
-      64
+      96,
+      96
     ]
     // 窗口大小：[时间, 高度, 宽度]，[4,8,8] 表示 4 帧时间窗口，8x8 空间窗口
     ,

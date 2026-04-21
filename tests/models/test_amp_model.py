@@ -41,14 +41,26 @@ class _MinimalModel(ModelBase):
         # Simulate device selection (CPU in CI, no CUDA required)
         self.device = torch.device("cpu")
 
+    def _uses_dcnv4(self):
+        dcn_type = self.opt.get("netG", {}).get("dcn_type", "")
+        return str(dcn_type).strip().lower() == "dcnv4"
+
+    def _resolve_effective_amp_dtype(self, amp_opt, phase, default="float16"):
+        raw_dtype = amp_opt.get("dtype", default)
+        dtype = self._resolve_amp_dtype(raw_dtype, default=default)
+        if self.device.type == "cuda" and dtype == torch.bfloat16 and self._uses_dcnv4():
+            amp_opt["dtype"] = "float16"
+            return torch.float16
+        return dtype
+
     # Replicate the AMP init block from ModelPlain.__init__
     def _init_amp(self, opt_train):
         amp_train_opt = opt_train.get("amp", {})
         self.amp_train_enabled = (
             bool(amp_train_opt.get("enable", False)) and self.device.type == "cuda"
         )
-        self.amp_train_dtype = self._resolve_amp_dtype(
-            amp_train_opt.get("dtype", "float16")
+        self.amp_train_dtype = self._resolve_effective_amp_dtype(
+            amp_train_opt, phase="train"
         )
         scaler_enabled = (
             self.amp_train_enabled and self.amp_train_dtype == torch.float16
@@ -60,8 +72,12 @@ class _MinimalModel(ModelBase):
 # Helper
 # ---------------------------------------------------------------------------
 
-def _make_model(amp_enable: bool, dtype: str) -> _MinimalModel:
-    opt = {"is_train": True, "path": {"models": "/tmp"}}
+def _make_model(amp_enable: bool, dtype: str, dcn_type: str = "DCNv2") -> _MinimalModel:
+    opt = {
+        "is_train": True,
+        "path": {"models": "/tmp"},
+        "netG": {"dcn_type": dcn_type},
+    }
     m = _MinimalModel(opt)
     m._init_amp({"amp": {"enable": amp_enable, "dtype": dtype}})
     return m
@@ -116,6 +132,35 @@ class TestAmpBf16:
         assert m.amp_train_enabled is True
         assert m.amp_train_dtype == torch.bfloat16
         assert not m.grad_scaler.is_enabled()
+
+    def test_amp_bf16_falls_back_to_fp16_for_dcnv4(self):
+        """DCNv4 backward does not support bf16, so AMP must fall back to fp16."""
+        opt = {
+            "is_train": True,
+            "path": {"models": "/tmp"},
+            "netG": {"dcn_type": "DCNv4"},
+        }
+        m = _MinimalModel(opt)
+        m.device = torch.device("cuda")
+        amp_opt = {"enable": True, "dtype": "bfloat16"}
+
+        m._init_amp({"amp": amp_opt})
+
+        assert m.amp_train_enabled is True
+        assert m.amp_train_dtype == torch.float16
+        assert amp_opt["dtype"] == "float16"
+
+    def test_amp_bf16_kept_for_non_dcnv4(self):
+        """The bf16 fallback must stay scoped to DCNv4 and not affect other backends."""
+        m = _make_model(amp_enable=True, dtype="bfloat16", dcn_type="DCNv2")
+        m.device = torch.device("cuda")
+        amp_opt = {"enable": True, "dtype": "bfloat16"}
+
+        m._init_amp({"amp": amp_opt})
+
+        assert m.amp_train_enabled is True
+        assert m.amp_train_dtype == torch.bfloat16
+        assert amp_opt["dtype"] == "bfloat16"
 
 
 class TestResolveAmpDtype:

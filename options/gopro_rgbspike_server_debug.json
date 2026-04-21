@@ -3,7 +3,7 @@
   // 基础配置
   // ========================================
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
-  "task": "gopro_tfp4_scflow_gated_dcn4_debug"
+  "task": "gopro_tfp4_scflow_gated_dcn4_debug_probe"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
   ,
   "model": "vrt"
@@ -189,7 +189,7 @@
       "num_frame": 6
       // 真实标签图像尺寸：训练时裁剪的真实标签图像大小（像素）
       ,
-      "gt_size": 64
+      "gt_size": 96
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -215,7 +215,7 @@
       "dataloader_num_workers": 12
       // 批次大小：每个批次包含的样本数量
       ,
-      "dataloader_batch_size": 2
+      "dataloader_batch_size": 4
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -401,8 +401,8 @@
     ,
     "img_size": [
       6,
-      64,
-      64
+      96,
+      96
     ]
     // 窗口大小：[时间, 高度, 宽度]，[4,8,8] 表示 4 帧时间窗口，8x8 空间窗口
     ,
@@ -608,7 +608,7 @@
     // 固定参数配置（用于分阶段训练）
     // 固定参数的迭代次数：在前 fix_iter 次迭代中，fix_keys 指定的参数保持固定
     ,
-    "fix_iter": 6
+    "fix_iter": 20
     // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
     ,
     "fix_lr_mul": 0.1
@@ -622,7 +622,7 @@
     // 学习率调度器配置
     // 总迭代次数：训练的总迭代步数
     ,
-    "total_iter": 12
+    "total_iter": 200
     // 生成器学习率调度器类型："CosineAnnealingWarmRestarts" 表示带重启的余弦退火调度器
     ,
     "G_scheduler_type": "CosineAnnealingWarmRestarts"
@@ -649,13 +649,13 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 12
+    "checkpoint_test": 100
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
-    "checkpoint_save": 6
+    "checkpoint_save": 50
     // 打印检查点间隔：每训练多少迭代打印一次训练信息
     ,
-    "checkpoint_print": 1
+    "checkpoint_print": 5
     // 混合精度训练开关：enable=true 时使用 autocast；float16 时启用 GradScaler
     ,
     "amp": {

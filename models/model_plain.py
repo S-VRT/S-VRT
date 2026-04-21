@@ -43,15 +43,35 @@ class ModelPlain(ModelBase):
         self.L_flow_spike = None
         amp_train_opt = self.opt_train.get('amp', {})
         self.amp_train_enabled = bool(amp_train_opt.get('enable', False)) and self.device.type == 'cuda'
-        self.amp_train_dtype = self._resolve_amp_dtype(amp_train_opt.get('dtype', 'float16'))
+        self.amp_train_dtype = self._resolve_effective_amp_dtype(amp_train_opt, phase='train')
         scaler_enabled = self.amp_train_enabled and self.amp_train_dtype == torch.float16
         self.grad_scaler = torch.amp.GradScaler('cuda', enabled=scaler_enabled)
         amp_val_opt = self.opt.get('val', {}).get('amp', {})
         self.amp_val_enabled = bool(amp_val_opt.get('enable', False)) and self.device.type == 'cuda'
-        self.amp_val_dtype = self._resolve_amp_dtype(amp_val_opt.get('dtype', amp_train_opt.get('dtype', 'float16')))
+        self.amp_val_dtype = self._resolve_effective_amp_dtype(
+            amp_val_opt,
+            phase='val',
+            default=amp_train_opt.get('dtype', 'float16'),
+        )
         self.batch_folder = None
         self.batch_lq_paths = None
         self.batch_gt_paths = None
+
+    def _uses_dcnv4(self):
+        dcn_type = self.opt.get('netG', {}).get('dcn_type', '')
+        return str(dcn_type).strip().lower() == 'dcnv4'
+
+    def _resolve_effective_amp_dtype(self, amp_opt, phase, default='float16'):
+        raw_dtype = amp_opt.get('dtype', default)
+        dtype = self._resolve_amp_dtype(raw_dtype, default=default)
+        if self.device.type == 'cuda' and dtype == torch.bfloat16 and self._uses_dcnv4():
+            print(
+                f"[AMP] {phase} requested dtype={raw_dtype}, but DCNv4 backward does not support bfloat16. "
+                "Falling back to float16."
+            )
+            amp_opt['dtype'] = 'float16'
+            return torch.float16
+        return dtype
 
     def _assert_lq_channels(self, tensor, tensor_name):
         """Validate the raw model-ingress tensor against configured input width."""
@@ -428,26 +448,49 @@ class ModelPlain(ModelBase):
         return loss
 
     # ----------------------------------------
+    # phase1 fast-path: only run fusion_adapter, skip full VRT forward
+    # ----------------------------------------
+    def _phase1_fusion_forward(self):
+        vrt = self.get_bare_model(self.netG)
+        fusion_placement = vrt.fusion_cfg.get('placement', 'early') if vrt.fusion_enabled else None
+        if not vrt.fusion_enabled or fusion_placement not in {'early', 'hybrid'}:
+            self.netG_forward()
+            return
+        with self.timer.timer('forward'):
+            with self._autocast_context(enabled=self.amp_train_enabled, dtype=self.amp_train_dtype):
+                rgb = self.L[:, :, :3, :, :]
+                spike = self.L[:, :, 3:, :, :]
+                fusion_out = vrt.fusion_adapter(rgb=rgb, spike=spike)
+                vrt._last_fusion_out = fusion_out
+                vrt._last_spike_bins = spike.shape[2]
+
+    # ----------------------------------------
     # update parameters and get loss
     # ----------------------------------------
     def optimize_parameters(self, current_step):
         # 重置当前迭代的计时
         self.timer.current_timings.clear()
-        
+
+        is_phase1 = (
+            hasattr(self, 'fix_iter')
+            and self.fix_iter > 0
+            and current_step < self.fix_iter
+        )
+
         with self.timer.timer('zero_grad'):
             self.G_optimizer.zero_grad()
-        
-        self.netG_forward()
-        
+
+        if is_phase1:
+            self._phase1_fusion_forward()
+        else:
+            self.netG_forward()
+
         with self.timer.timer('loss_compute'):
-            is_phase1 = (
-                hasattr(self, 'fix_iter')
-                and self.fix_iter > 0
-                and current_step < self.fix_iter
-            )
-            vrt_loss_weight = 0.0 if is_phase1 else self.G_lossfn_weight
-            G_loss = vrt_loss_weight * self.G_lossfn(self.E, self.H)
-            G_loss = G_loss + self._compute_fusion_aux_loss(is_phase1=is_phase1)
+            if is_phase1:
+                G_loss = self._compute_fusion_aux_loss(is_phase1=True)
+            else:
+                G_loss = self.G_lossfn_weight * self.G_lossfn(self.E, self.H)
+                G_loss = G_loss + self._compute_fusion_aux_loss(is_phase1=False)
 
         with self.timer.timer('backward'):
             if self.grad_scaler.is_enabled():
