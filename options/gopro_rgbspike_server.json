@@ -555,6 +555,12 @@
     // 生成器损失函数权重：损失函数的权重系数
     ,
     "G_lossfn_weight": 1.0
+    ,
+    "phase1_fusion_aux_loss_weight": 1.0
+    ,
+    "phase2_fusion_aux_loss_weight": 0.2
+    ,
+    "fusion_passthrough_loss_weight": 0.2
     // Charbonnier 损失的 epsilon 参数：用于平滑 L1 损失的小常数
     ,
     "G_charbonnier_eps": 1e-6
@@ -595,7 +601,7 @@
     // 固定参数配置（用于分阶段训练）
     // 固定参数的迭代次数：在前 fix_iter 次迭代中，fix_keys 指定的参数保持固定
     ,
-    "fix_iter": 20000
+    "fix_iter": 6000
     // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
     ,
     "fix_lr_mul": 0.1
@@ -636,7 +642,7 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 30000
+    "checkpoint_test": [6000, 30000]
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 2000
