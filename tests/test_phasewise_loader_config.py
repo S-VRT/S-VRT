@@ -2,6 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from utils import utils_option
+
 from main_train_vrt import (
     build_phase_train_dataset_opt,
     build_train_loader_bundle,
@@ -101,3 +103,14 @@ def test_compute_is_phase1_boundary():
     assert compute_is_phase1(9, 10) is True
     assert compute_is_phase1(10, 10) is False
     assert compute_is_phase1(11, 10) is False
+
+
+def test_debug_config_has_phase1_fusion_loss_for_fast_path():
+    opt = utils_option.parse("options/gopro_rgbspike_server_debug.json", is_train=True)
+    train = opt["train"]
+
+    assert train["fix_iter"] > 0
+    assert (
+        train.get("phase1_fusion_aux_loss_weight", 0.0)
+        + train.get("fusion_passthrough_loss_weight", 0.0)
+    ) > 0.0
