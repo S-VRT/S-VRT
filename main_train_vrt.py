@@ -59,6 +59,67 @@ def build_phase_train_dataset_opt(train_dataset_opt, is_phase1):
     return resolved
 
 
+def build_train_loader_bundle(opt, train_dataset_opt, is_phase1, seed, logger):
+    dataset_opt = build_phase_train_dataset_opt(train_dataset_opt, is_phase1)
+    train_set = define_Dataset(dataset_opt)
+
+    batch_size = dataset_opt["dataloader_batch_size"]
+    if opt["dist"]:
+        if batch_size % opt["num_gpu"] != 0:
+            raise ValueError(
+                f"dataloader_batch_size={batch_size} is not divisible by num_gpu={opt['num_gpu']}"
+            )
+        per_gpu_batch = batch_size // opt["num_gpu"]
+        if per_gpu_batch <= 0:
+            raise ValueError(
+                f"per-GPU batch size must be > 0, got {per_gpu_batch} "
+                f"(global batch={batch_size}, num_gpu={opt['num_gpu']})"
+            )
+
+        train_sampler = DistributedSampler(
+            train_set,
+            shuffle=dataset_opt["dataloader_shuffle"],
+            drop_last=True,
+            seed=seed,
+        )
+        per_gpu_workers = dataset_opt["dataloader_num_workers"] // opt["num_gpu"]
+        kwargs = dict(
+            batch_size=per_gpu_batch,
+            shuffle=False,
+            num_workers=per_gpu_workers,
+            drop_last=True,
+            pin_memory=True,
+            sampler=train_sampler,
+        )
+        if per_gpu_workers > 0:
+            kwargs["persistent_workers"] = dataset_opt.get("dataloader_persistent_workers", False)
+            kwargs["prefetch_factor"] = dataset_opt.get("dataloader_prefetch_factor", 2)
+            kwargs["multiprocessing_context"] = "spawn"
+        train_loader = DataLoader(train_set, **kwargs)
+    else:
+        train_sampler = None
+        workers = dataset_opt["dataloader_num_workers"]
+        kwargs = dict(
+            batch_size=batch_size,
+            shuffle=dataset_opt["dataloader_shuffle"],
+            num_workers=workers,
+            drop_last=True,
+            pin_memory=True,
+        )
+        if workers > 0:
+            kwargs["persistent_workers"] = dataset_opt.get("dataloader_persistent_workers", False)
+            kwargs["prefetch_factor"] = dataset_opt.get("dataloader_prefetch_factor", 2)
+            kwargs["multiprocessing_context"] = "spawn"
+        train_loader = DataLoader(train_set, **kwargs)
+
+    return {
+        "dataset_opt": dataset_opt,
+        "train_set": train_set,
+        "train_sampler": train_sampler,
+        "train_loader": train_loader,
+    }
+
+
 def get_memory_usage():
     """获取当前进程的内存使用情况"""
     try:
@@ -297,53 +358,28 @@ def main():
                 logger.info('[DATASET] Creating training dataset...')
             mem_before_train = log_memory_stage(logger, 'Before creating train dataset', opt['rank'])
 
-            train_set = define_Dataset(dataset_opt)
+            train_dataset_opt_base = opt["datasets"]["train"]
+            is_phase1 = opt["train"].get("fix_iter", 0) > 0 and current_step < opt["train"].get("fix_iter", 0)
+            bundle = build_train_loader_bundle(opt, train_dataset_opt_base, is_phase1, seed, logger)
+            train_set = bundle["train_set"]
+            train_sampler = bundle["train_sampler"]
+            train_loader = bundle["train_loader"]
+            active_train_dataset_opt = bundle["dataset_opt"]
 
             mem_after_train = log_memory_stage(logger, 'After creating train dataset', opt['rank'])
             if opt['rank'] == 0:
                 logger.info('[DATASET] Train dataset created. Memory delta: {:.2f} GB'.format(mem_after_train - mem_before_train))
+                logger.info(
+                    "[TRAIN_PHASE] phase=%s batch_size=%d gt_size=%d",
+                    "phase1" if is_phase1 else "phase2",
+                    active_train_dataset_opt["dataloader_batch_size"],
+                    active_train_dataset_opt["gt_size"],
+                )
 
             # 计算训练迭代次数（向上取整）
-            train_size = int(math.ceil(len(train_set) / dataset_opt['dataloader_batch_size']))
+            train_size = int(math.ceil(len(train_set) / active_train_dataset_opt['dataloader_batch_size']))
             if opt['rank'] == 0:
                 logger.info('Number of train images: {:,d}, iters: {:,d}'.format(len(train_set), train_size))
-            
-            if opt['dist']:
-                # 分布式训练模式
-                # 使用 DistributedSampler 确保每个进程看到不同的数据子集
-                train_sampler = DistributedSampler(train_set, shuffle=dataset_opt['dataloader_shuffle'],
-                                                   drop_last=True, seed=seed)  # 使用基础种子，不是 seed_rank
-                # 创建数据加载器
-                # 批次大小需要除以 GPU 数量，因为每个 GPU 处理一部分数据
-                per_gpu_train_workers = dataset_opt['dataloader_num_workers']//opt['num_gpu']
-                train_loader_kwargs = dict(
-                    batch_size=dataset_opt['dataloader_batch_size']//opt['num_gpu'],
-                    shuffle=False,  # 分布式训练时由 sampler 控制打乱
-                    num_workers=per_gpu_train_workers,  # 每个 GPU 的工作进程数
-                    drop_last=True,  # 丢弃最后一个不完整的批次
-                    pin_memory=True,  # 将数据固定在内存中，加速 GPU 传输
-                    sampler=train_sampler,  # 使用分布式采样器
-                )
-                if per_gpu_train_workers > 0:
-                    train_loader_kwargs['persistent_workers'] = dataset_opt.get('dataloader_persistent_workers', False)
-                    train_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
-                    train_loader_kwargs['multiprocessing_context'] = 'spawn'
-                train_loader = DataLoader(train_set, **train_loader_kwargs)
-            else:
-                # 单 GPU 训练模式
-                train_num_workers = dataset_opt['dataloader_num_workers']
-                train_loader_kwargs = dict(
-                    batch_size=dataset_opt['dataloader_batch_size'],
-                    shuffle=dataset_opt['dataloader_shuffle'],
-                    num_workers=train_num_workers,
-                    drop_last=True,
-                    pin_memory=True,
-                )
-                if train_num_workers > 0:
-                    train_loader_kwargs['persistent_workers'] = dataset_opt.get('dataloader_persistent_workers', False)
-                    train_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
-                    train_loader_kwargs['multiprocessing_context'] = 'spawn'
-                train_loader = DataLoader(train_set, **train_loader_kwargs)
 
         elif phase == 'test':
             # 创建测试/验证数据集
