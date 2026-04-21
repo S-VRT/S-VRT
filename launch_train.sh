@@ -360,17 +360,21 @@ launch_echo() {
     local logger_name="$1"
     local launch_phase="$2"
     local launch_mode="$3"
-    local log_dir="$4"
-    local opt_path="$5"
-    local level="$6"
-    shift 6
+    local level="$4"
+    shift 4
     local message="$*"
 
-    if [[ "$level" == "error" ]]; then
-        printf '%s\n' "$message" >&2
-    else
-        printf '%s\n' "$message"
-    fi
+    "$PYTHON_BIN" - "$logger_name" "$level" "$message" "$launch_phase" "$launch_mode" \
+        "$LAUNCH_LOG_FILE" "$CONFIG_PATH" <<'PY'
+import sys
+from utils import utils_option, utils_logger
+
+logger_name, level, message, phase, mode, log_file, opt_path = sys.argv[1:8]
+opt = utils_option.parse(opt_path, is_train=True)
+utils_logger.logger_info(logger_name, log_file, opt=opt, verbose=False)
+utils_logger.emit_launch_wrapper_log(logger_name, level, message,
+    launch_phase=phase, launch_mode=mode)
+PY
 }
 
 run_with_wrapper() {
@@ -464,19 +468,19 @@ if [[ -z "$TRAIN_LOG_DIR" ]]; then
 fi
 LAUNCH_LOG_FILE="$(ensure_launch_logger "train" "$TRAIN_LOG_DIR" "$CONFIG_PATH")"
 
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "VRT Training Launch Script"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Config: $CONFIG_PATH"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Requested GPUs: $GPU_COUNT"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "GPU List: $GPU_LIST"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Prepare Data: $PREPARE_DATA"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Generate LMDB: $GENERATE_LMDB"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Dataset Root: ${DATASET_ROOT:-<none>}"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "GoPro Root: $EFFECTIVE_GOPRO_ROOT"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Spike Root: $EFFECTIVE_SPIKE_ROOT"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Python: $PYTHON_BIN"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" ""
+launch_echo "train" "launch" "local_single" "info" "=========================================="
+launch_echo "train" "launch" "local_single" "info" "VRT Training Launch Script"
+launch_echo "train" "launch" "local_single" "info" "=========================================="
+launch_echo "train" "launch" "local_single" "info" "Config: $CONFIG_PATH"
+launch_echo "train" "launch" "local_single" "info" "Requested GPUs: $GPU_COUNT"
+launch_echo "train" "launch" "local_single" "info" "GPU List: $GPU_LIST"
+launch_echo "train" "launch" "local_single" "info" "Prepare Data: $PREPARE_DATA"
+launch_echo "train" "launch" "local_single" "info" "Generate LMDB: $GENERATE_LMDB"
+launch_echo "train" "launch" "local_single" "info" "Dataset Root: ${DATASET_ROOT:-<none>}"
+launch_echo "train" "launch" "local_single" "info" "GoPro Root: $EFFECTIVE_GOPRO_ROOT"
+launch_echo "train" "launch" "local_single" "info" "Spike Root: $EFFECTIVE_SPIKE_ROOT"
+launch_echo "train" "launch" "local_single" "info" "Python: $PYTHON_BIN"
+launch_echo "train" "launch" "local_single" "info" ""
 
 # ================================================================================
 # Data Preparation (if requested)
@@ -540,9 +544,9 @@ fi
 # ================================================================================
 # Dependency Preparation
 # ================================================================================
-launch_echo "train" "dependency" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
-launch_echo "train" "dependency" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Dependency Preparation"
-launch_echo "train" "dependency" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
+launch_echo "train" "dependency" "local_single" "info" "=========================================="
+launch_echo "train" "dependency" "local_single" "info" "Dependency Preparation"
+launch_echo "train" "dependency" "local_single" "info" "=========================================="
 run_with_wrapper "train" "dependency" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" \
     /bin/bash -lc "PYTHON_BIN='$PYTHON_BIN'; export CUDA_HOME='$CUDA_HOME'; export PATH='$PATH'; export LD_LIBRARY_PATH='$LD_LIBRARY_PATH'; export TORCH_CUDA_ARCH_LIST='$TORCH_CUDA_ARCH_LIST'; export PYTORCH_CUDA_ALLOC_CONF='$PYTORCH_CUDA_ALLOC_CONF'; $(declare -f ensure_python_package); $(declare -f ensure_python_package_version); $(declare -f ensure_dcnv4_module); $(declare -f handle_error); run_dependency_preparation() { $(declare -f run_dependency_preparation | tail -n +2); }; run_dependency_preparation"
 echo ""
@@ -550,10 +554,10 @@ echo ""
 # ================================================================================
 # Training Phase
 # ================================================================================
-launch_echo "train" "train" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
-launch_echo "train" "train" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Training Phase"
-launch_echo "train" "train" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
-launch_echo "train" "train" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" ""
+launch_echo "train" "train" "local_single" "info" "=========================================="
+launch_echo "train" "train" "local_single" "info" "Training Phase"
+launch_echo "train" "train" "local_single" "info" "=========================================="
+launch_echo "train" "train" "local_single" "info" ""
 
 # Create a temporary config with runtime-resolved dataset paths
 RUNTIME_CONFIG="$CONFIG_PATH"
@@ -653,16 +657,16 @@ else
 fi
 
 EXIT_CODE=$?
-launch_echo "train" "launch" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" "info" ""
-launch_echo "train" "launch" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
+launch_echo "train" "launch" "local_single" "info" ""
+launch_echo "train" "launch" "local_single" "info" "=========================================="
 if [[ $EXIT_CODE -eq 0 ]]; then
-    launch_echo "train" "launch" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" "info" "Training completed successfully"
-    launch_echo "train" "launch" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
+    launch_echo "train" "launch" "local_single" "info" "Training completed successfully"
+    launch_echo "train" "launch" "local_single" "info" "=========================================="
     # Success - exit normally
     exit 0
 else
-    launch_echo "train" "launch" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" "error" "Training exited with code: $EXIT_CODE"
-    launch_echo "train" "launch" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" "error" "=========================================="
+    launch_echo "train" "launch" "local_single" "error" "Training exited with code: $EXIT_CODE"
+    launch_echo "train" "launch" "local_single" "error" "=========================================="
     # Use handle_error to show error and keep terminal open
     handle_error $EXIT_CODE "训练失败，请检查上面的错误信息。"
     # handle_error will exit with code 0 to keep terminal open
