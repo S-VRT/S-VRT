@@ -346,8 +346,15 @@ PYINIT
     fi
 }
 
-WRAPPER_LOG_DIR="${WRAPPER_LOG_DIR:-/tmp/s-vrt-launch-wrapper}"
-mkdir -p "$WRAPPER_LOG_DIR"
+resolve_train_log_dir() {
+    local opt_path="$1"
+    "$PYTHON_BIN" - "$opt_path" <<'PY'
+import sys
+from utils import utils_option
+opt = utils_option.parse(sys.argv[1], is_train=True)
+print(opt['path']['log'])
+PY
+}
 
 launch_echo() {
     local logger_name="$1"
@@ -426,12 +433,17 @@ ensure_launch_logger() {
 
     mkdir -p "$log_dir"
     "$PYTHON_BIN" - "$logger_name" "$log_dir" "$opt_path" <<'PY'
-import sys
+import sys, logging
 from utils import utils_option, utils_logger
 
 logger_name, log_dir, opt_path = sys.argv[1:4]
 opt = utils_option.parse(opt_path, is_train=True)
-utils_logger.logger_info(logger_name, f"{log_dir}/{logger_name}.log", opt=opt)
+utils_logger.logger_info(logger_name, f"{log_dir}/{logger_name}.log", opt=opt, verbose=False)
+log = logging.getLogger(logger_name)
+for h in log.handlers:
+    if hasattr(h, 'baseFilename'):
+        print(h.baseFilename)
+        break
 PY
 }
 
@@ -444,12 +456,9 @@ run_dependency_preparation() {
     ensure_dcnv4_module
 }
 
-# Bootstrap the launch logger early so data-prep and training both have handlers.
-# RUNTIME_CONFIG is not yet available here, so use CONFIG_PATH and a derived log dir.
-# PREP_LOG_DIR uses the options (config) directory for the pre-training phase since
-# RUNTIME_CONFIG has not been materialised yet.
-PREP_LOG_DIR="$(dirname "$CONFIG_PATH")"
-ensure_launch_logger "train" "$PREP_LOG_DIR" "$CONFIG_PATH"
+# Resolve the training log directory from the config before any logging begins.
+TRAIN_LOG_DIR="$(resolve_train_log_dir "$CONFIG_PATH")"
+LAUNCH_LOG_FILE="$(ensure_launch_logger "train" "$TRAIN_LOG_DIR" "$CONFIG_PATH")"
 
 launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
 launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "VRT Training Launch Script"
@@ -583,13 +592,6 @@ PYUPDATE
 else
     echo "Warning: Python not found to rewrite config paths; using original config."
 fi
-
-TRAIN_LOG_DIR="$(dirname "$RUNTIME_CONFIG")"
-# Re-call ensure_launch_logger with the RUNTIME_CONFIG log dir.  For handlers
-# this is intentionally a no-op (they were already attached above), but it
-# ensures the correct RUNTIME_CONFIG-derived log directory is used for any
-# log files written during the training phase.
-ensure_launch_logger "train" "$TRAIN_LOG_DIR" "$CONFIG_PATH"
 
 # Check if we're in platform DDP mode
 if [[ -n "${WORLD_SIZE:-}" && "${WORLD_SIZE:-0}" -gt 1 ]]; then
