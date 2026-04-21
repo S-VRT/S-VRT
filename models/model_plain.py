@@ -49,6 +49,9 @@ class ModelPlain(ModelBase):
         amp_val_opt = self.opt.get('val', {}).get('amp', {})
         self.amp_val_enabled = bool(amp_val_opt.get('enable', False)) and self.device.type == 'cuda'
         self.amp_val_dtype = self._resolve_amp_dtype(amp_val_opt.get('dtype', amp_train_opt.get('dtype', 'float16')))
+        self.batch_folder = None
+        self.batch_lq_paths = None
+        self.batch_gt_paths = None
 
     def _assert_lq_channels(self, tensor, tensor_name):
         """Validate the raw model-ingress tensor against configured input width."""
@@ -364,6 +367,9 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     def feed_data(self, data, need_H=True):
         with self.timer.timer('data_load'):
+            self.batch_folder = data.get('folder')
+            self.batch_lq_paths = data.get('lq_path')
+            self.batch_gt_paths = data.get('gt_path')
             self.L = self._build_model_input_tensor(data).to(self.device)
             self._assert_lq_channels(self.L, 'Training Feed Data')
 

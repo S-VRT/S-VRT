@@ -43,10 +43,10 @@
   "dist": true
   // 是否查找未使用的参数：false 表示不查找，可以提高训练速度
   ,
-  "find_unused_parameters": false
+  "find_unused_parameters": true
   // 是否使用静态图：true 表示使用静态图优化，可以提高训练效率
   ,
-  "use_static_graph": true
+  "use_static_graph": false
   // 图像缩放因子：1 表示不进行缩放（保持原始分辨率）
   ,
   "scale": 1
@@ -359,7 +359,20 @@
       "operator": "gated",
       "mode": "replace",
       "out_chans": 3,
-      "operator_params": {}
+      "operator_params": {},
+      "debug": {
+        "enable": true,
+        "save_images": true,
+        "trigger": "phase1_last",
+        "source": "val_full_frame",
+        "full_frame": true,
+        "subdir": "fusion_phase1_last_full",
+        "max_batches": 1,
+        "max_frames": 24,
+        "val_overrides": {
+          "size_patch_testing": 0
+        }
+      }
     }
     ,
     "input_mode": "dual"
@@ -636,7 +649,7 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 6
+    "checkpoint_test": 12
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 6

@@ -440,7 +440,20 @@
       "mode": "replace",
       "inject_stages": [1, 3, 5],
       "out_chans": 96,
-      "operator_params": {}
+      "operator_params": {},
+      "debug": {
+        "enable": true,
+        "save_images": true,
+        "trigger": "phase1_last",
+        "source": "val_full_frame",
+        "full_frame": true,
+        "subdir": "fusion_phase1_last_full",
+        "max_batches": 1,
+        "max_frames": 24,
+        "val_overrides": {
+          "size_patch_testing": 0
+        }
+      }
     }
     // 可变形卷积组数：可变形对齐模块的组数
     ,

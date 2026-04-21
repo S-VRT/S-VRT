@@ -1,5 +1,6 @@
 from collections import OrderedDict
 from pathlib import Path
+import copy
 import cv2
 import numpy as np
 import torch
@@ -12,6 +13,7 @@ from models.model_plain import ModelPlain
 from models.loss import CharbonnierLoss
 from models.loss_ssim import SSIMLoss
 from data.spike_recc.encoding25 import load_encoding25_artifact_with_shape
+from models.fusion.debug import FusionDebugDumper
 
 from utils.utils_model import test_mode
 from utils.utils_regularizers import regularizer_orth, regularizer_clip
@@ -30,11 +32,16 @@ class ModelVRT(ModelPlain):
         self.fix_iter = self.opt_train.get('fix_iter', 0)
         self.fix_keys = self.opt_train.get('fix_keys', [])
         self.fix_unflagged = True
+        self.fusion_debug = FusionDebugDumper(opt)
+        self.fusion_debug.attach(self.get_bare_model(self.netG))
 
     def feed_data(self, data, need_H=True):
         self.L_flow_spike_meta = None
         if self._flow_module_name() == 'scflow' and 'L_flow_spike_meta' in data and 'L_flow_spike' not in data:
             with self.timer.timer('data_load'):
+                self.batch_folder = data.get('folder')
+                self.batch_lq_paths = data.get('lq_path')
+                self.batch_gt_paths = data.get('gt_path')
                 self.L = self._build_model_input_tensor(data).to(self.device)
                 self._assert_lq_channels(self.L, 'Feed Data')
                 self.L_flow_spike = None
@@ -104,7 +111,57 @@ class ModelVRT(ModelPlain):
                     print('Re-wrapping DDP for static graph change...')
                     self.netG = self.model_to_device(self.get_bare_model(self.netG))
 
+        dump_train_batch = self.fusion_debug.should_dump_phase1_last(
+            current_step,
+            self.fix_iter,
+            source='train_batch',
+        )
+        if dump_train_batch:
+            self.fusion_debug.arm()
         super(ModelVRT, self).optimize_parameters(current_step)
+        if dump_train_batch:
+            self.fusion_debug.disarm()
+            self.fusion_debug.dump_last(
+                current_step=current_step,
+                folder=self.batch_folder,
+                lq_paths=self.batch_lq_paths,
+                rank=self.opt.get('rank', 0),
+            )
+
+    def dump_full_frame_fusion_only_from_batch(self, batch, current_step):
+        dumper = self.fusion_debug
+        if not dumper.enabled or not dumper.save_images:
+            return False
+
+        bare = self.get_bare_model(self.netG)
+        fusion_adapter = getattr(bare, 'fusion_adapter', None)
+        placement = str(getattr(bare, 'fusion_cfg', {}).get('placement', 'early')).strip().lower()
+        if fusion_adapter is None or placement not in {'early', 'hybrid'}:
+            return False
+
+        lq = batch.get('L')
+        if lq is None:
+            lq_rgb = batch.get('L_rgb')
+            lq_spike = batch.get('L_spike')
+            if lq_rgb is None or lq_spike is None:
+                return False
+        else:
+            lq_rgb = lq[:, :, :3, :, :]
+            lq_spike = lq[:, :, 3:, :, :]
+
+        cpu_adapter = copy.deepcopy(fusion_adapter).cpu().eval()
+        with torch.no_grad():
+            fused = cpu_adapter(
+                rgb=lq_rgb.float().cpu(),
+                spike=lq_spike.float().cpu(),
+            )
+        dumper.capture_tensor(fused)
+        return dumper.dump_last(
+            current_step=current_step,
+            folder=batch.get('folder'),
+            lq_paths=batch.get('lq_path'),
+            rank=self.opt.get('rank', 0),
+        )
 
     # ----------------------------------------
     # test / inference

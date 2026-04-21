@@ -74,6 +74,24 @@ def log_validation_probe(logger, label, rank=0):
         logger.warning(f'[VAL_PROBE] {label} probe failed: {exc}')
 
 
+def dump_full_frame_fusion_debug(model, test_loader, current_step):
+    """Dump full-frame fusion outputs only, without running the full VRT forward."""
+    dumper = getattr(model, 'fusion_debug', None)
+    if dumper is None or not dumper.should_dump_phase1_last(current_step, model.fix_iter, source='val_full_frame'):
+        return False
+
+    try:
+        for idx, debug_data in enumerate(test_loader):
+            if idx >= dumper.max_batches:
+                break
+            dumped = model.dump_full_frame_fusion_only_from_batch(debug_data, current_step)
+            if dumped:
+                return True
+    finally:
+        pass
+    return False
+
+
 def main():
     """
     主训练函数，接收命令行参数指定的配置文件路径
@@ -479,6 +497,18 @@ def main():
                                 ' (we need it due to a bug with use_checkpoint=True in distributed training). The training '
                                 'will be terminated by PyTorch in the next iteration. Just resume training with the same '
                                 '.json config file.')
+
+            if opt['rank'] == 0:
+                dump_full_frame_fusion_debug(model, test_loader, current_step)
+            if opt['dist'] and (
+                getattr(getattr(model, 'fusion_debug', None), 'enabled', False)
+                and getattr(getattr(model, 'fusion_debug', None), 'save_images', False)
+                and getattr(getattr(model, 'fusion_debug', None), 'source', None) == 'val_full_frame'
+                and getattr(getattr(model, 'fusion_debug', None), 'trigger', None) == 'phase1_last'
+                and model.fix_iter > 0
+                and current_step == model.fix_iter - 1
+            ):
+                barrier_safe()
 
             # -------------------------------
             # 6) 模型测试和评估
