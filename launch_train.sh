@@ -381,48 +381,58 @@ run_with_wrapper() {
     local logger_name="$1"
     local launch_phase="$2"
     local launch_mode="$3"
-    local log_dir="$4"
-    local opt_path="$5"
-    shift 5
+    shift 3
 
     local cmd=("$@")
-    local command_str="${cmd[*]}"
-    local timestamp
-    timestamp="$(date +%y%m%d_%H%M%S)"
-    local stdout_log="$WRAPPER_LOG_DIR/${launch_phase}_${launch_mode}_${timestamp}.stdout.log"
-    local stderr_log="$WRAPPER_LOG_DIR/${launch_phase}_${launch_mode}_${timestamp}.stderr.log"
 
     local stdout_pipe stderr_pipe
     stdout_pipe="$(mktemp -u /tmp/s-vrt-wrapper-stdout.XXXXXX)"
     stderr_pipe="$(mktemp -u /tmp/s-vrt-wrapper-stderr.XXXXXX)"
     mkfifo "$stdout_pipe" "$stderr_pipe"
 
-    while IFS= read -r line; do
-        printf '%s\n' "$line"
-        printf '%s\n' "$line" >> "$stdout_log"
-    done < "$stdout_pipe" &
+    "$PYTHON_BIN" - "$logger_name" "stdout" "$launch_phase" "$launch_mode" \
+        "$LAUNCH_LOG_FILE" "$CONFIG_PATH" <<'PY' < "$stdout_pipe" &
+import sys
+from utils import utils_option, utils_logger
+
+logger_name, stream, phase, mode, log_file, opt_path = sys.argv[1:7]
+opt = utils_option.parse(opt_path, is_train=True)
+utils_logger.logger_info(logger_name, log_file, opt=opt, verbose=False)
+for line in sys.stdin:
+    line = line.rstrip('\n')
+    if line:
+        utils_logger.emit_launch_wrapper_log(
+            logger_name, 'info', line,
+            launch_stream=stream, launch_phase=phase, launch_mode=mode
+        )
+PY
     local stdout_reader_pid=$!
 
-    while IFS= read -r line; do
-        printf '%s\n' "$line" >&2
-        printf '%s\n' "$line" >> "$stderr_log"
-    done < "$stderr_pipe" &
+    "$PYTHON_BIN" - "$logger_name" "stderr" "$launch_phase" "$launch_mode" \
+        "$LAUNCH_LOG_FILE" "$CONFIG_PATH" <<'PY' < "$stderr_pipe" &
+import sys
+from utils import utils_option, utils_logger
+
+logger_name, stream, phase, mode, log_file, opt_path = sys.argv[1:7]
+opt = utils_option.parse(opt_path, is_train=True)
+utils_logger.logger_info(logger_name, log_file, opt=opt, verbose=False)
+for line in sys.stdin:
+    line = line.rstrip('\n')
+    if line:
+        utils_logger.emit_launch_wrapper_log(
+            logger_name, 'warning', line,
+            launch_stream=stream, launch_phase=phase, launch_mode=mode
+        )
+PY
     local stderr_reader_pid=$!
 
-    # Open write ends of the pipes in the current shell so the command can start
-    # without blocking, even if the background readers haven't opened their read
-    # ends yet.  We close our copies immediately after launching the command so
-    # the readers see EOF when the command exits.
     exec 3>"$stdout_pipe" 4>"$stderr_pipe"
-
     "${cmd[@]}" >&3 2>&4 &
     local cmd_pid=$!
-
-    exec 3>&- 4>&-  # close our copies so readers see EOF when cmd exits
+    exec 3>&- 4>&-
 
     wait "$cmd_pid"
     local cmd_exit_code=$?
-
     wait "$stdout_reader_pid"
     wait "$stderr_reader_pid"
     rm -f "$stdout_pipe" "$stderr_pipe"
@@ -515,7 +525,7 @@ if [[ "$PREPARE_DATA" == true ]]; then
     echo "Command: python scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS"
     echo ""
     
-    run_with_wrapper "train" "prepare" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" \
+    run_with_wrapper "train" "prepare" "local_single" \
         "$PYTHON_BIN" scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS
 
     PREP_EXIT_CODE=$?
@@ -547,7 +557,7 @@ fi
 launch_echo "train" "dependency" "local_single" "info" "=========================================="
 launch_echo "train" "dependency" "local_single" "info" "Dependency Preparation"
 launch_echo "train" "dependency" "local_single" "info" "=========================================="
-run_with_wrapper "train" "dependency" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" \
+run_with_wrapper "train" "dependency" "local_single" \
     /bin/bash -lc "PYTHON_BIN='$PYTHON_BIN'; export CUDA_HOME='$CUDA_HOME'; export PATH='$PATH'; export LD_LIBRARY_PATH='$LD_LIBRARY_PATH'; export TORCH_CUDA_ARCH_LIST='$TORCH_CUDA_ARCH_LIST'; export PYTORCH_CUDA_ALLOC_CONF='$PYTORCH_CUDA_ALLOC_CONF'; $(declare -f ensure_python_package); $(declare -f ensure_python_package_version); $(declare -f ensure_dcnv4_module); $(declare -f handle_error); run_dependency_preparation() { $(declare -f run_dependency_preparation | tail -n +2); }; run_dependency_preparation"
 echo ""
 
@@ -617,7 +627,7 @@ if [[ -n "${WORLD_SIZE:-}" && "${WORLD_SIZE:-0}" -gt 1 ]]; then
     echo "=========================================="
     
     # Platform has already set up environment, just run python directly
-    run_with_wrapper "train" "train" "platform_ddp" "$TRAIN_LOG_DIR" "$CONFIG_PATH" \
+    run_with_wrapper "train" "train" "platform_ddp" \
         "$PYTHON_BIN" -u main_train_vrt.py --opt "$RUNTIME_CONFIG"
 
 else
@@ -635,7 +645,7 @@ else
         echo "Running: $PYTHON_BIN -m torch.distributed.run --nproc_per_node=$GPU_COUNT main_train_vrt.py --opt $RUNTIME_CONFIG"
         echo "=========================================="
         
-        run_with_wrapper "train" "train" "local_multi" "$TRAIN_LOG_DIR" "$CONFIG_PATH" \
+        run_with_wrapper "train" "train" "local_multi" \
             env CUDA_VISIBLE_DEVICES="$GPU_LIST" \
             "$PYTHON_BIN" -m torch.distributed.run \
                 --nproc_per_node="$GPU_COUNT" \
@@ -650,7 +660,7 @@ else
         echo "Running: $PYTHON_BIN main_train_vrt.py --opt $RUNTIME_CONFIG"
         echo "=========================================="
 
-        run_with_wrapper "train" "train" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" \
+        run_with_wrapper "train" "train" "local_single" \
             env CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" \
             "$PYTHON_BIN" main_train_vrt.py --opt "$RUNTIME_CONFIG"
     fi
