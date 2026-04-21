@@ -682,9 +682,8 @@ if [[ -n "${WORLD_SIZE:-}" && "${WORLD_SIZE:-0}" -gt 1 ]]; then
         "Running: $PYTHON_BIN -u main_train_vrt.py --opt $RUNTIME_CONFIG" \
         "=========================================="
     
-    # Platform has already set up environment, just run python directly
-    run_with_wrapper "train" "train" "platform_ddp" \
-        "$PYTHON_BIN" -u main_train_vrt.py --opt "$RUNTIME_CONFIG"
+    # The training process owns the train logger; do not wrap it again here.
+    "$PYTHON_BIN" -u main_train_vrt.py --opt "$RUNTIME_CONFIG"
 
 else
     # ========================================
@@ -701,12 +700,11 @@ else
             "Running: $PYTHON_BIN -m torch.distributed.run --nproc_per_node=$GPU_COUNT main_train_vrt.py --opt $RUNTIME_CONFIG" \
             "=========================================="
         
-        run_with_wrapper "train" "train" "local_multi" \
-            env CUDA_VISIBLE_DEVICES="$GPU_LIST" \
+        env CUDA_VISIBLE_DEVICES="$GPU_LIST" \
             "$PYTHON_BIN" -m torch.distributed.run \
-                --nproc_per_node="$GPU_COUNT" \
-                --standalone \
-                main_train_vrt.py --opt "$RUNTIME_CONFIG"
+            --nproc_per_node="$GPU_COUNT" \
+            --standalone \
+            main_train_vrt.py --opt "$RUNTIME_CONFIG"
     else
         # Single GPU: plain python
         SINGLE_GPU_ID="${GPU_ID_ARRAY[0]}"
@@ -718,8 +716,7 @@ else
             "Running: $PYTHON_BIN main_train_vrt.py --opt $RUNTIME_CONFIG" \
             "=========================================="
 
-        run_with_wrapper "train" "train" "local_single" \
-            env CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" \
+        env CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" \
             "$PYTHON_BIN" main_train_vrt.py --opt "$RUNTIME_CONFIG"
     fi
 fi

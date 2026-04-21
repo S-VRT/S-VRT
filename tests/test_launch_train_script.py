@@ -60,3 +60,10 @@ def test_launch_echo_uses_persistent_logger_daemon():
     assert "start_launch_logger" in launch_script
     assert "LAUNCH_LOG_PIPE" in launch_script
     assert '"$PYTHON_BIN"' not in launch_echo_body
+
+
+def test_training_process_is_not_wrapped_by_launch_logger():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert 'run_with_wrapper "train" "train"' not in launch_script
+    assert 'run_with_wrapper "train" "dependency"' in launch_script
