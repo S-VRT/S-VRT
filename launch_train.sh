@@ -349,9 +349,12 @@ PYINIT
 resolve_train_log_dir() {
     local opt_path="$1"
     "$PYTHON_BIN" - "$opt_path" <<'PY'
+import contextlib
+import io
 import sys
 from utils import utils_option
-opt = utils_option.parse(sys.argv[1], is_train=True)
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(sys.argv[1], is_train=True)
 print(opt['path']['log'])
 PY
 }
@@ -366,11 +369,14 @@ launch_echo() {
 
     "$PYTHON_BIN" - "$logger_name" "$level" "$message" "$launch_phase" "$launch_mode" \
         "$LAUNCH_LOG_FILE" "$CONFIG_PATH" <<'PY'
+import contextlib
+import io
 import sys
 from utils import utils_option, utils_logger
 
 logger_name, level, message, phase, mode, log_file, opt_path = sys.argv[1:8]
-opt = utils_option.parse(opt_path, is_train=True)
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(opt_path, is_train=True)
 utils_logger.logger_info(logger_name, log_file, opt=opt, verbose=False)
 utils_logger.emit_launch_wrapper_log(logger_name, level, message,
     launch_phase=phase, launch_mode=mode)
@@ -385,11 +391,14 @@ run_with_wrapper() {
 
     local cmd=("$@")
     local reader_code='
+import contextlib
+import io
 import sys
 from utils import utils_option, utils_logger
 
 logger_name, stream, level, phase, mode, log_file, opt_path = sys.argv[1:8]
-opt = utils_option.parse(opt_path, is_train=True)
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(opt_path, is_train=True)
 utils_logger.logger_info(logger_name, log_file, opt=opt, verbose=False)
 for line in sys.stdin:
     line = line.rstrip("\n")
@@ -434,11 +443,14 @@ ensure_launch_logger() {
 
     mkdir -p "$log_dir"
     "$PYTHON_BIN" - "$logger_name" "$log_dir" "$opt_path" <<'PY'
+import contextlib
+import io
 import sys, logging
 from utils import utils_option, utils_logger
 
 logger_name, log_dir, opt_path = sys.argv[1:4]
-opt = utils_option.parse(opt_path, is_train=True)
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(opt_path, is_train=True)
 utils_logger.logger_info(logger_name, f"{log_dir}/{logger_name}.log", opt=opt, verbose=False)
 log = logging.getLogger(logger_name)
 for h in log.handlers:

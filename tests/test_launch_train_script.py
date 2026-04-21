@@ -25,3 +25,11 @@ def test_launch_phase_status_messages_use_launch_echo_after_logger_bootstrap():
     ]
 
     assert bare_echo_lines == []
+
+
+def test_launch_python_helpers_suppress_utils_option_parse_stdout():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert launch_script.count("utils_option.parse(") == launch_script.count(
+        "with contextlib.redirect_stdout(io.StringIO()):"
+    )
