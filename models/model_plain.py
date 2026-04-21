@@ -402,6 +402,32 @@ class ModelPlain(ModelBase):
                     self.E = self.netG(self.L)
 
     # ----------------------------------------
+    # compute fusion auxiliary loss
+    # ----------------------------------------
+    def _compute_fusion_aux_loss(self, is_phase1: bool) -> torch.Tensor:
+        if is_phase1:
+            aux_weight = self.opt_train.get('phase1_fusion_aux_loss_weight', 0.0)
+            pass_weight = self.opt_train.get('fusion_passthrough_loss_weight', 0.0)
+        else:
+            aux_weight = self.opt_train.get('phase2_fusion_aux_loss_weight', 0.0)
+            pass_weight = 0.0
+        if aux_weight == 0.0 and pass_weight == 0.0:
+            return torch.tensor(0.0, device=self.device)
+        vrt = self.get_bare_model(self.netG)
+        if not hasattr(vrt, '_last_fusion_out') or vrt._last_fusion_out is None:
+            return torch.tensor(0.0, device=self.device)
+        fusion_out = vrt._last_fusion_out
+        S = vrt._last_spike_bins
+        fusion_center = fusion_out[:, S // 2 :: S, :, :, :]  # [B, N, 3, H, W]
+        loss = torch.tensor(0.0, device=self.device)
+        if aux_weight > 0.0:
+            loss = loss + aux_weight * self.G_lossfn(fusion_center, self.H)
+        if pass_weight > 0.0:
+            blur_rgb = self.L[:, :, :3, :, :]
+            loss = loss + pass_weight * self.G_lossfn(fusion_center, blur_rgb)
+        return loss
+
+    # ----------------------------------------
     # update parameters and get loss
     # ----------------------------------------
     def optimize_parameters(self, current_step):
@@ -414,7 +440,14 @@ class ModelPlain(ModelBase):
         self.netG_forward()
         
         with self.timer.timer('loss_compute'):
-            G_loss = self.G_lossfn_weight * self.G_lossfn(self.E, self.H)
+            is_phase1 = (
+                hasattr(self, 'fix_iter')
+                and self.fix_iter > 0
+                and current_step < self.fix_iter
+            )
+            vrt_loss_weight = 0.0 if is_phase1 else self.G_lossfn_weight
+            G_loss = vrt_loss_weight * self.G_lossfn(self.E, self.H)
+            G_loss = G_loss + self._compute_fusion_aux_loss(is_phase1=is_phase1)
 
         with self.timer.timer('backward'):
             if self.grad_scaler.is_enabled():
