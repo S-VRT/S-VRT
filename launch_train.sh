@@ -458,6 +458,10 @@ run_dependency_preparation() {
 
 # Resolve the training log directory from the config before any logging begins.
 TRAIN_LOG_DIR="$(resolve_train_log_dir "$CONFIG_PATH")"
+if [[ -z "$TRAIN_LOG_DIR" ]]; then
+    echo "Error: could not resolve log dir from $CONFIG_PATH" >&2
+    exit 1
+fi
 LAUNCH_LOG_FILE="$(ensure_launch_logger "train" "$TRAIN_LOG_DIR" "$CONFIG_PATH")"
 
 launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
