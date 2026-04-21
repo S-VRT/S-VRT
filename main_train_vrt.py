@@ -31,6 +31,34 @@ from data.select_dataset import define_Dataset  # 数据集工厂函数
 from models.select_model import define_Model  # 模型工厂函数
 
 
+def resolve_phase_value(value, is_phase1, key_name):
+    """Resolve scalar or [phase1, phase2] value to active phase value."""
+    if isinstance(value, int):
+        resolved = value
+    elif isinstance(value, (list, tuple)) and len(value) == 2:
+        resolved = value[0] if is_phase1 else value[1]
+    else:
+        raise ValueError(
+            f"{key_name} must be an int or a length-2 list/tuple [phase1, phase2], got {value!r}"
+        )
+
+    if not isinstance(resolved, int):
+        raise ValueError(f"{key_name} resolved value must be int, got {type(resolved).__name__}")
+    if resolved <= 0:
+        raise ValueError(f"{key_name} must be > 0, got {resolved}")
+    return resolved
+
+
+def build_phase_train_dataset_opt(train_dataset_opt, is_phase1):
+    """Build per-phase dataset options with resolved gt_size and dataloader_batch_size."""
+    resolved = dict(train_dataset_opt)
+    resolved["gt_size"] = resolve_phase_value(train_dataset_opt.get("gt_size", 256), is_phase1, "gt_size")
+    resolved["dataloader_batch_size"] = resolve_phase_value(
+        train_dataset_opt["dataloader_batch_size"], is_phase1, "dataloader_batch_size"
+    )
+    return resolved
+
+
 def get_memory_usage():
     """获取当前进程的内存使用情况"""
     try:
