@@ -346,72 +346,89 @@ PYINIT
     fi
 }
 
-WRAPPER_LOG_DIR="${WRAPPER_LOG_DIR:-/tmp/s-vrt-launch-wrapper}"
-mkdir -p "$WRAPPER_LOG_DIR"
+resolve_train_log_dir() {
+    local opt_path="$1"
+    "$PYTHON_BIN" - "$opt_path" <<'PY'
+import contextlib
+import io
+import sys
+from utils import utils_option
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(sys.argv[1], is_train=True)
+print(opt['path']['log'])
+PY
+}
 
 launch_echo() {
     local logger_name="$1"
     local launch_phase="$2"
     local launch_mode="$3"
-    local log_dir="$4"
-    local opt_path="$5"
-    local level="$6"
-    shift 6
+    local level="$4"
+    shift 4
     local message="$*"
 
-    if [[ "$level" == "error" ]]; then
-        printf '%s\n' "$message" >&2
-    else
-        printf '%s\n' "$message"
-    fi
+    "$PYTHON_BIN" - "$logger_name" "$level" "$message" "$launch_phase" "$launch_mode" \
+        "$LAUNCH_LOG_FILE" "$CONFIG_PATH" <<'PY'
+import contextlib
+import io
+import sys
+from utils import utils_option, utils_logger
+
+logger_name, level, message, phase, mode, log_file, opt_path = sys.argv[1:8]
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(opt_path, is_train=True)
+utils_logger.logger_info(logger_name, log_file, opt=opt, verbose=False)
+utils_logger.emit_launch_wrapper_log(logger_name, level, message,
+    launch_phase=phase, launch_mode=mode)
+PY
 }
 
 run_with_wrapper() {
     local logger_name="$1"
     local launch_phase="$2"
     local launch_mode="$3"
-    local log_dir="$4"
-    local opt_path="$5"
-    shift 5
+    shift 3
 
     local cmd=("$@")
-    local command_str="${cmd[*]}"
-    local timestamp
-    timestamp="$(date +%y%m%d_%H%M%S)"
-    local stdout_log="$WRAPPER_LOG_DIR/${launch_phase}_${launch_mode}_${timestamp}.stdout.log"
-    local stderr_log="$WRAPPER_LOG_DIR/${launch_phase}_${launch_mode}_${timestamp}.stderr.log"
+    local reader_code='
+import contextlib
+import io
+import sys
+from utils import utils_option, utils_logger
+
+logger_name, stream, level, phase, mode, log_file, opt_path = sys.argv[1:8]
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(opt_path, is_train=True)
+utils_logger.logger_info(logger_name, log_file, opt=opt, verbose=False)
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    if line:
+        utils_logger.emit_launch_wrapper_log(
+            logger_name, level, line,
+            launch_stream=stream, launch_phase=phase, launch_mode=mode
+        )
+'
 
     local stdout_pipe stderr_pipe
     stdout_pipe="$(mktemp -u /tmp/s-vrt-wrapper-stdout.XXXXXX)"
     stderr_pipe="$(mktemp -u /tmp/s-vrt-wrapper-stderr.XXXXXX)"
     mkfifo "$stdout_pipe" "$stderr_pipe"
 
-    while IFS= read -r line; do
-        printf '%s\n' "$line"
-        printf '%s\n' "$line" >> "$stdout_log"
-    done < "$stdout_pipe" &
+    "$PYTHON_BIN" -c "$reader_code" "$logger_name" "stdout" "info" "$launch_phase" "$launch_mode" \
+        "$LAUNCH_LOG_FILE" "$CONFIG_PATH" < "$stdout_pipe" &
     local stdout_reader_pid=$!
 
-    while IFS= read -r line; do
-        printf '%s\n' "$line" >&2
-        printf '%s\n' "$line" >> "$stderr_log"
-    done < "$stderr_pipe" &
+    "$PYTHON_BIN" -c "$reader_code" "$logger_name" "stderr" "warning" "$launch_phase" "$launch_mode" \
+        "$LAUNCH_LOG_FILE" "$CONFIG_PATH" < "$stderr_pipe" &
     local stderr_reader_pid=$!
 
-    # Open write ends of the pipes in the current shell so the command can start
-    # without blocking, even if the background readers haven't opened their read
-    # ends yet.  We close our copies immediately after launching the command so
-    # the readers see EOF when the command exits.
     exec 3>"$stdout_pipe" 4>"$stderr_pipe"
-
     "${cmd[@]}" >&3 2>&4 &
     local cmd_pid=$!
-
-    exec 3>&- 4>&-  # close our copies so readers see EOF when cmd exits
+    exec 3>&- 4>&-
 
     wait "$cmd_pid"
     local cmd_exit_code=$?
-
     wait "$stdout_reader_pid"
     wait "$stderr_reader_pid"
     rm -f "$stdout_pipe" "$stderr_pipe"
@@ -426,12 +443,20 @@ ensure_launch_logger() {
 
     mkdir -p "$log_dir"
     "$PYTHON_BIN" - "$logger_name" "$log_dir" "$opt_path" <<'PY'
-import sys
+import contextlib
+import io
+import sys, logging
 from utils import utils_option, utils_logger
 
 logger_name, log_dir, opt_path = sys.argv[1:4]
-opt = utils_option.parse(opt_path, is_train=True)
-utils_logger.logger_info(logger_name, f"{log_dir}/{logger_name}.log", opt=opt)
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(opt_path, is_train=True)
+utils_logger.logger_info(logger_name, f"{log_dir}/{logger_name}.log", opt=opt, verbose=False)
+log = logging.getLogger(logger_name)
+for h in log.handlers:
+    if hasattr(h, 'baseFilename'):
+        print(h.baseFilename)
+        break
 PY
 }
 
@@ -444,37 +469,38 @@ run_dependency_preparation() {
     ensure_dcnv4_module
 }
 
-# Bootstrap the launch logger early so data-prep and training both have handlers.
-# RUNTIME_CONFIG is not yet available here, so use CONFIG_PATH and a derived log dir.
-# PREP_LOG_DIR uses the options (config) directory for the pre-training phase since
-# RUNTIME_CONFIG has not been materialised yet.
-PREP_LOG_DIR="$(dirname "$CONFIG_PATH")"
-ensure_launch_logger "train" "$PREP_LOG_DIR" "$CONFIG_PATH"
+# Resolve the training log directory from the config before any logging begins.
+TRAIN_LOG_DIR="$(resolve_train_log_dir "$CONFIG_PATH")"
+if [[ -z "$TRAIN_LOG_DIR" ]]; then
+    echo "Error: could not resolve log dir from $CONFIG_PATH" >&2
+    exit 1
+fi
+LAUNCH_LOG_FILE="$(ensure_launch_logger "train" "$TRAIN_LOG_DIR" "$CONFIG_PATH")"
 
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "VRT Training Launch Script"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Config: $CONFIG_PATH"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Requested GPUs: $GPU_COUNT"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "GPU List: $GPU_LIST"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Prepare Data: $PREPARE_DATA"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Generate LMDB: $GENERATE_LMDB"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Dataset Root: ${DATASET_ROOT:-<none>}"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "GoPro Root: $EFFECTIVE_GOPRO_ROOT"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Spike Root: $EFFECTIVE_SPIKE_ROOT"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Python: $PYTHON_BIN"
-launch_echo "train" "launch" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" ""
+launch_echo "train" "launch" "local_single" "info" "=========================================="
+launch_echo "train" "launch" "local_single" "info" "VRT Training Launch Script"
+launch_echo "train" "launch" "local_single" "info" "=========================================="
+launch_echo "train" "launch" "local_single" "info" "Config: $CONFIG_PATH"
+launch_echo "train" "launch" "local_single" "info" "Requested GPUs: $GPU_COUNT"
+launch_echo "train" "launch" "local_single" "info" "GPU List: $GPU_LIST"
+launch_echo "train" "launch" "local_single" "info" "Prepare Data: $PREPARE_DATA"
+launch_echo "train" "launch" "local_single" "info" "Generate LMDB: $GENERATE_LMDB"
+launch_echo "train" "launch" "local_single" "info" "Dataset Root: ${DATASET_ROOT:-<none>}"
+launch_echo "train" "launch" "local_single" "info" "GoPro Root: $EFFECTIVE_GOPRO_ROOT"
+launch_echo "train" "launch" "local_single" "info" "Spike Root: $EFFECTIVE_SPIKE_ROOT"
+launch_echo "train" "launch" "local_single" "info" "Python: $PYTHON_BIN"
+launch_echo "train" "launch" "local_single" "info" ""
 
 # ================================================================================
 # Data Preparation (if requested)
 # ================================================================================
 if [[ "$PREPARE_DATA" == true ]]; then
-    echo "=========================================="
-    echo "Data Preparation Phase"
-    echo "=========================================="
-    echo "GoPro Root: $EFFECTIVE_GOPRO_ROOT"
-    echo "Spike Root: $EFFECTIVE_SPIKE_ROOT"
-    echo ""
+    launch_echo "train" "prepare" "local_single" "info" "=========================================="
+    launch_echo "train" "prepare" "local_single" "info" "Data Preparation Phase"
+    launch_echo "train" "prepare" "local_single" "info" "=========================================="
+    launch_echo "train" "prepare" "local_single" "info" "GoPro Root: $EFFECTIVE_GOPRO_ROOT"
+    launch_echo "train" "prepare" "local_single" "info" "Spike Root: $EFFECTIVE_SPIKE_ROOT"
+    launch_echo "train" "prepare" "local_single" "info" ""
     
     PREP_ARGS="--gopro_root $EFFECTIVE_GOPRO_ROOT --spike_root $EFFECTIVE_SPIKE_ROOT"
     if [[ -n "$DATASET_ROOT" ]]; then
@@ -483,42 +509,42 @@ if [[ "$PREPARE_DATA" == true ]]; then
     
     if [[ "$GENERATE_LMDB" == true ]]; then
         PREP_ARGS="$PREP_ARGS --generate_lmdb"
-        echo "LMDB generation: ENABLED"
+        launch_echo "train" "prepare" "local_single" "info" "LMDB generation: ENABLED"
     else
-        echo "LMDB generation: DISABLED (use --generate-lmdb to enable)"
+        launch_echo "train" "prepare" "local_single" "info" "LMDB generation: DISABLED (use --generate-lmdb to enable)"
     fi
     
     if [[ "$FORCE_PREPARE" == true ]]; then
         PREP_ARGS="$PREP_ARGS --force"
-        echo "Force preparation: ENABLED"
+        launch_echo "train" "prepare" "local_single" "info" "Force preparation: ENABLED"
     fi
     
-    echo ""
-    echo "Running data preparation script..."
-    echo "Command: python scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS"
-    echo ""
+    launch_echo "train" "prepare" "local_single" "info" ""
+    launch_echo "train" "prepare" "local_single" "info" "Running data preparation script..."
+    launch_echo "train" "prepare" "local_single" "info" "Command: python scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS"
+    launch_echo "train" "prepare" "local_single" "info" ""
     
-    run_with_wrapper "train" "prepare" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" \
+    run_with_wrapper "train" "prepare" "local_single" \
         "$PYTHON_BIN" scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS
 
     PREP_EXIT_CODE=$?
-    echo ""
+    launch_echo "train" "prepare" "local_single" "info" ""
     
     if [[ $PREP_EXIT_CODE -ne 0 ]]; then
-        echo "=========================================="
-        echo "Data preparation FAILED (exit code: $PREP_EXIT_CODE)"
-        echo "=========================================="
-        echo ""
-        echo "Please fix the data preparation issues before training."
-        echo "Check the error messages above for details."
+        launch_echo "train" "prepare" "local_single" "error" "=========================================="
+        launch_echo "train" "prepare" "local_single" "error" "Data preparation FAILED (exit code: $PREP_EXIT_CODE)"
+        launch_echo "train" "prepare" "local_single" "error" "=========================================="
+        launch_echo "train" "prepare" "local_single" "error" ""
+        launch_echo "train" "prepare" "local_single" "error" "Please fix the data preparation issues before training."
+        launch_echo "train" "prepare" "local_single" "error" "Check the error messages above for details."
         handle_error $PREP_EXIT_CODE "数据准备失败，请检查上面的错误信息。"
         # handle_error will exit with code 0 to keep terminal open
     fi
     
-    echo "=========================================="
-    echo "Data preparation completed successfully!"
-    echo "=========================================="
-    echo ""
+    launch_echo "train" "prepare" "local_single" "info" "=========================================="
+    launch_echo "train" "prepare" "local_single" "info" "Data preparation completed successfully!"
+    launch_echo "train" "prepare" "local_single" "info" "=========================================="
+    launch_echo "train" "prepare" "local_single" "info" ""
     
     # Brief pause to let user see the summary
     sleep 2
@@ -527,20 +553,20 @@ fi
 # ================================================================================
 # Dependency Preparation
 # ================================================================================
-launch_echo "train" "dependency" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
-launch_echo "train" "dependency" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Dependency Preparation"
-launch_echo "train" "dependency" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
-run_with_wrapper "train" "dependency" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" \
+launch_echo "train" "dependency" "local_single" "info" "=========================================="
+launch_echo "train" "dependency" "local_single" "info" "Dependency Preparation"
+launch_echo "train" "dependency" "local_single" "info" "=========================================="
+run_with_wrapper "train" "dependency" "local_single" \
     /bin/bash -lc "PYTHON_BIN='$PYTHON_BIN'; export CUDA_HOME='$CUDA_HOME'; export PATH='$PATH'; export LD_LIBRARY_PATH='$LD_LIBRARY_PATH'; export TORCH_CUDA_ARCH_LIST='$TORCH_CUDA_ARCH_LIST'; export PYTORCH_CUDA_ALLOC_CONF='$PYTORCH_CUDA_ALLOC_CONF'; $(declare -f ensure_python_package); $(declare -f ensure_python_package_version); $(declare -f ensure_dcnv4_module); $(declare -f handle_error); run_dependency_preparation() { $(declare -f run_dependency_preparation | tail -n +2); }; run_dependency_preparation"
-echo ""
+launch_echo "train" "dependency" "local_single" "info" ""
 
 # ================================================================================
 # Training Phase
 # ================================================================================
-launch_echo "train" "train" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
-launch_echo "train" "train" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "Training Phase"
-launch_echo "train" "train" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
-launch_echo "train" "train" "local_single" "$PREP_LOG_DIR" "$CONFIG_PATH" "info" ""
+launch_echo "train" "train" "local_single" "info" "=========================================="
+launch_echo "train" "train" "local_single" "info" "Training Phase"
+launch_echo "train" "train" "local_single" "info" "=========================================="
+launch_echo "train" "train" "local_single" "info" ""
 
 # Create a temporary config with runtime-resolved dataset paths
 RUNTIME_CONFIG="$CONFIG_PATH"
@@ -574,58 +600,50 @@ print(dst)
 PYUPDATE
     if [[ -s "$TMP_CONFIG" ]]; then
         RUNTIME_CONFIG="$TMP_CONFIG"
-        echo "Using runtime config: $RUNTIME_CONFIG"
+        launch_echo "train" "train" "local_single" "info" "Using runtime config: $RUNTIME_CONFIG"
     else
-        echo "Warning: Failed to materialize runtime config; falling back to original."
+        launch_echo "train" "train" "local_single" "warning" "Warning: Failed to materialize runtime config; falling back to original."
         rm -f "$TMP_CONFIG"
         TMP_CONFIG=""
     fi
 else
-    echo "Warning: Python not found to rewrite config paths; using original config."
+    launch_echo "train" "train" "local_single" "warning" "Warning: Python not found to rewrite config paths; using original config."
 fi
-
-TRAIN_LOG_DIR="$(dirname "$RUNTIME_CONFIG")"
-# Re-call ensure_launch_logger with the RUNTIME_CONFIG log dir.  For handlers
-# this is intentionally a no-op (they were already attached above), but it
-# ensures the correct RUNTIME_CONFIG-derived log directory is used for any
-# log files written during the training phase.
-ensure_launch_logger "train" "$TRAIN_LOG_DIR" "$CONFIG_PATH"
 
 # Check if we're in platform DDP mode
 if [[ -n "${WORLD_SIZE:-}" && "${WORLD_SIZE:-0}" -gt 1 ]]; then
     # ========================================
     # Platform DDP Mode
     # ========================================
-    echo "Platform DDP detected:"
-    echo "  RANK=$RANK"
-    echo "  LOCAL_RANK=$LOCAL_RANK"
-    echo "  WORLD_SIZE=$WORLD_SIZE"
-    echo "  MASTER_ADDR=$MASTER_ADDR"
-    echo "  MASTER_PORT=$MASTER_PORT"
-    echo ""
-    echo "Running: $PYTHON_BIN -u main_train_vrt.py --opt $RUNTIME_CONFIG"
-    echo "=========================================="
+    launch_echo "train" "train" "platform_ddp" "info" "Platform DDP detected:"
+    launch_echo "train" "train" "platform_ddp" "info" "  RANK=$RANK"
+    launch_echo "train" "train" "platform_ddp" "info" "  LOCAL_RANK=$LOCAL_RANK"
+    launch_echo "train" "train" "platform_ddp" "info" "  WORLD_SIZE=$WORLD_SIZE"
+    launch_echo "train" "train" "platform_ddp" "info" "  MASTER_ADDR=$MASTER_ADDR"
+    launch_echo "train" "train" "platform_ddp" "info" "  MASTER_PORT=$MASTER_PORT"
+    launch_echo "train" "train" "platform_ddp" "info" ""
+    launch_echo "train" "train" "platform_ddp" "info" "Running: $PYTHON_BIN -u main_train_vrt.py --opt $RUNTIME_CONFIG"
+    launch_echo "train" "train" "platform_ddp" "info" "=========================================="
     
     # Platform has already set up environment, just run python directly
-    run_with_wrapper "train" "train" "platform_ddp" "$TRAIN_LOG_DIR" "$CONFIG_PATH" \
+    run_with_wrapper "train" "train" "platform_ddp" \
         "$PYTHON_BIN" -u main_train_vrt.py --opt "$RUNTIME_CONFIG"
 
 else
     # ========================================
     # Local/Self-managed Mode
     # ========================================
-    echo "Local training mode"
-    
     if [[ "$GPU_COUNT" -gt 1 ]]; then
         # Multi-GPU: use torchrun
-        echo "Multi-GPU training with torchrun"
-        echo "  GPUs: $GPU_COUNT"
-        echo "  CUDA_VISIBLE_DEVICES: $GPU_LIST"
-        echo ""
-        echo "Running: $PYTHON_BIN -m torch.distributed.run --nproc_per_node=$GPU_COUNT main_train_vrt.py --opt $RUNTIME_CONFIG"
-        echo "=========================================="
+        launch_echo "train" "train" "local_multi" "info" "Local training mode"
+        launch_echo "train" "train" "local_multi" "info" "Multi-GPU training with torchrun"
+        launch_echo "train" "train" "local_multi" "info" "  GPUs: $GPU_COUNT"
+        launch_echo "train" "train" "local_multi" "info" "  CUDA_VISIBLE_DEVICES: $GPU_LIST"
+        launch_echo "train" "train" "local_multi" "info" ""
+        launch_echo "train" "train" "local_multi" "info" "Running: $PYTHON_BIN -m torch.distributed.run --nproc_per_node=$GPU_COUNT main_train_vrt.py --opt $RUNTIME_CONFIG"
+        launch_echo "train" "train" "local_multi" "info" "=========================================="
         
-        run_with_wrapper "train" "train" "local_multi" "$TRAIN_LOG_DIR" "$CONFIG_PATH" \
+        run_with_wrapper "train" "train" "local_multi" \
             env CUDA_VISIBLE_DEVICES="$GPU_LIST" \
             "$PYTHON_BIN" -m torch.distributed.run \
                 --nproc_per_node="$GPU_COUNT" \
@@ -633,30 +651,31 @@ else
                 main_train_vrt.py --opt "$RUNTIME_CONFIG"
     else
         # Single GPU: plain python
-        echo "Single GPU training"
         SINGLE_GPU_ID="${GPU_ID_ARRAY[0]}"
-        echo "  CUDA_VISIBLE_DEVICES: $SINGLE_GPU_ID"
-        echo ""
-        echo "Running: $PYTHON_BIN main_train_vrt.py --opt $RUNTIME_CONFIG"
-        echo "=========================================="
+        launch_echo "train" "train" "local_single" "info" "Local training mode"
+        launch_echo "train" "train" "local_single" "info" "Single GPU training"
+        launch_echo "train" "train" "local_single" "info" "  CUDA_VISIBLE_DEVICES: $SINGLE_GPU_ID"
+        launch_echo "train" "train" "local_single" "info" ""
+        launch_echo "train" "train" "local_single" "info" "Running: $PYTHON_BIN main_train_vrt.py --opt $RUNTIME_CONFIG"
+        launch_echo "train" "train" "local_single" "info" "=========================================="
 
-        run_with_wrapper "train" "train" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" \
+        run_with_wrapper "train" "train" "local_single" \
             env CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" \
             "$PYTHON_BIN" main_train_vrt.py --opt "$RUNTIME_CONFIG"
     fi
 fi
 
 EXIT_CODE=$?
-launch_echo "train" "launch" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" "info" ""
-launch_echo "train" "launch" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
+launch_echo "train" "launch" "local_single" "info" ""
+launch_echo "train" "launch" "local_single" "info" "=========================================="
 if [[ $EXIT_CODE -eq 0 ]]; then
-    launch_echo "train" "launch" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" "info" "Training completed successfully"
-    launch_echo "train" "launch" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" "info" "=========================================="
+    launch_echo "train" "launch" "local_single" "info" "Training completed successfully"
+    launch_echo "train" "launch" "local_single" "info" "=========================================="
     # Success - exit normally
     exit 0
 else
-    launch_echo "train" "launch" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" "error" "Training exited with code: $EXIT_CODE"
-    launch_echo "train" "launch" "local_single" "$TRAIN_LOG_DIR" "$CONFIG_PATH" "error" "=========================================="
+    launch_echo "train" "launch" "local_single" "error" "Training exited with code: $EXIT_CODE"
+    launch_echo "train" "launch" "local_single" "error" "=========================================="
     # Use handle_error to show error and keep terminal open
     handle_error $EXIT_CODE "训练失败，请检查上面的错误信息。"
     # handle_error will exit with code 0 to keep terminal open

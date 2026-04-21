@@ -2,6 +2,7 @@ import sys
 import datetime
 import logging
 import os
+import re
 import numpy as np
 
 # Optional dependencies for TensorBoard, WANDB and SwanLab
@@ -114,7 +115,8 @@ def logger_info(logger_name, log_path='default_logger.log', opt=None, add_stream
         timestamp = datetime.datetime.now().strftime('_%y%m%d_%H%M%S')
 
         # Process log_path to add timestamp
-        if os.path.isfile(log_path):
+        timestamped_log_name = re.search(r'_\d{6}_\d{6}\.log$', os.path.basename(log_path)) is not None
+        if os.path.isfile(log_path) or timestamped_log_name:
             # Caller passed an existing file — use it directly (append mode).
             log_file = log_path
         elif os.path.isdir(log_path):
@@ -179,6 +181,21 @@ def emit_launch_wrapper_log(
             f'Logger "{logger_name}" is not initialized. Call logger_info() first.'
         )
 
+    effective_level = str(level).lower()
+    valid_levels = {'debug', 'info', 'warning', 'error', 'critical'}
+    if effective_level not in valid_levels:
+        raise ValueError(
+            f'Invalid log level "{effective_level}". Must be one of {sorted(valid_levels)}.'
+        )
+
+    # Build [launch/{phase}/{stream}] prefix
+    parts = ['launch']
+    if launch_phase:
+        parts.append(launch_phase)
+    parts.append(launch_stream if launch_stream else effective_level)
+    prefix = '[' + '/'.join(parts) + ']'
+    prefixed_message = f'{prefix} {message}' if message else prefix
+
     extra = {
         'log_origin': log_origin,
         'launch_stream': launch_stream,
@@ -186,15 +203,8 @@ def emit_launch_wrapper_log(
         'launch_mode': launch_mode,
         'launch_command': launch_command,
     }
-
-    effective_level = str(level).lower()
-    valid_levels = {'debug', 'info', 'warning', 'error', 'critical'}
-    if effective_level not in valid_levels:
-        raise ValueError(
-            f'Invalid log level "{effective_level}". Must be one of {sorted(valid_levels)}.'
-        )
     log_method = getattr(logger, effective_level)
-    log_method(message, extra=extra)
+    log_method(prefixed_message, extra=extra)
 
 
 '''
