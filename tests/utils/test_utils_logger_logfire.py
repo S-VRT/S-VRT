@@ -422,10 +422,10 @@ def test_emit_launch_wrapper_log_uses_existing_main_logger(monkeypatch, tmp_path
         launch_command="python main_train_vrt.py --opt opt.json",
     )
 
-    text_events = [event for event in fake.events if event[2].get("message") == "shell stdout line"]
+    text_events = [event for event in fake.events if event[2].get("launch_stream") == "stdout"]
 
     assert text_events
-    assert text_events[0][2]["message"] == "shell stdout line"
+    assert text_events[0][2]["message"] == "[launch/train/stdout] shell stdout line"
     assert text_events[0][2]["log_origin"] == "launch_wrapper"
     assert text_events[0][2]["launch_stream"] == "stdout"
     assert text_events[0][2]["launch_phase"] == "train"
@@ -461,9 +461,74 @@ def test_emit_launch_wrapper_log_keeps_stderr_as_text_by_default(monkeypatch, tm
 
     assert wrapper_events
     assert wrapper_events[0][0] == "info"
-    assert wrapper_events[0][1] == "model summary line"
-    assert wrapper_events[0][2]["message"] == "model summary line"
+    assert wrapper_events[0][1] == "[launch/train/stderr] model summary line"
+    assert wrapper_events[0][2]["message"] == "[launch/train/stderr] model summary line"
     assert wrapper_events[0][2]["level"] == "INFO"
     assert wrapper_events[0][2]["launch_stream"] == "stderr"
     assert wrapper_events[0][2]["launch_mode"] == "platform_ddp"
     assert wrapper_events[0][2]["launch_command"] == "python -u main_train_vrt.py --opt opt.json"
+
+
+def test_emit_launch_wrapper_log_prefix_stdout(tmp_path):
+    log_file = str(tmp_path / "train.log")
+    import logging
+    import glob
+    py_logger = logging.getLogger("test_prefix")
+    py_logger.handlers = []
+    py_logger.propagate = False
+    utils_logger.logger_info("test_prefix", log_file, opt=None, add_stream_handler=False, verbose=False)
+    utils_logger.emit_launch_wrapper_log(
+        "test_prefix", "info", "hello world",
+        launch_phase="prepare", launch_stream="stdout"
+    )
+    py_logger.handlers.clear()
+    log_files = glob.glob(str(tmp_path / "*.log"))
+    assert log_files, "No log file was created"
+    content = Path(log_files[0]).read_text()
+    assert "[launch/prepare/stdout] hello world" in content
+
+
+def test_emit_launch_wrapper_log_prefix_no_stream(tmp_path):
+    log_file = str(tmp_path / "train2.log")
+    import logging
+    import glob
+    py_logger = logging.getLogger("test_prefix2")
+    py_logger.handlers = []
+    py_logger.propagate = False
+    utils_logger.logger_info("test_prefix2", log_file, opt=None, add_stream_handler=False, verbose=False)
+    utils_logger.emit_launch_wrapper_log(
+        "test_prefix2", "info", "dep check",
+        launch_phase="dependency", launch_stream=None
+    )
+    py_logger.handlers.clear()
+    log_files = glob.glob(str(tmp_path / "*.log"))
+    assert log_files, "No log file was created"
+    content = Path(log_files[0]).read_text()
+    assert "[launch/dependency/info] dep check" in content
+
+
+def test_emit_launch_wrapper_log_logfire_structured_fields(monkeypatch, tmp_path):
+    fake = _FakeLogfire()
+    monkeypatch.setattr(utils_logger, "LOGFIRE_AVAILABLE", True)
+    monkeypatch.setattr(utils_logger, "logfire", fake)
+
+    import logging
+    py_logger = logging.getLogger("test_lf")
+    py_logger.handlers = []
+    py_logger.propagate = False
+
+    opt = _make_opt(tmp_path, use_logfire=True)
+    log_file = str(tmp_path / "train3.log")
+    utils_logger.logger_info("test_lf", log_file, opt=opt, add_stream_handler=False, verbose=False)
+    utils_logger.emit_launch_wrapper_log(
+        "test_lf", "info", "data prep done",
+        launch_phase="prepare", launch_stream="stdout", launch_mode="local_single"
+    )
+    py_logger.handlers.clear()
+
+    assert len(fake.events) == 1
+    _, _, kwargs = fake.events[0]
+    assert kwargs.get("launch_phase") == "prepare"
+    assert kwargs.get("launch_stream") == "stdout"
+    assert kwargs.get("launch_mode") == "local_single"
+    assert kwargs.get("log_origin") == "launch_wrapper"

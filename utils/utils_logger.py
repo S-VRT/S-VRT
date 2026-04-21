@@ -179,6 +179,21 @@ def emit_launch_wrapper_log(
             f'Logger "{logger_name}" is not initialized. Call logger_info() first.'
         )
 
+    effective_level = str(level).lower()
+    valid_levels = {'debug', 'info', 'warning', 'error', 'critical'}
+    if effective_level not in valid_levels:
+        raise ValueError(
+            f'Invalid log level "{effective_level}". Must be one of {sorted(valid_levels)}.'
+        )
+
+    # Build [launch/{phase}/{stream}] prefix
+    parts = ['launch']
+    if launch_phase:
+        parts.append(launch_phase)
+    parts.append(launch_stream if launch_stream else effective_level)
+    prefix = '[' + '/'.join(parts) + ']'
+    prefixed_message = f'{prefix} {message}' if message else prefix
+
     extra = {
         'log_origin': log_origin,
         'launch_stream': launch_stream,
@@ -186,15 +201,8 @@ def emit_launch_wrapper_log(
         'launch_mode': launch_mode,
         'launch_command': launch_command,
     }
-
-    effective_level = str(level).lower()
-    valid_levels = {'debug', 'info', 'warning', 'error', 'critical'}
-    if effective_level not in valid_levels:
-        raise ValueError(
-            f'Invalid log level "{effective_level}". Must be one of {sorted(valid_levels)}.'
-        )
     log_method = getattr(logger, effective_level)
-    log_method(message, extra=extra)
+    log_method(prefixed_message, extra=extra)
 
 
 '''
