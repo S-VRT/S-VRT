@@ -8,6 +8,7 @@ from main_train_vrt import (
     build_phase_train_dataset_opt,
     build_train_loader_bundle,
     compute_is_phase1,
+    record_data_wait,
     resolve_phase_value,
 )
 
@@ -119,6 +120,44 @@ def test_build_train_loader_bundle_resolves_phase_values_for_single_process(monk
         "drop_last": True,
         "pin_memory": True,
     }
+
+
+def test_build_train_loader_bundle_installs_worker_init_when_workers_enabled(monkeypatch):
+    captured = {}
+    dataset = SimpleNamespace(items=list(range(10)))
+
+    def fake_define_dataset(dataset_opt):
+        captured["dataset_opt"] = dataset_opt
+        return dataset
+
+    class FakeDataLoader:
+        def __init__(self, train_set, **kwargs):
+            captured["loader_kwargs"] = kwargs
+
+    monkeypatch.setattr("main_train_vrt.define_Dataset", fake_define_dataset)
+    monkeypatch.setattr("main_train_vrt.DataLoader", FakeDataLoader)
+
+    opt = {"dist": False}
+    train_dataset_opt = {
+        "dataset_type": "TrainDatasetRGBSpike",
+        "gt_size": 128,
+        "dataloader_batch_size": 8,
+        "dataloader_num_workers": 2,
+        "dataloader_shuffle": True,
+    }
+
+    build_train_loader_bundle(opt, train_dataset_opt, is_phase1=True, seed=123, logger=None)
+
+    assert callable(captured["loader_kwargs"]["worker_init_fn"])
+
+
+def test_record_data_wait_adds_wait_time_to_model_timer():
+    timer = SimpleNamespace(current_timings={})
+    model = SimpleNamespace(timer=timer)
+
+    record_data_wait(model, 1.25)
+
+    assert timer.current_timings["data_wait"] == 1.25
 
 
 def test_compute_is_phase1_boundary():

@@ -69,6 +69,30 @@ def compute_is_phase1(current_step, fix_iter):
     return fix_iter > 0 and current_step < fix_iter
 
 
+def init_dataloader_worker(_worker_id):
+    """Keep each DataLoader worker single-threaded to avoid CPU oversubscription."""
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    try:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+    try:
+        cv2.setNumThreads(0)
+    except Exception:
+        pass
+
+
+def record_data_wait(model, elapsed):
+    timer = getattr(model, "timer", None)
+    timings = getattr(timer, "current_timings", None)
+    if isinstance(timings, dict):
+        timings["data_wait"] = elapsed
+
+
 def build_train_loader_bundle(opt, train_dataset_opt, is_phase1, seed, logger):
     dataset_opt = build_phase_train_dataset_opt(train_dataset_opt, is_phase1)
     train_set = define_Dataset(dataset_opt)
@@ -105,6 +129,7 @@ def build_train_loader_bundle(opt, train_dataset_opt, is_phase1, seed, logger):
             kwargs["persistent_workers"] = dataset_opt.get("dataloader_persistent_workers", False)
             kwargs["prefetch_factor"] = dataset_opt.get("dataloader_prefetch_factor", 2)
             kwargs["multiprocessing_context"] = "spawn"
+            kwargs["worker_init_fn"] = init_dataloader_worker
         train_loader = DataLoader(train_set, **kwargs)
     else:
         train_sampler = None
@@ -120,6 +145,7 @@ def build_train_loader_bundle(opt, train_dataset_opt, is_phase1, seed, logger):
             kwargs["persistent_workers"] = dataset_opt.get("dataloader_persistent_workers", False)
             kwargs["prefetch_factor"] = dataset_opt.get("dataloader_prefetch_factor", 2)
             kwargs["multiprocessing_context"] = "spawn"
+            kwargs["worker_init_fn"] = init_dataloader_worker
         train_loader = DataLoader(train_set, **kwargs)
 
     return {
@@ -517,7 +543,9 @@ def main():
                 last_is_phase1 = is_phase1_now
 
             try:
+                data_wait_start = time.time()
                 train_data = next(train_loader_iter)
+                data_wait_elapsed = time.time() - data_wait_start
             except StopIteration:
                 break
 
@@ -540,6 +568,7 @@ def main():
             # -------------------------------
             # 执行前向传播、计算损失、反向传播和参数更新
             model.optimize_parameters(current_step)
+            record_data_wait(model, data_wait_elapsed)
 
             # -------------------------------
             # 4) 记录训练信息
