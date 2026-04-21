@@ -2,6 +2,7 @@ import sys
 import datetime
 import logging
 import os
+import re
 import numpy as np
 
 # Optional dependencies for TensorBoard, WANDB and SwanLab
@@ -114,7 +115,8 @@ def logger_info(logger_name, log_path='default_logger.log', opt=None, add_stream
         timestamp = datetime.datetime.now().strftime('_%y%m%d_%H%M%S')
 
         # Process log_path to add timestamp
-        if os.path.isfile(log_path):
+        timestamped_log_name = re.search(r'_\d{6}_\d{6}\.log$', os.path.basename(log_path)) is not None
+        if os.path.isfile(log_path) or timestamped_log_name:
             # Caller passed an existing file — use it directly (append mode).
             log_file = log_path
         elif os.path.isdir(log_path):
