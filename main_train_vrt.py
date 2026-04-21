@@ -59,6 +59,10 @@ def build_phase_train_dataset_opt(train_dataset_opt, is_phase1):
     return resolved
 
 
+def compute_is_phase1(current_step, fix_iter):
+    return fix_iter > 0 and current_step < fix_iter
+
+
 def build_train_loader_bundle(opt, train_dataset_opt, is_phase1, seed, logger):
     dataset_opt = build_phase_train_dataset_opt(train_dataset_opt, is_phase1)
     train_set = define_Dataset(dataset_opt)
@@ -359,7 +363,7 @@ def main():
             mem_before_train = log_memory_stage(logger, 'Before creating train dataset', opt['rank'])
 
             train_dataset_opt_base = opt["datasets"]["train"]
-            is_phase1 = opt["train"].get("fix_iter", 0) > 0 and current_step < opt["train"].get("fix_iter", 0)
+            is_phase1 = compute_is_phase1(current_step, opt["train"].get("fix_iter", 0))
             bundle = build_train_loader_bundle(opt, train_dataset_opt_base, is_phase1, seed, logger)
             train_set = bundle["train_set"]
             train_sampler = bundle["train_sampler"]
@@ -473,6 +477,9 @@ def main():
     # ----------------------------------------
     '''
 
+    fix_iter = opt["train"].get("fix_iter", 0)
+    last_is_phase1 = is_phase1
+
     # 开始训练循环（最多运行 1000000 个 epoch，实际由 total_iter 控制）
     for epoch in range(1000000):  # 持续运行直到达到总迭代次数
         # 为 DistributedSampler 设置 epoch，确保每个 epoch 数据打乱顺序不同
@@ -480,9 +487,35 @@ def main():
             train_sampler.set_epoch(epoch)
         
         # 遍历训练数据
-        for i, train_data in enumerate(train_loader):
+        train_loader_iter = iter(train_loader)
+        while True:
+            next_step = current_step + 1
+            is_phase1_now = compute_is_phase1(next_step, fix_iter)
+            if is_phase1_now != last_is_phase1:
+                bundle = build_train_loader_bundle(opt, train_dataset_opt_base, is_phase1_now, seed, logger)
+                train_set = bundle["train_set"]
+                train_sampler = bundle["train_sampler"]
+                train_loader = bundle["train_loader"]
+                active_train_dataset_opt = bundle["dataset_opt"]
+                if opt['dist']:
+                    train_sampler.set_epoch(epoch)
+                train_loader_iter = iter(train_loader)
 
-            current_step += 1  # 更新当前训练步数
+                if opt["rank"] == 0:
+                    logger.info(
+                        "[TRAIN_PHASE] switch=%s batch_size=%d gt_size=%d (rebuild train loader)",
+                        "phase1" if is_phase1_now else "phase2",
+                        active_train_dataset_opt["dataloader_batch_size"],
+                        active_train_dataset_opt["gt_size"],
+                    )
+                last_is_phase1 = is_phase1_now
+
+            try:
+                train_data = next(train_loader_iter)
+            except StopIteration:
+                break
+
+            current_step = next_step  # 更新当前训练步数
 
             # -------------------------------
             # 1) 更新学习率
