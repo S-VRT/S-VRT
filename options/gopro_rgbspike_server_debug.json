@@ -573,6 +573,12 @@
     // 生成器损失函数权重：损失函数的权重系数
     ,
     "G_lossfn_weight": 1.0
+    ,
+    "phase1_fusion_aux_loss_weight": 1.0
+    ,
+    "phase2_fusion_aux_loss_weight": 0.2
+    ,
+    "fusion_passthrough_loss_weight": 0.2
     // Charbonnier 损失的 epsilon 参数：用于平滑 L1 损失的小常数
     ,
     "G_charbonnier_eps": 1e-9
