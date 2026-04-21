@@ -158,3 +158,27 @@ def test_early_adapter_supports_all_early_operators(operator_name):
             return
         raise
     assert out.shape == (2, 48, 3, 12, 12)
+
+
+def test_gated_operator_passthrough_at_init():
+    """At init, gate≈0 and correction≈0, so output should equal rgb input."""
+    op = create_fusion_operator("gated", 3, 1, 3, {})
+    rgb = torch.ones(1, 1, 3, 8, 8) * 0.5
+    spike = torch.zeros(1, 1, 1, 8, 8)
+    with torch.no_grad():
+        out = op(rgb, spike)
+    assert torch.allclose(out, rgb, atol=1e-6), (
+        f"Expected near-passthrough at init, max diff={(out - rgb).abs().max():.4f}"
+    )
+
+
+def test_gated_operator_no_rgb_proj():
+    """GatedFusionOperator must not have an rgb_proj attribute after redesign."""
+    op = create_fusion_operator("gated", 3, 1, 3, {})
+    assert not hasattr(op, 'rgb_proj'), "rgb_proj should be removed from GatedFusionOperator"
+
+
+def test_gated_operator_has_correction():
+    """GatedFusionOperator must have a correction attribute (renamed from fuse)."""
+    op = create_fusion_operator("gated", 3, 1, 3, {})
+    assert hasattr(op, 'correction'), "GatedFusionOperator must have 'correction' attribute"
