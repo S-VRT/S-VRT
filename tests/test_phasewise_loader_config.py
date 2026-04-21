@@ -1,6 +1,12 @@
+from types import SimpleNamespace
+
 import pytest
 
-from main_train_vrt import resolve_phase_value, build_phase_train_dataset_opt
+from main_train_vrt import (
+    build_phase_train_dataset_opt,
+    build_train_loader_bundle,
+    resolve_phase_value,
+)
 
 
 def test_resolve_phase_value_scalar_kept_for_both_phases():
@@ -41,3 +47,49 @@ def test_build_phase_train_dataset_opt_overrides_only_phase_keys():
 
     assert phase1["dataloader_num_workers"] == 12
     assert phase2["dataloader_shuffle"] is True
+
+
+def test_resolve_phase_value_non_int_rejected():
+    with pytest.raises(ValueError, match="resolved value must be int"):
+        resolve_phase_value([8, 4.5], False, "dataloader_batch_size")
+
+
+def test_build_train_loader_bundle_resolves_phase_values_for_single_process(monkeypatch):
+    captured = {}
+    dataset = SimpleNamespace(items=list(range(10)))
+
+    def fake_define_dataset(dataset_opt):
+        captured["dataset_opt"] = dataset_opt
+        return dataset
+
+    class FakeDataLoader:
+        def __init__(self, train_set, **kwargs):
+            captured["train_set"] = train_set
+            captured["loader_kwargs"] = kwargs
+
+    monkeypatch.setattr("main_train_vrt.define_Dataset", fake_define_dataset)
+    monkeypatch.setattr("main_train_vrt.DataLoader", FakeDataLoader)
+
+    opt = {"dist": False}
+    train_dataset_opt = {
+        "dataset_type": "TrainDatasetRGBSpike",
+        "gt_size": [128, 96],
+        "dataloader_batch_size": [8, 4],
+        "dataloader_num_workers": 0,
+        "dataloader_shuffle": True,
+    }
+
+    bundle = build_train_loader_bundle(opt, train_dataset_opt, is_phase1=False, seed=123, logger=None)
+
+    assert bundle["dataset_opt"]["gt_size"] == 96
+    assert bundle["dataset_opt"]["dataloader_batch_size"] == 4
+    assert bundle["train_set"] is dataset
+    assert bundle["train_sampler"] is None
+    assert captured["dataset_opt"]["gt_size"] == 96
+    assert captured["loader_kwargs"] == {
+        "batch_size": 4,
+        "shuffle": True,
+        "num_workers": 0,
+        "drop_last": True,
+        "pin_memory": True,
+    }
