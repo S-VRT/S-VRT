@@ -5,6 +5,7 @@ import pytest
 from main_train_vrt import (
     build_phase_train_dataset_opt,
     build_train_loader_bundle,
+    compute_is_phase1,
     resolve_phase_value,
 )
 
@@ -93,3 +94,10 @@ def test_build_train_loader_bundle_resolves_phase_values_for_single_process(monk
         "drop_last": True,
         "pin_memory": True,
     }
+
+
+def test_compute_is_phase1_boundary():
+    assert compute_is_phase1(0, 10) is True
+    assert compute_is_phase1(9, 10) is True
+    assert compute_is_phase1(10, 10) is False
+    assert compute_is_phase1(11, 10) is False
