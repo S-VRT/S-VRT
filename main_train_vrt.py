@@ -514,7 +514,12 @@ def main():
             # 6) 模型测试和评估
             # -------------------------------
             # 每隔一定步数在测试集上评估模型性能
-            if current_step % opt['train']['checkpoint_test'] == 0:
+            _ckpt_test = opt['train']['checkpoint_test']
+            if isinstance(_ckpt_test, list):
+                _do_test = current_step in _ckpt_test
+            else:
+                _do_test = current_step % _ckpt_test == 0
+            if _do_test:
 
                 if opt['rank'] == 0:
                     logger.info('[VALIDATION] Starting model validation/test phase...')
