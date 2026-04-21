@@ -385,7 +385,15 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     # feed L/H data
     # ----------------------------------------
-    def feed_data(self, data, need_H=True):
+    def _is_phase1_step(self, current_step):
+        return (
+            current_step is not None
+            and hasattr(self, 'fix_iter')
+            and self.fix_iter > 0
+            and current_step < self.fix_iter
+        )
+
+    def feed_data(self, data, need_H=True, current_step=None):
         with self.timer.timer('data_load'):
             self.batch_folder = data.get('folder')
             self.batch_lq_paths = data.get('lq_path')
@@ -393,7 +401,7 @@ class ModelPlain(ModelBase):
             self.L = self._build_model_input_tensor(data).to(self.device)
             self._assert_lq_channels(self.L, 'Training Feed Data')
 
-            if self._flow_module_name() == 'scflow':
+            if self._flow_module_name() == 'scflow' and not self._is_phase1_step(current_step):
                 if 'L_flow_spike' not in data:
                     raise ValueError(
                         "module=scflow requires data['L_flow_spike'] with shape [B,T,25,H,W] "

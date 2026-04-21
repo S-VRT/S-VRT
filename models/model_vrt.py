@@ -35,9 +35,14 @@ class ModelVRT(ModelPlain):
         self.fusion_debug = FusionDebugDumper(opt)
         self.fusion_debug.attach(self.get_bare_model(self.netG))
 
-    def feed_data(self, data, need_H=True):
+    def feed_data(self, data, need_H=True, current_step=None):
         self.L_flow_spike_meta = None
-        if self._flow_module_name() == 'scflow' and 'L_flow_spike_meta' in data and 'L_flow_spike' not in data:
+        if (
+            self._flow_module_name() == 'scflow'
+            and not self._is_phase1_step(current_step)
+            and 'L_flow_spike_meta' in data
+            and 'L_flow_spike' not in data
+        ):
             with self.timer.timer('data_load'):
                 self.batch_folder = data.get('folder')
                 self.batch_lq_paths = data.get('lq_path')
@@ -51,7 +56,7 @@ class ModelVRT(ModelPlain):
             return
 
         # Keep VRT data ingress aligned with ModelPlain dual/concat input routing.
-        super(ModelVRT, self).feed_data(data, need_H=need_H)
+        super(ModelVRT, self).feed_data(data, need_H=need_H, current_step=current_step)
 
     # ----------------------------------------
     # define optimizer

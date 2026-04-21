@@ -9,6 +9,7 @@ import math  # 数学运算，用于计算迭代次数等
 import argparse  # 命令行参数解析
 import time  # 时间相关功能
 import random  # 随机数生成，用于设置随机种子
+import copy  # 深拷贝配置，避免阶段配置污染原始配置
 import cv2  # OpenCV，用于图像读写
 import numpy as np  # 数值计算库
 from collections import OrderedDict  # 有序字典，用于保持测试结果的顺序
@@ -51,11 +52,16 @@ def resolve_phase_value(value, is_phase1, key_name):
 
 def build_phase_train_dataset_opt(train_dataset_opt, is_phase1):
     """Build per-phase dataset options with resolved gt_size and dataloader_batch_size."""
-    resolved = dict(train_dataset_opt)
+    resolved = copy.deepcopy(train_dataset_opt)
     resolved["gt_size"] = resolve_phase_value(train_dataset_opt.get("gt_size", 256), is_phase1, "gt_size")
     resolved["dataloader_batch_size"] = resolve_phase_value(
         train_dataset_opt["dataloader_batch_size"], is_phase1, "dataloader_batch_size"
     )
+    if is_phase1:
+        spike_flow_cfg = resolved.get("spike_flow")
+        if isinstance(spike_flow_cfg, dict) and str(spike_flow_cfg.get("representation", "")).strip().lower() == "encoding25":
+            spike_flow_cfg["representation"] = ""
+            spike_flow_cfg["phase1_disabled"] = True
     return resolved
 
 
@@ -527,7 +533,7 @@ def main():
             # 2) 输入数据对（低质量图像和高质量图像）
             # -------------------------------
             # 将训练数据（低质量输入和高质量标签）送入模型
-            model.feed_data(train_data)
+            model.feed_data(train_data, current_step=current_step)
 
             # -------------------------------
             # 3) 优化模型参数

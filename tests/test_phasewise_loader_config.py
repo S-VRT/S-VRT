@@ -52,6 +52,29 @@ def test_build_phase_train_dataset_opt_overrides_only_phase_keys():
     assert phase2["dataloader_shuffle"] is True
 
 
+def test_build_phase_train_dataset_opt_disables_scflow_payload_for_phase1_only():
+    base = {
+        "dataset_type": "TrainDatasetRGBSpike",
+        "gt_size": [128, 96],
+        "dataloader_batch_size": [8, 4],
+        "spike_flow": {
+            "representation": "encoding25",
+            "dt": 10,
+            "root": "auto",
+            "subframes": 4,
+        },
+    }
+
+    phase1 = build_phase_train_dataset_opt(base, is_phase1=True)
+    phase2 = build_phase_train_dataset_opt(base, is_phase1=False)
+
+    assert phase1["spike_flow"]["representation"] == ""
+    assert phase1["spike_flow"]["phase1_disabled"] is True
+    assert phase2["spike_flow"]["representation"] == "encoding25"
+    assert "phase1_disabled" not in phase2["spike_flow"]
+    assert base["spike_flow"]["representation"] == "encoding25"
+
+
 def test_resolve_phase_value_non_int_rejected():
     with pytest.raises(ValueError, match="resolved value must be int"):
         resolve_phase_value([8, 4.5], False, "dataloader_batch_size")

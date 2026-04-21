@@ -93,6 +93,33 @@ def test_model_plain_requires_l_flow_spike_for_scflow():
 
 
 @pytest.mark.unit
+def test_model_plain_phase1_allows_missing_l_flow_spike_for_scflow():
+    model = _build_stub_plain_model(flow_module="scflow")
+    model.fix_iter = 10
+    data = {
+        "L": torch.randn(1, 6, 7, 16, 16),
+        "H": torch.randn(1, 6, 3, 16, 16),
+    }
+
+    model.feed_data(data, current_step=1)
+
+    assert model.L_flow_spike is None
+
+
+@pytest.mark.unit
+def test_model_plain_phase2_requires_l_flow_spike_for_scflow():
+    model = _build_stub_plain_model(flow_module="scflow")
+    model.fix_iter = 10
+    data = {
+        "L": torch.randn(1, 6, 7, 16, 16),
+        "H": torch.randn(1, 6, 3, 16, 16),
+    }
+
+    with pytest.raises(ValueError, match="L_flow_spike"):
+        model.feed_data(data, current_step=10)
+
+
+@pytest.mark.unit
 def test_vrt_scflow_branch_requires_flow_spike():
     vrt = VRT.__new__(VRT)
     vrt.spynet = _DummySpikeFlow()
