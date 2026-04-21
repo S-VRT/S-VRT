@@ -603,6 +603,53 @@ def test_full_t_rejects_non_spikecv_tfp():
         )
 
 
+def test_vrt_stores_fusion_hook_after_forward():
+    """VRT must store _last_fusion_out and _last_spike_bins after early fusion forward."""
+    opt = {
+        "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "gated",
+                "out_chans": 3,
+                "operator_params": {},
+            },
+            "output_mode": "restoration",
+            "restoration_reducer": {"type": "index", "index": 2},
+        }
+    }
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        img_size=[6, 16, 16],
+        window_size=[6, 8, 8],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    ).eval()
+
+    # [B, N, 3+4, H, W] — 3 rgb + 4 spike bins
+    x = torch.randn(1, 6, 7, 16, 16)
+    with torch.no_grad():
+        _ = model(x)
+
+    assert hasattr(model, '_last_fusion_out'), "_last_fusion_out not set after forward"
+    assert hasattr(model, '_last_spike_bins'), "_last_spike_bins not set after forward"
+    assert model._last_spike_bins == 4
+    # fusion output: [B, N*S, 3, H, W] = [1, 24, 3, 16, 16]
+    assert model._last_fusion_out.shape == (1, 24, 3, 16, 16)
+
+
 def test_full_t_hybrid_rejects_non_spikecv_tfp_from_test_dataset():
     opt = {
         "netG": {

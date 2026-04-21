@@ -185,6 +185,8 @@ class VRT(nn.Module):
         self.fusion_cfg = fusion_cfg
         self.fusion_operator = None
         self.fusion_adapter = None
+        self._last_fusion_out = None
+        self._last_spike_bins = None
         if self.fusion_enabled:
             fusion_placement = str(fusion_cfg.get('placement', 'early'))
             fusion_mode = fusion_cfg.get('mode', 'replace')
@@ -524,6 +526,8 @@ class VRT(nn.Module):
                 spike = x[:, :, 3:, :, :]
                 spike_bins = spike.shape[2]
                 x = self.fusion_adapter(rgb=rgb, spike=spike)
+                self._last_fusion_out = x
+                self._last_spike_bins = spike_bins
 
             if timer is not None:
                 with timer.timer('flow_estimation'):
