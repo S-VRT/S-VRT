@@ -187,9 +187,9 @@
       // 输入帧数：每个训练样本使用的视频帧数量
       ,
       "num_frame": 6
-      // 真实标签图像尺寸：训练时裁剪的真实标签图像大小（像素）
+      // 真实标签图像尺寸：支持单值或 [phase1, phase2]
       ,
-      "gt_size": 96
+      "gt_size": [128, 96]
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -213,9 +213,9 @@
       // 建议值：每个GPU 4-8个worker，3卡DDP建议设置为12-24
       ,
       "dataloader_num_workers": 12
-      // 批次大小：每个批次包含的样本数量
+      // 批次大小：支持单值或 [phase1, phase2]
       ,
-      "dataloader_batch_size": 4
+      "dataloader_batch_size": [8, 4]
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
