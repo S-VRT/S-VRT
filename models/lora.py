@@ -87,3 +87,34 @@ def merge_lora(model: nn.Module) -> nn.Module:
                 )
                 setattr(parent, child_name, fused)
     return model
+
+
+def merged_state_dict(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Export a LoRA-folded state_dict without deepcopying the live module tree.
+
+    This is robust when the training model carries runtime tensor attributes that
+    are not deepcopy-compatible, such as non-leaf tensors cached during forward.
+    """
+    merged = {}
+    lora_module_names = set()
+    for name, module in model.named_modules():
+        if not isinstance(module, LoRALinear):
+            continue
+        lora_module_names.add(name)
+        fused = module.merged_linear()
+        weight_key = f"{name}.weight" if name else "weight"
+        merged[weight_key] = fused.weight.detach().cpu()
+        if fused.bias is not None:
+            bias_key = f"{name}.bias" if name else "bias"
+            merged[bias_key] = fused.bias.detach().cpu()
+
+    state_dict = model.state_dict()
+    exported = {}
+    for key, value in state_dict.items():
+        if ".lora_A." in key or ".lora_B." in key:
+            continue
+        if any(key == f"{name}.base.weight" or key == f"{name}.base.bias" for name in lora_module_names):
+            continue
+        exported[key] = merged.get(key, value.detach().cpu())
+    exported.update(merged)
+    return exported

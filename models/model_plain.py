@@ -299,12 +299,11 @@ class ModelPlain(ModelBase):
         Rank-0 only under DDP; no-op when use_lora is disabled.
         """
         import os
-        import copy as _copy
         if not self.opt.get('train', {}).get('use_lora', False):
             return
         if self.opt.get('rank', 0) != 0:
             return
-        from models.lora import merge_lora
+        from models.lora import merged_state_dict
 
         pairs = [(self.netG, 'G')]
         if self.opt_train.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
@@ -312,9 +311,7 @@ class ModelPlain(ModelBase):
 
         for net, tag in pairs:
             bare = self.get_bare_model(net)
-            net_copy = _copy.deepcopy(bare)
-            merge_lora(net_copy)
-            state_dict = {k: v.detach().cpu() for k, v in net_copy.state_dict().items()}
+            state_dict = merged_state_dict(bare)
             save_path = os.path.join(self.save_dir, f'{iter_label}_{tag}_merged.pth')
             tmp_path = save_path + '.tmp'
             torch.save(state_dict, tmp_path)

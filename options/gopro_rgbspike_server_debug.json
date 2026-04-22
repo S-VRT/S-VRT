@@ -189,7 +189,7 @@
       "num_frame": 6
       // 真实标签图像尺寸：支持单值或 [phase1, phase2]
       ,
-      "gt_size": [128, 96]
+      "gt_size": [96, 96]
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -215,7 +215,7 @@
       "dataloader_num_workers": 12
       // 批次大小：支持单值或 [phase1, phase2]
       ,
-      "dataloader_batch_size": [8, 4]
+      "dataloader_batch_size": [4, 4]
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -305,7 +305,7 @@
       // Spike TFP 多 GPU 设备列表：可选，配置后 DataLoader worker 会按 worker_id/LOCAL_RANK 轮询使用
       // 例如 ["cuda:0","cuda:1","cuda:2"]；为空数组表示禁用多 GPU TFP
       ,
-      "tfp_devices": []
+      "tfp_devices": ["cuda:0","cuda:1"]
       // Spike 数据文件夹名称
       ,
       "spike_folder_name": "spike"
@@ -330,10 +330,10 @@
       // 注意：在DDP模式下，每个GPU会创建 dataloader_num_workers // num_gpu 个worker
       // 建议值：每个GPU 4-8个worker，3卡DDP建议设置为12-24
       ,
-      "dataloader_num_workers": 20
+      "dataloader_num_workers": 12
       // 测试/验证批次大小：可根据显存调整
       ,
-      "dataloader_batch_size": 1
+      "dataloader_batch_size": 2
     }
   }
   // ========================================
@@ -364,7 +364,7 @@
         "enable": true,
         "save_images": true,
         "trigger": "phase1_last",
-        "source": "val_full_frame",
+        "source": "train_batch",
         "full_frame": true,
         "subdir": "fusion_phase1_last_full",
         "max_batches": 1,
@@ -472,7 +472,7 @@
     ,
     "optical_flow": {
       "module": "scflow",
-      "checkpoint": null,
+      "checkpoint": "weights/optical_flow/dt10_e40.pth",
       "params": {}
     }
     // 并行对齐帧数：用于对齐的并行帧数量（支持 2、4、6）
@@ -581,7 +581,7 @@
     "fusion_passthrough_loss_weight": 0.2
     // Charbonnier 损失的 epsilon 参数：用于平滑 L1 损失的小常数
     ,
-    "G_charbonnier_eps": 1e-9
+    "G_charbonnier_eps": 1e-6
     // 随机种子：用于保证实验的可重复性
     ,
     "manual_seed": 19931005
@@ -628,7 +628,7 @@
     // 学习率调度器配置
     // 总迭代次数：训练的总迭代步数
     ,
-    "total_iter": 200
+    "total_iter": 30
     // 生成器学习率调度器类型："CosineAnnealingWarmRestarts" 表示带重启的余弦退火调度器
     ,
     "G_scheduler_type": "CosineAnnealingWarmRestarts"
@@ -655,10 +655,10 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 100
+    "checkpoint_test": 1000
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
-    "checkpoint_save": 50
+    "checkpoint_save": 30
     // 打印检查点间隔：每训练多少迭代打印一次训练信息
     ,
     "checkpoint_print": 5
@@ -666,7 +666,7 @@
     ,
     "amp": {
       "enable": true,
-      "dtype": "float16"
+      "dtype": "bfloat16"
     }
   }
   // ========================================
@@ -687,7 +687,7 @@
     "center_frame_only": false
     // 测试时使用的帧数：18 表示测试时处理 18 帧视频
     ,
-    "num_frame_testing": 18
+    "num_frame_testing": 24
     // 测试时的重叠帧数：2 表示相邻测试窗口之间有 2 帧重叠（用于滑动窗口测试）
     ,
     "num_frame_overlapping": 2

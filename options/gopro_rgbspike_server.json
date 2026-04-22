@@ -43,7 +43,7 @@
   "dist": true
   // 是否查找未使用的参数：false 表示不查找，可以提高训练速度
   ,
-  "find_unused_parameters": false
+  "find_unused_parameters": true
   // 是否使用静态图：true 表示使用静态图优化，可以提高训练效率
   ,
   "use_static_graph": true
@@ -67,7 +67,7 @@
     //   - "auto"：自动查找 models 目录中的最新检查点（用于恢复训练）
     //   - "path/to/model.pth"：使用指定的预训练模型路径
     ,
-    "pretrained_netG": null
+    "pretrained_netG": "weights/vrt/006_VRT_videodeblurring_GoPro.pth"
     // 预训练的编码器（Encoder）模型路径，支持三种模式：
     //   - null：不使用预训练编码器，不自动查找检查点
     //   - "auto"：自动查找 models 目录中的最新检查点（用于恢复训练）
@@ -158,7 +158,7 @@
       "tfp_devices": ["cuda:0","cuda:1","cuda:2"]
       // 归一化设置：RGB 使用 ImageNet 均值方差，Spike 通道目前保持恒等缩放
       ,
-      "rgb_normalize": "imagenet"
+      "rgb_normalize": null
       ,
       "spike_normalize": {
         "mean": [0.0, 0.0, 0.0, 0.0],
@@ -189,7 +189,7 @@
       "num_frame": 6
       // 真实标签图像尺寸：支持单值或 [phase1, phase2]
       ,
-      "gt_size": [224, 96]
+      "gt_size": [96, 96]
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -215,7 +215,7 @@
       "dataloader_num_workers": 12
       // 批次大小：支持单值或 [phase1, phase2]
       ,
-      "dataloader_batch_size": [16, 4]
+      "dataloader_batch_size": [4, 4]
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -284,7 +284,7 @@
       "spike_flipud": true
       // 归一化设置（与训练保持一致）
       ,
-      "rgb_normalize": "imagenet"
+      "rgb_normalize": null
       ,
       "spike_normalize": {
         "mean": [0.0, 0.0, 0.0, 0.0],
@@ -467,7 +467,7 @@
     ,
     "optical_flow": {
       "module": "scflow",
-      "checkpoint": null,
+      "checkpoint": "weights/optical_flow/dt10_e40.pth",
       "params": {}
     }
     // 并行对齐帧数：用于对齐的并行帧数量（支持 2、4、6）
@@ -614,7 +614,7 @@
     // 固定参数配置（用于分阶段训练）
     // 固定参数的迭代次数：在前 fix_iter 次迭代中，fix_keys 指定的参数保持固定
     ,
-    "fix_iter": 6000
+    "fix_iter": 10000
     // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
     ,
     "fix_lr_mul": 0.1
@@ -628,7 +628,7 @@
     // 学习率调度器配置
     // 总迭代次数：训练的总迭代步数
     ,
-    "total_iter": 30000
+    "total_iter": 40000
     // 生成器学习率调度器类型："CosineAnnealingWarmRestarts" 表示带重启的余弦退火调度器
     ,
     "G_scheduler_type": "CosineAnnealingWarmRestarts"
@@ -655,7 +655,7 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": [6000, 30000]
+    "checkpoint_test": [10000, 40000]
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 2000

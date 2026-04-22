@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.lora import LoRALinear, inject_lora, merge_lora
+from models.lora import LoRALinear, inject_lora, merge_lora, merged_state_dict
 
 
 def test_lora_initial_output_equals_base():
@@ -218,6 +218,33 @@ def test_save_merged_noop_without_lora(tmp_path):
     model.save_merged(iter_label=1)
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_merged_state_dict_avoids_deepcopy_for_non_leaf_runtime_tensor():
+    class _RuntimeTensorWrapper(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.attn = _MiniAttention()
+            self.runtime_tensor = None
+
+        def forward(self, x):
+            y = self.attn.qkv_self(x)
+            self.runtime_tensor = y + 1
+            return y
+
+    torch.manual_seed(0)
+    model = _RuntimeTensorWrapper()
+    inject_lora(model, ["qkv", "proj"], rank=4, alpha=8)
+    x = torch.randn(2, 8, requires_grad=True)
+    model(x)
+
+    with pytest.raises(RuntimeError, match="deepcopy protocol"):
+        copy.deepcopy(model)
+
+    exported = merged_state_dict(model)
+    reference = _RuntimeTensorWrapper().state_dict()
+    assert set(exported.keys()) == set(reference.keys()) - {"runtime_tensor"}
+    assert all(".lora_A." not in key and ".lora_B." not in key for key in exported)
 
 
 # ============================================================================
