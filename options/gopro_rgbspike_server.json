@@ -189,7 +189,7 @@
       "num_frame": 6
       // 真实标签图像尺寸：支持单值或 [phase1, phase2]
       ,
-      "gt_size": [128, 96]
+      "gt_size": [224, 96]
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -215,7 +215,7 @@
       "dataloader_num_workers": 12
       // 批次大小：支持单值或 [phase1, phase2]
       ,
-      "dataloader_batch_size": [8, 4]
+      "dataloader_batch_size": [16, 4]
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2

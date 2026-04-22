@@ -102,12 +102,25 @@ class FusionDebugDumper:
             frames = min(frames, self.max_frames)
         for i in range(fusion.size(0)):
             clip_name = self._resolve_clip_name(lq_paths, i)
+            frame_paths = self._resolve_frame_paths(lq_paths, i)
+            rgb_frames = len(frame_paths)
+            spike_bins = None
+            if rgb_frames > 0 and fusion.size(1) % rgb_frames == 0:
+                spike_bins = fusion.size(1) // rgb_frames
             clip = fusion[i].float().clamp_(0, 1).numpy()
             for t in range(frames):
                 img = clip[t, :3, :, :]
                 img = np.transpose(img[[2, 1, 0], :, :], (1, 2, 0))
                 img = (img * 255.0).round().astype(np.uint8)
-                cv2.imwrite(str(save_root / f'{clip_name}_fusion_t{t:03d}_{current_step:d}.png'), img)
+                if spike_bins is not None and spike_bins > 0:
+                    rgb_idx = t // spike_bins
+                    spike_idx = t % spike_bins
+                    filename = (
+                        f'{clip_name}_fusion_rgb{rgb_idx:03d}_spk{spike_idx:02d}_t{t:03d}_{current_step:d}.png'
+                    )
+                else:
+                    filename = f'{clip_name}_fusion_t{t:03d}_{current_step:d}.png'
+                cv2.imwrite(str(save_root / filename), img)
         return True
 
     @staticmethod
@@ -118,6 +131,11 @@ class FusionDebugDumper:
 
     @staticmethod
     def _resolve_clip_name(lq_paths, index):
+        frame_paths = FusionDebugDumper._resolve_frame_paths(lq_paths, index)
+        if frame_paths:
+            clip_source = frame_paths[0]
+            if isinstance(clip_source, str):
+                return os.path.splitext(os.path.basename(clip_source))[0]
         if lq_paths is not None:
             clip_source = None
             try:
@@ -129,6 +147,20 @@ class FusionDebugDumper:
             if isinstance(clip_source, str):
                 return os.path.splitext(os.path.basename(clip_source))[0]
         return f'clip_{index:03d}'
+
+    @staticmethod
+    def _resolve_frame_paths(lq_paths, index):
+        if lq_paths is None:
+            return []
+        try:
+            sample_paths = lq_paths[index]
+        except Exception:
+            sample_paths = lq_paths
+        if isinstance(sample_paths, (list, tuple)):
+            return [path for path in sample_paths if isinstance(path, str)]
+        if isinstance(sample_paths, str):
+            return [sample_paths]
+        return []
 
 
 __all__ = ['FusionDebugDumper']
