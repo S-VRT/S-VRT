@@ -3,11 +3,14 @@ import torch.nn.functional as F
 try:
     from spatial_correlation_sampler import spatial_correlation_sample
 except ImportError as e:
+    from models.op.spatial_correlation import spatial_correlation_sample
     import warnings
     with warnings.catch_warnings():
         warnings.filterwarnings("default", category=ImportWarning)
-        warnings.warn("failed to load custom correlation module"
-                      "which is needed for FlowNetC", ImportWarning)
+        warnings.warn(
+            "failed to load custom correlation module; using repo-local PyTorch fallback",
+            ImportWarning,
+        )
 
 
 def corr(input1, input2):
