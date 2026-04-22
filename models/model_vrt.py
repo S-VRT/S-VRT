@@ -130,6 +130,8 @@ class ModelVRT(ModelPlain):
                 current_step=current_step,
                 folder=self.batch_folder,
                 lq_paths=self.batch_lq_paths,
+                gt=getattr(self, 'H', None),
+                spike_bins=getattr(self.get_bare_model(self.netG), '_last_spike_bins', None),
                 rank=self.opt.get('rank', 0),
             )
 
@@ -165,6 +167,8 @@ class ModelVRT(ModelPlain):
             current_step=current_step,
             folder=batch.get('folder'),
             lq_paths=batch.get('lq_path'),
+            gt=batch.get('H'),
+            spike_bins=lq_spike.shape[2],
             rank=self.opt.get('rank', 0),
         )
 

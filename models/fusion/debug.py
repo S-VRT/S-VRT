@@ -5,6 +5,8 @@ import cv2
 import numpy as np
 import torch
 
+from utils import utils_image as util
+
 
 class FusionDebugDumper:
     """Centralized, opt-in fusion output capture and image dumping."""
@@ -85,7 +87,7 @@ class FusionDebugDumper:
             return False
         return True
 
-    def dump_last(self, current_step, folder, lq_paths, rank=0):
+    def dump_last(self, current_step, folder, lq_paths, gt=None, spike_bins=None, rank=0):
         if rank != 0 or not (self.enabled and self.save_images):
             return False
         fusion = self._last_output
@@ -100,28 +102,120 @@ class FusionDebugDumper:
         frames = fusion.size(1)
         if self.max_frames is not None:
             frames = min(frames, self.max_frames)
+        metric_rows = []
         for i in range(fusion.size(0)):
             clip_name = self._resolve_clip_name(lq_paths, i)
             frame_paths = self._resolve_frame_paths(lq_paths, i)
             rgb_frames = len(frame_paths)
-            spike_bins = None
-            if rgb_frames > 0 and fusion.size(1) % rgb_frames == 0:
-                spike_bins = fusion.size(1) // rgb_frames
+            clip_spike_bins = spike_bins
+            if clip_spike_bins is None and rgb_frames > 0 and fusion.size(1) % rgb_frames == 0:
+                clip_spike_bins = fusion.size(1) // rgb_frames
             clip = fusion[i].float().clamp_(0, 1).numpy()
+            gt_clip = self._select_gt_clip(gt, i)
+            if gt_clip is not None:
+                metric_rows.extend(
+                    self._calculate_metric_rows(
+                        clip_name=clip_name,
+                        clip=clip,
+                        gt_clip=gt_clip,
+                        spike_bins=clip_spike_bins,
+                    )
+                )
             for t in range(frames):
                 img = clip[t, :3, :, :]
-                img = np.transpose(img[[2, 1, 0], :, :], (1, 2, 0))
-                img = (img * 255.0).round().astype(np.uint8)
-                if spike_bins is not None and spike_bins > 0:
-                    rgb_idx = t // spike_bins
-                    spike_idx = t % spike_bins
+                img = self._chw_rgb_float_to_bgr_uint(img)
+                if clip_spike_bins is not None and clip_spike_bins > 0:
+                    rgb_idx = t // clip_spike_bins
+                    spike_idx = t % clip_spike_bins
                     filename = (
                         f'{clip_name}_fusion_rgb{rgb_idx:03d}_spk{spike_idx:02d}_t{t:03d}_{current_step:d}.png'
                     )
                 else:
                     filename = f'{clip_name}_fusion_t{t:03d}_{current_step:d}.png'
                 cv2.imwrite(str(save_root / filename), img)
+        if metric_rows:
+            self._write_metric_rows(save_root / f'fusion_metrics_{current_step:d}.csv', metric_rows)
         return True
+
+    def _calculate_metric_rows(self, clip_name, clip, gt_clip, spike_bins=None):
+        if gt_clip.ndim != 4 or gt_clip.shape[1] < 3:
+            return []
+        rows = []
+        gt_frames = gt_clip.shape[0]
+        if spike_bins is not None and spike_bins > 0:
+            frame_indices = range(gt_frames)
+            time_indices = [idx * spike_bins + spike_bins // 2 for idx in frame_indices]
+        elif clip.shape[0] == gt_frames:
+            frame_indices = range(gt_frames)
+            time_indices = list(frame_indices)
+        else:
+            return []
+
+        for frame_idx, time_idx in zip(frame_indices, time_indices):
+            if time_idx >= clip.shape[0]:
+                continue
+            pred_img = self._chw_rgb_float_to_bgr_uint(clip[time_idx, :3, :, :])
+            gt_img = self._chw_rgb_float_to_bgr_uint(gt_clip[frame_idx, :3, :, :])
+            psnr = util.calculate_psnr(pred_img, gt_img, border=0)
+            ssim = util.calculate_ssim(pred_img, gt_img, border=0)
+            if pred_img.ndim == 3:
+                pred_y = util.bgr2ycbcr(pred_img.astype(np.float32) / 255.) * 255.
+                gt_y = util.bgr2ycbcr(gt_img.astype(np.float32) / 255.) * 255.
+                psnr_y = util.calculate_psnr(pred_y, gt_y, border=0)
+                ssim_y = util.calculate_ssim(pred_y, gt_y, border=0)
+            else:
+                psnr_y = psnr
+                ssim_y = ssim
+            rows.append(
+                {
+                    'clip': clip_name,
+                    'frame': frame_idx,
+                    'subframe': time_idx - frame_idx * spike_bins if spike_bins else 0,
+                    't': time_idx,
+                    'psnr': psnr,
+                    'ssim': ssim,
+                    'psnr_y': psnr_y,
+                    'ssim_y': ssim_y,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _write_metric_rows(path, rows):
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('clip,frame,subframe,t,psnr,ssim,psnr_y,ssim_y\n')
+            for row in rows:
+                f.write(
+                    f"{row['clip']},{row['frame']},{row['subframe']},{row['t']},"
+                    f"{FusionDebugDumper._format_metric(row['psnr'])},"
+                    f"{FusionDebugDumper._format_metric(row['ssim'])},"
+                    f"{FusionDebugDumper._format_metric(row['psnr_y'])},"
+                    f"{FusionDebugDumper._format_metric(row['ssim_y'])}\n"
+                )
+
+    @staticmethod
+    def _format_metric(value):
+        if np.isinf(value):
+            return 'inf'
+        if np.isnan(value):
+            return 'nan'
+        return f'{value:.6f}'
+
+    @staticmethod
+    def _select_gt_clip(gt, index):
+        if gt is None:
+            return None
+        if isinstance(gt, torch.Tensor):
+            if gt.ndim == 5 and index < gt.size(0):
+                return gt[index].detach().float().clamp(0, 1).cpu().numpy()
+            if gt.ndim == 4 and index == 0:
+                return gt.detach().float().clamp(0, 1).cpu().numpy()
+        return None
+
+    @staticmethod
+    def _chw_rgb_float_to_bgr_uint(img):
+        img = np.transpose(img[[2, 1, 0], :, :], (1, 2, 0))
+        return (img * 255.0).round().astype(np.uint8)
 
     @staticmethod
     def _resolve_folder_name(folder):
