@@ -109,7 +109,7 @@ class SpyNetWrapper(OpticalFlowModule):
         # Preprocess: BGR [0,1] -> RGB normalized for SpyNet
         frame1, frame2 = self.preprocess_frames(frame1, frame2, 'rgb_norm')
 
-        with torch.no_grad():
+        with torch.set_grad_enabled(self._should_track_gradients()):
             out = self.model(frame1, frame2)
         # SpyNet returns flows in [low_res, ..., high_res] order, which matches VRT expectations
         return out

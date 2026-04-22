@@ -65,7 +65,7 @@ class SCFlowWrapper(OpticalFlowModule):
         b, _, h, w = spk1.shape
         flow_init = torch.zeros(b, 2, h, w, device=device, dtype=torch.float32)
 
-        with torch.no_grad(), torch.autocast("cuda", enabled=False):
+        with torch.autocast("cuda", enabled=False), torch.set_grad_enabled(self._should_track_gradients()):
             flows, _ = self.model(spk1, spk2, flow_init, dt=self.dt)
 
         return flows[:4]

@@ -85,4 +85,8 @@ class OpticalFlowModule(nn.Module):
     def load_checkpoint(self, path: str) -> None:
         raise NotImplementedError
 
+    def _should_track_gradients(self) -> bool:
+        """Track flow gradients only after phase logic marks flow params trainable."""
+        return torch.is_grad_enabled() and any(param.requires_grad for param in self.parameters())
+
 
