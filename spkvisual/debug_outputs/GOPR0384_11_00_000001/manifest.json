@@ -1,0 +1,56 @@
+{
+  "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/test/GOPR0384_11_00/spike/000001.dat",
+  "out_root": "/root/projects/S-VRT/spkvisual/debug_outputs/GOPR0384_11_00_000001",
+  "spike_shape": [
+    64,
+    360,
+    640
+  ],
+  "spike_flipud": true,
+  "begin": 0,
+  "length": 64,
+  "tfp_half_win_length": 20,
+  "tfp_device": "cpu",
+  "spike_h": 360,
+  "spike_w": 640,
+  "outputs": {
+    "s_vrt_tfp": {
+      "dir": "/root/projects/S-VRT/spkvisual/debug_outputs/GOPR0384_11_00_000001/s_vrt_tfp",
+      "shape": [
+        24,
+        360,
+        640
+      ]
+    },
+    "spikecv_tfp": {
+      "dir": "/root/projects/S-VRT/spkvisual/debug_outputs/GOPR0384_11_00_000001/spikecv_tfp",
+      "shape": [
+        24,
+        360,
+        640
+      ]
+    },
+    "raw": {
+      "dir": "/root/projects/S-VRT/spkvisual/debug_outputs/GOPR0384_11_00_000001/raw",
+      "shape": [
+        64,
+        360,
+        640
+      ]
+    },
+    "comparison_s_vrt_vs_spikecv": {
+      "same_shape": true,
+      "shape": [
+        24,
+        360,
+        640
+      ],
+      "identical": true,
+      "num_diff_pixels": 0,
+      "num_diff_frames": 0,
+      "diff_frame_indices": [],
+      "max_abs_diff": 0,
+      "mean_abs_diff": 0.0
+    }
+  }
+}
