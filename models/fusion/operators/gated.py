@@ -64,7 +64,15 @@ class GatedFusionOperator(nn.Module):
             rgb_flat = rgb_feat.reshape(bsz * steps, rgb_chans, height, width)
             spike_flat = spike_feat.reshape(bsz * steps, spike_chans, height, width)
             concat = torch.cat([rgb_flat, spike_flat], dim=1)
-            out = rgb_flat + self.gate(concat) * self.correction(concat)
+            gate = self.gate(concat)
+            correction = self.correction(concat)
+            effective_update = gate * correction
+            self._last_explain = {
+                'gate': gate.reshape(bsz, steps, self.out_chans, height, width).detach(),
+                'correction': correction.reshape(bsz, steps, self.out_chans, height, width).detach(),
+                'effective_update': effective_update.reshape(bsz, steps, self.out_chans, height, width).detach(),
+            }
+            out = rgb_flat + effective_update
             return out.reshape(bsz, steps, self.out_chans, height, width)
         if rgb_feat.dim() == 4:
             bsz, rgb_chans, height, width = rgb_feat.shape
@@ -76,8 +84,21 @@ class GatedFusionOperator(nn.Module):
             if spike_chans != self.spike_chans:
                 raise ValueError(f'Expected spike channels={self.spike_chans}, got {spike_chans}')
             concat = torch.cat([rgb_feat, spike_feat], dim=1)
-            return rgb_feat + self.gate(concat) * self.correction(concat)
+            gate = self.gate(concat)
+            correction = self.correction(concat)
+            effective_update = gate * correction
+            self._last_explain = {
+                'gate': gate.detach(),
+                'correction': correction.detach(),
+                'effective_update': effective_update.detach(),
+            }
+            return rgb_feat + effective_update
         raise ValueError('Expected rgb and spike features with 4 or 5 dimensions')
+
+    def explain(self) -> Dict[str, torch.Tensor]:
+        if not hasattr(self, '_last_explain'):
+            return {}
+        return dict(self._last_explain)
 
 
 __all__ = ['GatedFusionOperator']
