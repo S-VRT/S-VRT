@@ -1,4 +1,7 @@
 from models.model_vrt import (
+    apply_validation_checkpointing,
+    resolve_lazy_flow_cache_mode,
+    restore_validation_checkpointing,
     should_score_validation_batch,
     split_patch_coords_for_rank,
 )
@@ -45,3 +48,44 @@ def test_should_score_validation_batch_uses_runtime_active_flag_when_present():
     }
 
     assert should_score_validation_batch(opt)
+
+
+def test_resolve_lazy_flow_cache_mode_prefers_explicit_mode():
+    val_opt = {"cache_flow_patches_cpu": True, "lazy_flow_cache_mode": "gpu_clip"}
+
+    assert resolve_lazy_flow_cache_mode(val_opt) == "gpu_clip"
+
+
+def test_resolve_lazy_flow_cache_mode_keeps_legacy_cpu_patch_flag():
+    assert resolve_lazy_flow_cache_mode({"cache_flow_patches_cpu": True}) == "cpu_patch"
+    assert resolve_lazy_flow_cache_mode({"cache_flow_patches_cpu": False}) == "none"
+
+
+def test_resolve_lazy_flow_cache_mode_rejects_unknown_mode():
+    try:
+        resolve_lazy_flow_cache_mode({"lazy_flow_cache_mode": "banana"})
+    except ValueError as exc:
+        assert "lazy_flow_cache_mode" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for invalid lazy_flow_cache_mode")
+
+
+class _CheckpointLeaf:
+    def __init__(self):
+        self.use_checkpoint_attn = True
+        self.use_checkpoint_ffn = True
+
+    def modules(self):
+        return [self]
+
+
+def test_validation_checkpointing_can_disable_and_restore_attrs():
+    model = _CheckpointLeaf()
+
+    state = apply_validation_checkpointing(model, disable=True)
+
+    assert model.use_checkpoint_attn is False
+    assert model.use_checkpoint_ffn is False
+    restore_validation_checkpointing(state)
+    assert model.use_checkpoint_attn is True
+    assert model.use_checkpoint_ffn is True

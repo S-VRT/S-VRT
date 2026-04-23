@@ -3,6 +3,7 @@ from pathlib import Path
 import copy
 import cv2
 import numpy as np
+import time
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -48,6 +49,40 @@ def should_score_validation_batch(opt):
     ):
         return False
     return True
+
+
+def resolve_lazy_flow_cache_mode(val_opt):
+    if 'lazy_flow_cache_mode' in val_opt:
+        mode = str(val_opt.get('lazy_flow_cache_mode')).strip().lower()
+    else:
+        mode = 'cpu_patch' if bool(val_opt.get('cache_flow_patches_cpu', False)) else 'none'
+    valid_modes = {'none', 'cpu_patch', 'gpu_clip'}
+    if mode not in valid_modes:
+        raise ValueError(f"lazy_flow_cache_mode must be one of {sorted(valid_modes)}, got {mode!r}")
+    return mode
+
+
+def apply_validation_checkpointing(model, disable=False):
+    state = []
+    if not disable:
+        return state
+    for module in model.modules():
+        entry = {}
+        if hasattr(module, 'use_checkpoint_attn'):
+            entry['use_checkpoint_attn'] = module.use_checkpoint_attn
+            module.use_checkpoint_attn = False
+        if hasattr(module, 'use_checkpoint_ffn'):
+            entry['use_checkpoint_ffn'] = module.use_checkpoint_ffn
+            module.use_checkpoint_ffn = False
+        if entry:
+            state.append((module, entry))
+    return state
+
+
+def restore_validation_checkpointing(state):
+    for module, entry in state:
+        for name, value in entry.items():
+            setattr(module, name, value)
 
 
 class ModelVRT(ModelPlain):
@@ -203,41 +238,57 @@ class ModelVRT(ModelPlain):
     def test(self):
         n = self.L.size(1)
         self.netG.eval()
+        checkpoint_state = apply_validation_checkpointing(
+            self.get_bare_model(self.netG),
+            disable=bool(self.opt.get('val', {}).get('disable_checkpoint_during_validation', False)),
+        )
+        if hasattr(self, 'netE'):
+            checkpoint_state.extend(
+                apply_validation_checkpointing(
+                    self.get_bare_model(self.netE),
+                    disable=bool(self.opt.get('val', {}).get('disable_checkpoint_during_validation', False)),
+                )
+            )
+        if checkpoint_state:
+            print(f'[VAL_MODEL] disabled checkpointing for validation modules={len(checkpoint_state)}')
 
-        pad_seq = self.opt_train.get('pad_seq', False)
-        flip_seq = self.opt_train.get('flip_seq', False)
-        self.center_frame_only = self.opt_train.get('center_frame_only', False)
+        try:
+            pad_seq = self.opt_train.get('pad_seq', False)
+            flip_seq = self.opt_train.get('flip_seq', False)
+            self.center_frame_only = self.opt_train.get('center_frame_only', False)
 
-        if pad_seq:
-            n = n + 1
-            self.L = torch.cat([self.L, self.L[:, -1:, :, :, :]], dim=1)
+            if pad_seq:
+                n = n + 1
+                self.L = torch.cat([self.L, self.L[:, -1:, :, :, :]], dim=1)
 
-        if flip_seq:
-            self.L = torch.cat([self.L, self.L.flip(1)], dim=1)
+            if flip_seq:
+                self.L = torch.cat([self.L, self.L.flip(1)], dim=1)
 
-        flow_spike = getattr(self, 'L_flow_spike', None)
-        flow_spike_meta = getattr(self, 'L_flow_spike_meta', None)
-        if pad_seq and flow_spike is not None:
-            flow_spike = torch.cat([flow_spike, flow_spike[:, -1:, :, :, :]], dim=1)
-        if flip_seq and flow_spike is not None:
-            flow_spike = torch.cat([flow_spike, flow_spike.flip(1)], dim=1)
-        if (pad_seq or flip_seq) and flow_spike_meta is not None:
-            raise NotImplementedError("Lazy validation flow metadata does not support pad_seq/flip_seq.")
+            flow_spike = getattr(self, 'L_flow_spike', None)
+            flow_spike_meta = getattr(self, 'L_flow_spike_meta', None)
+            if pad_seq and flow_spike is not None:
+                flow_spike = torch.cat([flow_spike, flow_spike[:, -1:, :, :, :]], dim=1)
+            if flip_seq and flow_spike is not None:
+                flow_spike = torch.cat([flow_spike, flow_spike.flip(1)], dim=1)
+            if (pad_seq or flip_seq) and flow_spike_meta is not None:
+                raise NotImplementedError("Lazy validation flow metadata does not support pad_seq/flip_seq.")
 
-        with torch.no_grad():
-            self.E = self._test_video(self.L, flow_spike=flow_spike, flow_spike_meta=flow_spike_meta)
+            with torch.no_grad():
+                self.E = self._test_video(self.L, flow_spike=flow_spike, flow_spike_meta=flow_spike_meta)
 
-        if flip_seq:
-            output_1 = self.E[:, :n, :, :, :]
-            output_2 = self.E[:, n:, :, :, :].flip(1)
-            self.E = 0.5 * (output_1 + output_2)
+            if flip_seq:
+                output_1 = self.E[:, :n, :, :, :]
+                output_2 = self.E[:, n:, :, :, :].flip(1)
+                self.E = 0.5 * (output_1 + output_2)
 
-        if pad_seq:
-            n = n - 1
-            self.E = self.E[:, :n, :, :, :]
+            if pad_seq:
+                n = n - 1
+                self.E = self.E[:, :n, :, :, :]
 
-        if self.center_frame_only:
-            self.E = self.E[:, n // 2, :, :, :]
+            if self.center_frame_only:
+                self.E = self.E[:, n // 2, :, :, :]
+        finally:
+            restore_validation_checkpointing(checkpoint_state)
 
         self.netG.train()
 
@@ -349,8 +400,9 @@ class ModelVRT(ModelPlain):
             w_idx_list = list(range(0, w-size_patch_testing, stride)) + [max(0, w-size_patch_testing)]
             patch_coords = [(h_idx, w_idx) for h_idx in h_idx_list for w_idx in w_idx_list]
             patch_batch_size = max(1, int(self.opt['val'].get('patch_batch_size', 1)))
-            cache_flow_patches_cpu = bool(self.opt['val'].get('cache_flow_patches_cpu', False))
             val_opt = self.opt['val']
+            lazy_flow_cache_mode = resolve_lazy_flow_cache_mode(val_opt)
+            profile_patch_timing = bool(val_opt.get('profile_patch_timing', False))
             distributed_patch_testing = (
                 bool(val_opt.get('distributed_patch_testing_active', val_opt.get('distributed_patch_testing', False)))
                 and self.opt.get('dist', False)
@@ -370,16 +422,34 @@ class ModelVRT(ModelPlain):
                 f'[VAL_MODEL] _test_clip patches={len(patch_coords)} '
                 f'local_patches={len(local_patch_work_items)} '
                 f'patch_batch_size={patch_batch_size} patch={size_patch_testing} overlap={overlap_size} '
-                f'cache_flow_patches_cpu={cache_flow_patches_cpu} '
+                f'lazy_flow_cache_mode={lazy_flow_cache_mode} '
                 f'distributed_patch_testing={distributed_patch_testing}'
             )
             E = None
             W = None
             lazy_flow_clip = None
             flow_patch_cache = None
+            timing = {
+                'load_flow_clip': 0.0,
+                'build_batch': 0.0,
+                'forward': 0.0,
+                'accumulate': 0.0,
+                'all_reduce': 0.0,
+            }
+            clip_timer_start = time.perf_counter() if profile_patch_timing else None
             if flow_spike_meta is not None:
+                timer_start = time.perf_counter()
                 lazy_flow_clip = self._load_lazy_flow_clip(flow_spike_meta, temporal_offset, d)
-                if cache_flow_patches_cpu:
+                if lazy_flow_cache_mode == 'gpu_clip':
+                    lazy_flow_clip = self._move_lazy_flow_clip_to_device(lazy_flow_clip)
+                    print(
+                        '[VAL_MODEL] _test_clip cached full flow clip on GPU '
+                        f'shape={tuple(lazy_flow_clip.shape)} ({_tensor_gb(lazy_flow_clip):.2f} GB)'
+                    )
+                if profile_patch_timing:
+                    timing['load_flow_clip'] += time.perf_counter() - timer_start
+                if lazy_flow_cache_mode == 'cpu_patch':
+                    timer_start = time.perf_counter()
                     flow_patch_cache = {}
                     for global_patch_idx, (h_idx, w_idx) in local_patch_work_items:
                         flow_patch_cache[global_patch_idx] = self._crop_resize_lazy_flow_patch_cpu(
@@ -396,8 +466,11 @@ class ModelVRT(ModelPlain):
                         '[VAL_MODEL] _test_clip cached flow patches on CPU '
                         f'count={len(flow_patch_cache)} total={cached_gb:.2f} GB'
                     )
+                    if profile_patch_timing:
+                        timing['build_batch'] += time.perf_counter() - timer_start
 
             for coord_start in range(0, len(local_patch_work_items), patch_batch_size):
+                timer_start = time.perf_counter()
                 coord_batch = local_patch_work_items[coord_start:coord_start + patch_batch_size]
                 in_patches = []
                 flow_patches = []
@@ -423,7 +496,10 @@ class ModelVRT(ModelPlain):
                         flow_patches.append(flow_patch)
 
                 in_batch = torch.cat(in_patches, dim=0)
-                flow_batch = torch.cat(flow_patches, dim=0).to(self.device) if flow_patches else None
+                flow_batch = torch.cat(flow_patches, dim=0).to(self.device, non_blocking=True) if flow_patches else None
+                if profile_patch_timing:
+                    timing['build_batch'] += time.perf_counter() - timer_start
+                timer_start = time.perf_counter()
                 with self._autocast_context(enabled=self.amp_val_enabled, dtype=self.amp_val_dtype):
                     if hasattr(self, 'netE'):
                         if flow_batch is not None:
@@ -436,6 +512,10 @@ class ModelVRT(ModelPlain):
                         else:
                             out_batch = self.netG(in_batch).detach()
                 out_batch = out_batch.float()
+                if profile_patch_timing:
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    timing['forward'] += time.perf_counter() - timer_start
 
                 if E is None:
                     c_out = out_batch.size(2)
@@ -447,6 +527,7 @@ class ModelVRT(ModelPlain):
                         f'W={tuple(W.shape)} ({_tensor_gb(W):.2f} GB)'
                     )
 
+                timer_start = time.perf_counter()
                 for patch_idx, (_, (h_idx, w_idx)) in enumerate(coord_batch):
                     out_patch = out_batch[patch_idx:patch_idx + 1]
                     out_patch_mask = torch.ones_like(out_patch)
@@ -467,10 +548,28 @@ class ModelVRT(ModelPlain):
 
                     E[..., h_idx*sf:(h_idx+size_patch_testing)*sf, w_idx*sf:(w_idx+size_patch_testing)*sf].add_(out_patch)
                     W[..., h_idx*sf:(h_idx+size_patch_testing)*sf, w_idx*sf:(w_idx+size_patch_testing)*sf].add_(out_patch_mask)
+                if profile_patch_timing:
+                    timing['accumulate'] += time.perf_counter() - timer_start
             if distributed_patch_testing:
+                timer_start = time.perf_counter()
                 dist.all_reduce(E, op=dist.ReduceOp.SUM)
                 dist.all_reduce(W, op=dist.ReduceOp.SUM)
+                if profile_patch_timing:
+                    if self.device.type == 'cuda':
+                        torch.cuda.synchronize(self.device)
+                    timing['all_reduce'] += time.perf_counter() - timer_start
             output = E.div_(W).cpu()
+            if profile_patch_timing:
+                total = time.perf_counter() - clip_timer_start
+                print(
+                    '[VAL_TIMING] _test_clip '
+                    f'offset={temporal_offset} total={total:.3f}s '
+                    f'load_flow_clip={timing["load_flow_clip"]:.3f}s '
+                    f'build_batch={timing["build_batch"]:.3f}s '
+                    f'forward={timing["forward"]:.3f}s '
+                    f'accumulate={timing["accumulate"]:.3f}s '
+                    f'all_reduce={timing["all_reduce"]:.3f}s'
+                )
 
         else:
             _, _, _, h_old, w_old = lq.size()
@@ -583,6 +682,11 @@ class ModelVRT(ModelPlain):
             else:
                 flow_tensors.append(torch.from_numpy(np.asarray(arr, dtype=np.float32)))
         return torch.stack(flow_tensors, dim=0)
+
+    def _move_lazy_flow_clip_to_device(self, flow_clip):
+        if self.device.type == 'cuda':
+            flow_clip = flow_clip.pin_memory()
+        return flow_clip.to(self.device, non_blocking=True).float()
 
     def _crop_resize_lazy_flow_patch(self, flow_clip, h_idx, w_idx, patch_h, patch_w, full_h, full_w):
         src_h = flow_clip.size(-2)

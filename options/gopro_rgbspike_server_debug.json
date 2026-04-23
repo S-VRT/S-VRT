@@ -687,7 +687,7 @@
     "center_frame_only": false
     // 测试时使用的帧数：18 表示测试时处理 18 帧视频
     ,
-    "num_frame_testing": 24
+    "num_frame_testing": 12
     // 测试时的重叠帧数：2 表示相邻测试窗口之间有 2 帧重叠（用于滑动窗口测试）
     ,
     "num_frame_overlapping": 2
@@ -703,9 +703,18 @@
     // DDP 验证时把同一个样本的空间补丁分配到各 rank 推理，再 all-reduce 合并；rank0 负责保存和计分
     ,
     "distributed_patch_testing": true
-    // 是否在每个 temporal clip 开始时把全部 flow patches 预构造成 CPU 缓存，减少 patch loop 内逐 patch resize
+    // lazy flow 缓存模式：none=按需CPU裁剪后搬GPU，cpu_patch=CPU预缓存patch，gpu_clip=整段flow clip搬GPU后裁剪
     ,
-    "cache_flow_patches_cpu": true
+    "lazy_flow_cache_mode": "gpu_clip"
+    // 兼容旧开关：未设置 lazy_flow_cache_mode 时才用它推导 none/cpu_patch
+    ,
+    "cache_flow_patches_cpu": false
+    // 验证阶段临时关闭 VRT checkpoint；训练阶段仍按 netG 配置使用 checkpoint
+    ,
+    "disable_checkpoint_during_validation": true
+    // 打印每个验证 clip 的 load/build/forward/accumulate/reduce 耗时
+    ,
+    "profile_patch_timing": true
     // 混合精度验证开关：独立于训练，可单独控制推理显存/吞吐
     ,
     "amp": {

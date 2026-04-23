@@ -697,6 +697,18 @@
     // DDP 验证时把同一个样本的空间补丁分配到各 rank 推理，再 all-reduce 合并；rank0 负责保存和计分
     ,
     "distributed_patch_testing": true
+    // lazy flow 缓存模式：none=按需CPU裁剪后搬GPU，cpu_patch=CPU预缓存patch，gpu_clip=整段flow clip搬GPU后裁剪
+    ,
+    "lazy_flow_cache_mode": "gpu_clip"
+    // 兼容旧开关：未设置 lazy_flow_cache_mode 时才用它推导 none/cpu_patch
+    ,
+    "cache_flow_patches_cpu": false
+    // 验证阶段临时关闭 VRT checkpoint；训练阶段仍按 netG 配置使用 checkpoint
+    ,
+    "disable_checkpoint_during_validation": true
+    // 打印每个验证 clip 的 load/build/forward/accumulate/reduce 耗时
+    ,
+    "profile_patch_timing": true
   }
   // ========================================
   // 日志记录配置
