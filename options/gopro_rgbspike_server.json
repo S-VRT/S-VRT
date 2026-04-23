@@ -46,7 +46,7 @@
   "find_unused_parameters": true
   // 是否使用静态图：true 表示使用静态图优化，可以提高训练效率
   ,
-  "use_static_graph": true
+  "use_static_graph": false
   // 图像缩放因子：1 表示不进行缩放（保持原始分辨率）
   ,
   "scale": 1
@@ -155,7 +155,7 @@
       ,
       "tfp_device": "cpu"
       ,
-      "tfp_devices": ["cuda:0","cuda:1","cuda:2"]
+      "tfp_devices": ["cuda:0","cuda:1"]
       // 归一化设置：RGB 使用 ImageNet 均值方差，Spike 通道目前保持恒等缩放
       ,
       "rgb_normalize": null
@@ -189,7 +189,7 @@
       "num_frame": 6
       // 真实标签图像尺寸：支持单值或 [phase1, phase2]
       ,
-      "gt_size": [96, 96]
+      "gt_size": [96, 128]
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -215,7 +215,7 @@
       "dataloader_num_workers": 12
       // 批次大小：支持单值或 [phase1, phase2]
       ,
-      "dataloader_batch_size": [4, 4]
+      "dataloader_batch_size": [4, 2]
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -265,6 +265,11 @@
         "reconstruction": {
           "type": "spikecv_tfp",
           "num_bins": 4
+        },
+        "precomputed": {
+          "enable": true,
+          "root": "auto",
+          "format": "npy"
         }
       }
       // Spike 重建配置：使用字典级配置项
@@ -300,7 +305,7 @@
       // Spike TFP 多 GPU 设备列表：可选，配置后 DataLoader worker 会按 worker_id/LOCAL_RANK 轮询使用
       // 例如 ["cuda:0","cuda:1","cuda:2"]；为空数组表示禁用多 GPU TFP
       ,
-      "tfp_devices": ["cuda:0","cuda:1","cuda:2"]
+      "tfp_devices": ["cuda:0","cuda:1"]
       // Spike 数据文件夹名称
       ,
       "spike_folder_name": "spike"
@@ -614,7 +619,7 @@
     // 固定参数配置（用于分阶段训练）
     // 固定参数的迭代次数：在前 fix_iter 次迭代中，fix_keys 指定的参数保持固定
     ,
-    "fix_iter": 10000
+    "fix_iter": 20000
     // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
     ,
     "fix_lr_mul": 0.1
@@ -655,7 +660,7 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": [10000, 40000]
+    "checkpoint_test": [30000, 40000]
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 2000
@@ -709,6 +714,12 @@
     // 打印每个验证 clip 的 load/build/forward/accumulate/reduce 耗时
     ,
     "profile_patch_timing": true
+    // 混合精度验证开关：独立于训练，可单独控制推理显存/吞吐
+    ,
+    "amp": {
+      "enable": true,
+      "dtype": "float16"
+    }
   }
   // ========================================
   // 日志记录配置

@@ -189,7 +189,7 @@
       "num_frame": 6
       // 真实标签图像尺寸：支持单值或 [phase1, phase2]
       ,
-      "gt_size": [96, 96]
+      "gt_size": [96, 128]
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -215,7 +215,7 @@
       "dataloader_num_workers": 12
       // 批次大小：支持单值或 [phase1, phase2]
       ,
-      "dataloader_batch_size": [4, 4]
+      "dataloader_batch_size": [4, 2]
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -628,7 +628,7 @@
     // 学习率调度器配置
     // 总迭代次数：训练的总迭代步数
     ,
-    "total_iter": 30
+    "total_iter": 40
     // 生成器学习率调度器类型："CosineAnnealingWarmRestarts" 表示带重启的余弦退火调度器
     ,
     "G_scheduler_type": "CosineAnnealingWarmRestarts"
@@ -655,7 +655,7 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 1000
+    "checkpoint_test": 40
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 30
