@@ -29,6 +29,7 @@ from utils.utils_dist import get_dist_info, init_dist, barrier_safe, setup_distr
 
 # 数据集和模型定义
 from data.select_dataset import define_Dataset  # 数据集工厂函数
+from models.model_vrt import should_score_validation_batch
 from models.select_model import define_Model  # 模型工厂函数
 
 
@@ -483,6 +484,22 @@ def main():
                     test_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
                     test_loader_kwargs['multiprocessing_context'] = 'spawn'
                 test_loader = DataLoader(test_set, **test_loader_kwargs)
+
+            requested_dist_patch_val = bool(opt.get('val', {}).get('distributed_patch_testing', False))
+            dist_world_size = dist.get_world_size() if opt['dist'] and dist.is_initialized() else opt.get('world_size', 1)
+            active_dist_patch_val = requested_dist_patch_val and opt['dist'] and dist_world_size > 1 and len(test_set) == 1
+            opt.setdefault('val', {})['distributed_patch_testing_active'] = active_dist_patch_val
+            if requested_dist_patch_val and opt['rank'] == 0:
+                if active_dist_patch_val:
+                    logger.info(
+                        '[VALIDATION] Distributed patch testing active for single-sample validation '
+                        f'(world_size={dist_world_size}).'
+                    )
+                else:
+                    logger.info(
+                        '[VALIDATION] Distributed patch testing requested but inactive '
+                        f'(dist={opt["dist"]}, world_size={dist_world_size}, test_set_size={len(test_set)}).'
+                    )
         else:
             raise NotImplementedError("Phase [%s] is not recognized." % phase)
 
@@ -698,6 +715,9 @@ def main():
                         log_validation_probe(logger, f'after model.test batch={idx}', opt['rank'])
                         if opt['rank'] == 0:
                             logger.info(f'[VAL_BATCH] idx={idx} model.test() completed')
+
+                    if not should_score_validation_batch(opt):
+                        continue
 
                     # 获取模型输出和真实标签
                     visuals = model.current_visuals()

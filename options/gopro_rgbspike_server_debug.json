@@ -700,6 +700,9 @@
     // 测试时将多个空间补丁合并为一个 batch 推理；不改变补丁划分、重叠或指标计算
     ,
     "patch_batch_size": 4
+    // DDP 验证时把同一个样本的空间补丁分配到各 rank 推理，再 all-reduce 合并；rank0 负责保存和计分
+    ,
+    "distributed_patch_testing": true
     // 是否在每个 temporal clip 开始时把全部 flow patches 预构造成 CPU 缓存，减少 patch loop 内逐 patch resize
     ,
     "cache_flow_patches_cpu": true

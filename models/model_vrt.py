@@ -4,6 +4,7 @@ import copy
 import cv2
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 from torch.optim import lr_scheduler
 from torch.optim import Adam
@@ -23,6 +24,30 @@ def _tensor_gb(tensor):
     if tensor is None:
         return 0.0
     return tensor.numel() * tensor.element_size() / (1024 ** 3)
+
+
+def split_patch_coords_for_rank(coords, rank, world_size):
+    """Return the stripe of patch work assigned to a distributed rank."""
+    if world_size <= 1:
+        return list(coords)
+    if rank < 0 or rank >= world_size:
+        raise ValueError(f"rank must be in [0, {world_size}), got {rank}")
+    return list(coords)[rank::world_size]
+
+
+def should_score_validation_batch(opt):
+    val_opt = opt.get('val', {})
+    distributed_patch_testing = val_opt.get(
+        'distributed_patch_testing_active',
+        val_opt.get('distributed_patch_testing', False),
+    )
+    if (
+        opt.get('dist', False)
+        and distributed_patch_testing
+        and opt.get('rank', 0) != 0
+    ):
+        return False
+    return True
 
 
 class ModelVRT(ModelPlain):
@@ -325,13 +350,36 @@ class ModelVRT(ModelPlain):
             patch_coords = [(h_idx, w_idx) for h_idx in h_idx_list for w_idx in w_idx_list]
             patch_batch_size = max(1, int(self.opt['val'].get('patch_batch_size', 1)))
             cache_flow_patches_cpu = bool(self.opt['val'].get('cache_flow_patches_cpu', False))
+            val_opt = self.opt['val']
+            distributed_patch_testing = (
+                bool(val_opt.get('distributed_patch_testing_active', val_opt.get('distributed_patch_testing', False)))
+                and self.opt.get('dist', False)
+                and dist.is_available()
+                and dist.is_initialized()
+                and dist.get_world_size() > 1
+            )
+            patch_work_items = list(enumerate(patch_coords))
+            patch_rank = dist.get_rank() if distributed_patch_testing else 0
+            patch_world_size = dist.get_world_size() if distributed_patch_testing else 1
+            local_patch_work_items = split_patch_coords_for_rank(
+                patch_work_items,
+                rank=patch_rank,
+                world_size=patch_world_size,
+            )
             print(
                 f'[VAL_MODEL] _test_clip patches={len(patch_coords)} '
+                f'local_patches={len(local_patch_work_items)} '
                 f'patch_batch_size={patch_batch_size} patch={size_patch_testing} overlap={overlap_size} '
-                f'cache_flow_patches_cpu={cache_flow_patches_cpu}'
+                f'cache_flow_patches_cpu={cache_flow_patches_cpu} '
+                f'distributed_patch_testing={distributed_patch_testing}'
             )
-            E = None
-            W = None
+            E = torch.zeros(b, d, c_out, h*sf, w*sf, device=self.device)
+            W = torch.zeros_like(E)
+            print(
+                '[VAL_MODEL] _test_clip allocated '
+                f'E={tuple(E.shape)} ({_tensor_gb(E):.2f} GB) '
+                f'W={tuple(W.shape)} ({_tensor_gb(W):.2f} GB)'
+            )
             lazy_flow_clip = None
             flow_patch_cache = None
             if flow_spike_meta is not None:
@@ -355,18 +403,18 @@ class ModelVRT(ModelPlain):
                         f'count={len(flow_patch_cache)} total={cached_gb:.2f} GB'
                     )
 
-            for coord_start in range(0, len(patch_coords), patch_batch_size):
-                coord_batch = patch_coords[coord_start:coord_start + patch_batch_size]
+            for coord_start in range(0, len(local_patch_work_items), patch_batch_size):
+                coord_batch = local_patch_work_items[coord_start:coord_start + patch_batch_size]
                 in_patches = []
                 flow_patches = []
-                for patch_offset, (h_idx, w_idx) in enumerate(coord_batch):
+                for global_patch_idx, (h_idx, w_idx) in coord_batch:
                     in_patch = lq[..., h_idx:h_idx+size_patch_testing, w_idx:w_idx+size_patch_testing]
                     in_patches.append(in_patch)
                     flow_patch = None
                     if flow_spike is not None:
                         flow_patch = flow_spike[..., h_idx:h_idx+size_patch_testing, w_idx:w_idx+size_patch_testing]
                     elif flow_patch_cache is not None:
-                        flow_patch = flow_patch_cache[coord_start + patch_offset]
+                        flow_patch = flow_patch_cache[global_patch_idx]
                     elif flow_spike_meta is not None:
                         flow_patch = self._crop_resize_lazy_flow_patch(
                             lazy_flow_clip,
@@ -393,18 +441,9 @@ class ModelVRT(ModelPlain):
                             out_batch = self.netG(in_batch, flow_spike=flow_batch).detach()
                         else:
                             out_batch = self.netG(in_batch).detach()
+                out_batch = out_batch.float()
 
-                if E is None:
-                    c_out = out_batch.size(2)
-                    E = torch.zeros(b, d, c_out, h*sf, w*sf, device=out_batch.device, dtype=out_batch.dtype)
-                    W = torch.zeros_like(E)
-                    print(
-                        '[VAL_MODEL] _test_clip allocated '
-                        f'E={tuple(E.shape)} ({_tensor_gb(E):.2f} GB) '
-                        f'W={tuple(W.shape)} ({_tensor_gb(W):.2f} GB)'
-                    )
-
-                for patch_idx, (h_idx, w_idx) in enumerate(coord_batch):
+                for patch_idx, (_, (h_idx, w_idx)) in enumerate(coord_batch):
                     out_patch = out_batch[patch_idx:patch_idx + 1]
                     out_patch_mask = torch.ones_like(out_patch)
 
@@ -424,6 +463,9 @@ class ModelVRT(ModelPlain):
 
                     E[..., h_idx*sf:(h_idx+size_patch_testing)*sf, w_idx*sf:(w_idx+size_patch_testing)*sf].add_(out_patch)
                     W[..., h_idx*sf:(h_idx+size_patch_testing)*sf, w_idx*sf:(w_idx+size_patch_testing)*sf].add_(out_patch_mask)
+            if distributed_patch_testing:
+                dist.all_reduce(E, op=dist.ReduceOp.SUM)
+                dist.all_reduce(W, op=dist.ReduceOp.SUM)
             output = E.div_(W).cpu()
 
         else:
