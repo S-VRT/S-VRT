@@ -47,6 +47,9 @@ class EarlyFusionAdapter(nn.Module):
         self.inject_stages = inject_stages if inject_stages is not None else []
         self.spike_chans = spike_chans
         self.spike_upsample = SpikeUpsample(spike_chans) if spike_chans is not None else None
+        self.expects_structured_early = bool(
+            getattr(operator, "expects_structured_early", False)
+        )
         self.kwargs = kwargs
 
     def forward(self, rgb: torch.Tensor, spike: torch.Tensor) -> torch.Tensor:
@@ -70,7 +73,7 @@ class EarlyFusionAdapter(nn.Module):
             spike_flat = self.spike_upsample(spike_flat, target_h=height, target_w=width)
             spike = spike_flat.reshape(bsz, steps, spike_steps_per_frame, height, width)
 
-        if getattr(self.operator, "expects_structured_early", False):
+        if self.expects_structured_early:
             return self.operator(rgb, spike)
 
         rgb_rep = rgb.unsqueeze(2).expand(
