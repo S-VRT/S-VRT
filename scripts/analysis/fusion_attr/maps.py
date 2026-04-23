@@ -24,7 +24,7 @@ def normalize_map(values: torch.Tensor, low: float = 1.0, high: float = 99.0) ->
     if hi <= lo:
         return torch.zeros_like(values, dtype=torch.float32)
     out = np.clip((arr - lo) / (hi - lo), 0.0, 1.0)
-    return torch.from_numpy(out).to(dtype=torch.float32)
+    return torch.from_numpy(out).to(dtype=torch.float32, device=values.device)
 
 
 def compute_fusion_delta(fusion_output: torch.Tensor, rgb_reference: torch.Tensor) -> torch.Tensor:

@@ -31,6 +31,6 @@ def masked_charbonnier_target(
     while mask.ndim < output.ndim:
         mask = mask.unsqueeze(1)
     diff = (output - gt) * mask
-    denom = mask.sum().clamp_min(1.0) * output.shape[-3]
-    loss = torch.sqrt(diff * diff + eps).sum() / denom
+    active_elements = (mask > 0).float().expand_as(output).sum().clamp_min(1.0)
+    loss = torch.sqrt(diff * diff + eps).sum() / active_elements
     return -loss

@@ -70,6 +70,25 @@ def test_compute_error_map_returns_mean_channel_abs_error():
     assert error.max().item() == 1.0
 
 
+def test_masked_charbonnier_target_5d_consistent_with_4d():
+    # 5D: (B=1, T=3, C=3, H=5, W=6)
+    output_5d = torch.ones(1, 3, 3, 5, 6)
+    gt_5d = torch.zeros(1, 3, 3, 5, 6)
+    # 4D: (B=1, C=3, H=5, W=6) — same spatial content, single frame
+    output_4d = torch.ones(1, 3, 5, 6)
+    gt_4d = torch.zeros(1, 3, 5, 6)
+    sample = AnalysisSample(
+        clip="clip", frame="000001", frame_index=0,
+        mask_type="box", xyxy=(1, 1, 3, 4), mask_label="box", reason="unit test",
+    )
+    mask_5d = build_box_mask(sample, 5, 6, torch.device("cpu"))
+    mask_4d = build_box_mask(sample, 5, 6, torch.device("cpu"))
+    loss_5d = masked_charbonnier_target(output_5d, gt_5d, mask_5d)
+    loss_4d = masked_charbonnier_target(output_4d, gt_4d, mask_4d)
+    # Both should produce the same loss magnitude since the per-pixel error is identical
+    assert loss_5d.item() == pytest.approx(loss_4d.item(), rel=1e-4)
+
+
 def test_perturb_spike_zero_and_temporal_drop():
     spike = torch.ones(1, 4, 2, 3, 3)
     assert perturb_spike(spike, "zero").sum().item() == 0.0
