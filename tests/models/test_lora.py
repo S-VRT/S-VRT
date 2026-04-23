@@ -305,6 +305,22 @@ def test_lora_forward_handles_3d_batches():
     assert torch.allclose(y, expected, atol=1e-6)
 
 
+def test_lora_exposes_linear_weight_for_direct_matmul_callers():
+    torch.manual_seed(0)
+    base = nn.Linear(8, 12)
+    lora = LoRALinear(copy.deepcopy(base), rank=4, alpha=8)
+    nn.init.normal_(lora.lora_A.weight, std=0.01)
+    nn.init.normal_(lora.lora_B.weight, std=0.01)
+
+    x = torch.randn(3, 8)
+    expected = lora(x)
+    actual = x @ lora.weight.t()
+    if lora.bias is not None:
+        actual = actual + lora.bias
+
+    assert torch.allclose(actual, expected, atol=1e-6)
+
+
 def test_lora_dtype_preserved():
     base = nn.Linear(8, 8).to(torch.float64)
     lora = LoRALinear(base, rank=4, alpha=8)
