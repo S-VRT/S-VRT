@@ -5,6 +5,10 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+import cv2
+import numpy as np
+import torch
+
 
 @dataclass(frozen=True)
 class AnalysisSample:
@@ -113,3 +117,41 @@ def write_json(path: str | Path, data: dict[str, Any]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _ensure_chw_rgb(tensor: torch.Tensor) -> torch.Tensor:
+    data = tensor.detach().float().cpu()
+    if data.ndim == 5:
+        data = data[0, data.shape[1] // 2]
+    elif data.ndim == 4:
+        data = data[0]
+    if data.ndim != 3:
+        raise ValueError(f"Expected CHW image tensor, got {tuple(tensor.shape)}")
+    if data.shape[0] > 3:
+        data = data[:3]
+    if data.shape[0] == 1:
+        data = data.repeat(3, 1, 1)
+    return data.clamp(0, 1)
+
+
+def save_rgb_tensor_png(path: str | Path, tensor: torch.Tensor) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    data = _ensure_chw_rgb(tensor)
+    rgb = (data.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
+    bgr = rgb[:, :, ::-1]
+    cv2.imwrite(str(target), bgr)
+
+
+def save_gray_map_png(path: str | Path, tensor: torch.Tensor) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    data = tensor.detach().float().cpu().numpy()
+    if data.ndim != 2:
+        raise ValueError(f"Expected 2D map tensor, got {tuple(tensor.shape)}")
+    if data.max() > data.min():
+        data = (data - data.min()) / (data.max() - data.min())
+    else:
+        data = np.zeros_like(data)
+    img = (data * 255.0).round().astype(np.uint8)
+    cv2.imwrite(str(target), img)
