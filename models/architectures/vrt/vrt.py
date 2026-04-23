@@ -540,6 +540,8 @@ class VRT(nn.Module):
                     fused_steps=x.size(1),
                     spike_bins=spike_bins,
                 )
+                if getattr(self.fusion_adapter, "expects_structured_early", False):
+                    spike_bins = 1
 
             if timer is not None:
                 with timer.timer('flow_estimation'):
