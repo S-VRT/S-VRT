@@ -70,6 +70,9 @@ class EarlyFusionAdapter(nn.Module):
             spike_flat = self.spike_upsample(spike_flat, target_h=height, target_w=width)
             spike = spike_flat.reshape(bsz, steps, spike_steps_per_frame, height, width)
 
+        if getattr(self.operator, "expects_structured_early", False):
+            return self.operator(rgb, spike)
+
         rgb_rep = rgb.unsqueeze(2).expand(
             bsz, steps, spike_steps_per_frame, rgb_chans, height, width
         )
