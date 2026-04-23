@@ -692,13 +692,13 @@
     "num_frame_overlapping": 2
     // 测试时的补丁大小：160 表示将大图像分割成 160x160 的补丁进行测试
     ,
-    "size_patch_testing": 64
+    "size_patch_testing": 96
     // 测试时的补丁重叠大小：20 表示相邻测试补丁之间有 20 像素重叠（用于滑动窗口测试）
     ,
-    "size_patch_overlapping": 20
+    "size_patch_overlapping": 24
     // 测试时将多个空间补丁合并为一个 batch 推理；不改变补丁划分、重叠或指标计算
     ,
-    "patch_batch_size": 4
+    "patch_batch_size": 2
     // DDP 验证时把同一个样本的空间补丁分配到各 rank 推理，再 all-reduce 合并；rank0 负责保存和计分
     ,
     "distributed_patch_testing": true
