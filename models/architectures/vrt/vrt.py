@@ -535,6 +535,13 @@ class VRT(nn.Module):
                 x = self.fusion_adapter(rgb=rgb, spike=spike)
                 self._last_fusion_out = x
                 self._last_spike_bins = spike_bins
+                flow_spike = self._align_flow_spike_to_fused_time_axis(
+                    flow_spike=flow_spike,
+                    fused_steps=x.size(1),
+                    spike_bins=spike_bins,
+                )
+                if getattr(self.fusion_adapter, "expects_structured_early", False):
+                    spike_bins = 1
 
             if timer is not None:
                 with timer.timer('flow_estimation'):
@@ -684,6 +691,26 @@ class VRT(nn.Module):
             x = self.conv_last(self.reflection_pad2d(F.leaky_relu(self.linear_fuse(x), 0.2), pad=3))
             x = torch.stack(torch.split(x, dim=1, split_size_or_sections=3), 1)
             return x + self.extract_rgb(x_mean)
+
+    def _align_flow_spike_to_fused_time_axis(self, flow_spike, fused_steps, spike_bins):
+        if flow_spike is None:
+            return None
+        if not getattr(self.fusion_adapter, "expects_structured_early", False):
+            return flow_spike
+        if flow_spike.ndim != 5 or flow_spike.size(1) == fused_steps:
+            return flow_spike
+        if spike_bins <= 1 or flow_spike.size(1) != fused_steps * spike_bins:
+            return flow_spike
+
+        bsz, _, chans, height, width = flow_spike.shape
+        return flow_spike.reshape(
+            bsz,
+            fused_steps,
+            spike_bins,
+            chans,
+            height,
+            width,
+        ).mean(dim=2)
 
     def get_flows(self, x, flow_spike=None):
         if self.pa_frames == 2:
