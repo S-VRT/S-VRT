@@ -72,7 +72,7 @@ def _parse_xyxy(values: Iterable[Any]) -> tuple[int, int, int, int]:
     x1, y1, x2, y2 = parsed
     if x2 <= x1 or y2 <= y1:
         raise ValueError("xyxy must satisfy x2 > x1 and y2 > y1")
-    return parsed
+    return (x1, y1, x2, y2)
 
 
 def load_samples_file(path: str | Path) -> list[AnalysisSample]:
