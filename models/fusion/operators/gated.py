@@ -1,4 +1,4 @@
-from typing import Dict
+from __future__ import annotations
 
 import torch
 from torch import nn
@@ -17,7 +17,7 @@ class GatedFusionOperator(nn.Module):
         rgb_chans: int,
         spike_chans: int,
         out_chans: int,
-        operator_params: Dict,
+        operator_params: dict,
     ):
         super().__init__()
         self.rgb_chans = rgb_chans
@@ -48,6 +48,7 @@ class GatedFusionOperator(nn.Module):
         nn.init.zeros_(self.correction[-1].bias)
         # gate pre-sigmoid bias = -5 → Sigmoid(-5) ≈ 0.007
         nn.init.constant_(self.gate[2].bias, -5.0)
+        self._last_explain: dict | None = None
 
     def forward(self, rgb_feat: torch.Tensor, spike_feat: torch.Tensor) -> torch.Tensor:
         if rgb_feat.dim() != spike_feat.dim():
@@ -95,8 +96,8 @@ class GatedFusionOperator(nn.Module):
             return rgb_feat + effective_update
         raise ValueError('Expected rgb and spike features with 4 or 5 dimensions')
 
-    def explain(self) -> Dict[str, torch.Tensor]:
-        if not hasattr(self, '_last_explain'):
+    def explain(self) -> dict[str, torch.Tensor]:
+        if self._last_explain is None:
             return {}
         return dict(self._last_explain)
 

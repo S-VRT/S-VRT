@@ -50,6 +50,13 @@ class FusionProbe:
             self._handle.remove()
             self._handle = None
 
+    def __enter__(self) -> "FusionProbe":
+        self.attach()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
     def _hook(self, module: nn.Module, inputs: tuple[Any, ...], output: Any) -> None:
         tensor_output = output[0] if isinstance(output, (tuple, list)) else output
         if not isinstance(tensor_output, torch.Tensor):
