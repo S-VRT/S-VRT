@@ -681,6 +681,75 @@ def test_vrt_builds_with_structured_early_mamba_config():
     assert getattr(model.fusion_operator, "expects_structured_early", False) is True
 
 
+def test_vrt_structured_early_mamba_collapses_subframe_flow_spike(monkeypatch):
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[6, 8, 8],
+        window_size=[6, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "scflow", "checkpoint": None, "params": {}},
+        opt={
+            "netG": {
+                "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 7},
+                "fusion": {
+                    "placement": "early",
+                    "operator": "mamba",
+                    "out_chans": 3,
+                    "operator_params": {"model_dim": 8, "num_layers": 1},
+                    "early": {"expand_to_full_t": False},
+                },
+                "output_mode": "restoration",
+            }
+        },
+    )
+
+    monkeypatch.setattr(model.fusion_adapter, "forward", lambda rgb, spike: rgb)
+
+    captured = {}
+    dummy_flows = [
+        torch.zeros(1, 5, 2, 8, 8),
+        torch.zeros(1, 5, 2, 4, 4),
+        torch.zeros(1, 5, 2, 2, 2),
+        torch.zeros(1, 5, 2, 1, 1),
+    ]
+
+    def _fake_get_flows(_x, flow_spike=None):
+        captured["x_shape"] = tuple(_x.shape)
+        captured["flow_spike"] = flow_spike.detach().clone()
+        return dummy_flows, dummy_flows
+
+    def _fake_aligned(_x, _fb, _ff):
+        bsz, steps, _, height, width = _x.shape
+        chans = model.backbone_in_chans * 4
+        return [
+            torch.zeros(bsz, steps, chans, height, width),
+            torch.zeros(bsz, steps, chans, height, width),
+        ]
+
+    monkeypatch.setattr(model, "get_flows", _fake_get_flows)
+    monkeypatch.setattr(model, "get_aligned_image_2frames", _fake_aligned)
+    monkeypatch.setattr(model, "forward_features", lambda _x, *_args, **_kwargs: torch.zeros_like(_x))
+
+    x = torch.randn(1, 6, 7, 8, 8)
+    flow_spike = torch.arange(1 * 24 * 25 * 8 * 8, dtype=torch.float32).reshape(1, 24, 25, 8, 8)
+
+    with torch.no_grad():
+        out = model(x, flow_spike=flow_spike)
+
+    expected_flow = flow_spike.reshape(1, 6, 4, 25, 8, 8).mean(dim=2)
+    assert captured["x_shape"] == (1, 6, 3, 8, 8)
+    assert tuple(captured["flow_spike"].shape) == (1, 6, 25, 8, 8)
+    assert torch.equal(captured["flow_spike"], expected_flow)
+    assert out.shape == (1, 6, 3, 8, 8)
+
+
 def test_vrt_rejects_mamba_with_full_t_early_expansion():
     with pytest.raises(ValueError, match="mamba.*expand_to_full_t"):
         VRT(
