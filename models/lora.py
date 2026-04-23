@@ -32,6 +32,21 @@ class LoRALinear(nn.Module):
     def forward(self, x):
         return self.base(x) + self.lora_B(self.lora_A(x)) * self.scaling
 
+    @property
+    def weight(self) -> torch.Tensor:
+        """Expose an nn.Linear-compatible effective weight view.
+
+        Some third-party modules access `.weight` directly instead of calling the
+        layer as a module. Return the base weight plus the current LoRA delta so
+        those callers observe the adapted projection.
+        """
+        delta = self.lora_B.weight @ self.lora_A.weight
+        return self.base.weight + delta * self.scaling
+
+    @property
+    def bias(self) -> torch.Tensor | None:
+        return self.base.bias
+
     def merged_linear(self) -> nn.Linear:
         """Return a standalone nn.Linear with LoRA folded into the weight."""
         fused = nn.Linear(
