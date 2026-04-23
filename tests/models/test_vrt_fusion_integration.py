@@ -650,6 +650,66 @@ def test_vrt_stores_fusion_hook_after_forward():
     assert model._last_fusion_out.shape == (1, 24, 3, 16, 16)
 
 
+def test_vrt_builds_with_structured_early_mamba_config():
+    model = VRT(
+        upscale=1,
+        in_chans=11,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt={
+            "netG": {
+                "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 11},
+                "fusion": {
+                    "placement": "early",
+                    "operator": "mamba",
+                    "out_chans": 3,
+                    "operator_params": {"model_dim": 48, "d_state": 32, "d_conv": 4, "expand": 2, "num_layers": 3},
+                    "early": {"expand_to_full_t": False},
+                },
+            }
+        },
+    )
+    assert model.fusion_operator is not None
+    assert getattr(model.fusion_operator, "expects_structured_early", False) is True
+
+
+def test_vrt_rejects_mamba_with_full_t_early_expansion():
+    with pytest.raises(ValueError, match="mamba.*expand_to_full_t"):
+        VRT(
+            upscale=1,
+            in_chans=11,
+            out_chans=3,
+            img_size=[2, 8, 8],
+            window_size=[2, 4, 4],
+            depths=[1] * 8,
+            indep_reconsts=[],
+            embed_dims=[16] * 8,
+            num_heads=[1] * 8,
+            pa_frames=2,
+            use_flash_attn=False,
+            optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+            opt={
+                "netG": {
+                    "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 11},
+                    "fusion": {
+                        "placement": "early",
+                        "operator": "mamba",
+                        "out_chans": 3,
+                        "early": {"expand_to_full_t": True},
+                    },
+                }
+            },
+        )
+
+
 def test_full_t_hybrid_rejects_non_spikecv_tfp_from_test_dataset():
     opt = {
         "netG": {

@@ -269,6 +269,13 @@ class VRT(nn.Module):
 
             operator_name = fusion_cfg.get('operator', 'concat')
             operator_params = fusion_cfg.get('operator_params', {})
+            if operator_name == 'mamba':
+                if fusion_placement != 'early':
+                    raise ValueError("fusion.operator='mamba' requires fusion.placement='early'.")
+                if early_out_chans != 3:
+                    raise ValueError("fusion.operator='mamba' requires fusion.out_chans=3 for early fusion.")
+                if bool(early_cfg.get('expand_to_full_t', False)):
+                    raise ValueError("fusion.operator='mamba' does not support fusion.early.expand_to_full_t=true.")
             if fusion_placement == 'early':
                 self.fusion_operator = create_fusion_operator(
                     operator_name=operator_name,
