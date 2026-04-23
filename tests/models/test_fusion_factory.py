@@ -50,14 +50,24 @@ def test_mamba_operator_missing_dep_raises_runtime():
         op = create_fusion_operator(
             operator_name='mamba',
             rgb_chans=3,
-            spike_chans=8,
+            spike_chans=1,
             out_chans=3,
             operator_params={},
         )
         with pytest.raises(RuntimeError, match='mamba_ssm is required'):
-            op(torch.randn(1, 2, 3, 8, 8), torch.randn(1, 2, 8, 8, 8))
+            op(torch.randn(1, 2, 3, 8, 8), torch.randn(1, 2, 1, 8, 8))
     else:
         pytest.skip('mamba_ssm is available; missing-dependency guard is not applicable.')
+
+
+def test_mamba_operator_rejects_non_rgb3():
+    with pytest.raises(ValueError, match="rgb_chans=3"):
+        create_fusion_operator("mamba", 8, 1, 3, {})
+
+
+def test_mamba_operator_rejects_non_out3():
+    with pytest.raises(ValueError, match="out_chans=3"):
+        create_fusion_operator("mamba", 3, 1, 8, {})
 
 
 def test_create_fusion_adapter_unknown_placement():
