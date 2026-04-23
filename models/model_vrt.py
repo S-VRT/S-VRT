@@ -373,20 +373,16 @@ class ModelVRT(ModelPlain):
                 f'cache_flow_patches_cpu={cache_flow_patches_cpu} '
                 f'distributed_patch_testing={distributed_patch_testing}'
             )
-            E = torch.zeros(b, d, c_out, h*sf, w*sf, device=self.device)
-            W = torch.zeros_like(E)
-            print(
-                '[VAL_MODEL] _test_clip allocated '
-                f'E={tuple(E.shape)} ({_tensor_gb(E):.2f} GB) '
-                f'W={tuple(W.shape)} ({_tensor_gb(W):.2f} GB)'
-            )
+            E = None
+            W = None
             lazy_flow_clip = None
             flow_patch_cache = None
             if flow_spike_meta is not None:
                 lazy_flow_clip = self._load_lazy_flow_clip(flow_spike_meta, temporal_offset, d)
                 if cache_flow_patches_cpu:
-                    flow_patch_cache = [
-                        self._crop_resize_lazy_flow_patch_cpu(
+                    flow_patch_cache = {}
+                    for global_patch_idx, (h_idx, w_idx) in local_patch_work_items:
+                        flow_patch_cache[global_patch_idx] = self._crop_resize_lazy_flow_patch_cpu(
                             lazy_flow_clip,
                             h_idx,
                             w_idx,
@@ -395,9 +391,7 @@ class ModelVRT(ModelPlain):
                             full_h or h,
                             full_w or w,
                         )
-                        for h_idx, w_idx in patch_coords
-                    ]
-                    cached_gb = sum(_tensor_gb(patch) for patch in flow_patch_cache)
+                    cached_gb = sum(_tensor_gb(patch) for patch in flow_patch_cache.values())
                     print(
                         '[VAL_MODEL] _test_clip cached flow patches on CPU '
                         f'count={len(flow_patch_cache)} total={cached_gb:.2f} GB'
@@ -442,6 +436,16 @@ class ModelVRT(ModelPlain):
                         else:
                             out_batch = self.netG(in_batch).detach()
                 out_batch = out_batch.float()
+
+                if E is None:
+                    c_out = out_batch.size(2)
+                    E = torch.zeros(b, d, c_out, h*sf, w*sf, device=out_batch.device, dtype=out_batch.dtype)
+                    W = torch.zeros_like(E)
+                    print(
+                        '[VAL_MODEL] _test_clip allocated '
+                        f'E={tuple(E.shape)} ({_tensor_gb(E):.2f} GB) '
+                        f'W={tuple(W.shape)} ({_tensor_gb(W):.2f} GB)'
+                    )
 
                 for patch_idx, (_, (h_idx, w_idx)) in enumerate(coord_batch):
                     out_patch = out_batch[patch_idx:patch_idx + 1]
