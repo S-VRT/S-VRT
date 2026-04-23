@@ -182,3 +182,88 @@ def test_gated_operator_has_correction():
     """GatedFusionOperator must have a correction attribute (renamed from fuse)."""
     op = create_fusion_operator("gated", 3, 1, 3, {})
     assert hasattr(op, 'correction'), "GatedFusionOperator must have 'correction' attribute"
+
+
+def test_mamba_operator_structured_early_shape_or_missing_dep():
+    op = create_fusion_operator(
+        "mamba",
+        3,
+        1,
+        3,
+        {
+            "model_dim": 48,
+            "d_state": 32,
+            "d_conv": 4,
+            "expand": 2,
+            "num_layers": 3,
+        },
+    )
+    rgb = torch.randn(2, 5, 3, 12, 12)
+    spike = torch.randn(2, 5, 8, 12, 12)
+    try:
+        out = op(rgb, spike)
+    except RuntimeError as exc:
+        assert "mamba_ssm is required" in str(exc)
+        return
+    assert out.shape == (2, 5, 3, 12, 12)
+
+
+def test_mamba_operator_passthrough_at_init_or_missing_dep():
+    op = create_fusion_operator(
+        "mamba",
+        3,
+        1,
+        3,
+        {
+            "model_dim": 48,
+            "d_state": 32,
+            "d_conv": 4,
+            "expand": 2,
+            "num_layers": 3,
+            "init_gate_bias": -5.0,
+        },
+    )
+    rgb = torch.ones(1, 2, 3, 8, 8) * 0.5
+    spike = torch.zeros(1, 2, 6, 8, 8)
+    try:
+        with torch.no_grad():
+            out = op(rgb, spike)
+    except RuntimeError as exc:
+        assert "mamba_ssm is required" in str(exc)
+        return
+    assert torch.allclose(out, rgb, atol=1e-5)
+
+
+class StructuredRecordingOperator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.last_rgb = None
+        self.last_spike = None
+
+    def forward(self, rgb, spike):
+        self.last_rgb = rgb
+        self.last_spike = spike
+        return rgb
+
+
+def test_early_adapter_mamba_keeps_frame_structure():
+    op = StructuredRecordingOperator()
+    setattr(op, "expects_structured_early", True)
+    adapter = EarlyFusionAdapter(operator=op, spike_chans=8)
+    rgb = torch.randn(2, 6, 3, 12, 12)
+    spike = torch.randn(2, 6, 8, 12, 12)
+    out = adapter(rgb=rgb, spike=spike)
+    assert out.shape == (2, 6, 3, 12, 12)
+    assert op.last_rgb.shape == (2, 6, 3, 12, 12)
+    assert op.last_spike.shape == (2, 6, 8, 12, 12)
+
+
+def test_early_adapter_mamba_upsamples_without_flattening():
+    op = StructuredRecordingOperator()
+    setattr(op, "expects_structured_early", True)
+    adapter = EarlyFusionAdapter(operator=op, spike_chans=8)
+    rgb = torch.randn(2, 6, 3, 12, 12)
+    spike = torch.randn(2, 6, 8, 6, 6)
+    out = adapter(rgb=rgb, spike=spike)
+    assert out.shape == (2, 6, 3, 12, 12)
+    assert op.last_spike.shape == (2, 6, 8, 12, 12)
