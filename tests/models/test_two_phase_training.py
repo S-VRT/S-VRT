@@ -140,6 +140,8 @@ def test_phase2_unfreezes_fix_keys_and_lora_only():
     assert model.fusion_operator_gate.weight.requires_grad is True
 
 
+# These tests validate the helper logic on ModelPlain directly.
+# A separate ModelVRT regression test covers the real optimize_parameters path.
 def test_model_plain_configures_writeback_only_stage_during_head_only_iters():
     from models.model_plain import ModelPlain
 

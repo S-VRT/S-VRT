@@ -958,6 +958,97 @@ def test_vrt_rejects_mamba_with_full_t_early_expansion():
         )
 
 
+def test_model_vrt_optimize_parameters_switches_mamba_warmup_stage_and_phase2_unfreezes(monkeypatch):
+    from collections import OrderedDict
+    from contextlib import nullcontext
+    from models.model_vrt import ModelVRT
+
+    class _WarmupAwareOperator:
+        def __init__(self):
+            self.last_stage = None
+
+        def set_warmup_stage(self, stage):
+            self.last_stage = stage
+
+    class _BareNet(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fusion_enabled = True
+            self.fusion_cfg = {"placement": "early"}
+            self.fusion_adapter = type("Adapter", (), {"operator": _WarmupAwareOperator()})()
+            self.spynet_conv = nn.Linear(4, 4)
+            self.pa_deform_conv = nn.Linear(4, 4)
+            self.backbone_base = nn.Linear(4, 4)
+            self.lora_A = nn.Parameter(torch.zeros(1))
+            self.lora_B = nn.Parameter(torch.zeros(1))
+
+    model = ModelVRT.__new__(ModelVRT)
+    model.opt = {"train": {"checkpoint_save": 100}, "dist": False}
+    model.opt_train = {
+        "fusion_warmup": {"head_only_iters": 2},
+        "G_optimizer_clipgrad": None,
+        "G_regularizer_orthstep": None,
+        "G_regularizer_clipstep": None,
+        "E_decay": 0,
+        "phase2_lora_mode": True,
+        "use_lora": True,
+    }
+    model.fix_iter = 10
+    model.fix_keys = ["spynet", "pa_deform"]
+    model.fix_unflagged = False
+    model.timer = type("TimerStub", (), {"current_timings": {}, "timer": staticmethod(lambda *_args, **_kwargs: nullcontext())})()
+    model.log_dict = OrderedDict()
+    model.grad_scaler = type(
+        "ScalerStub",
+        (),
+        {
+            "is_enabled": staticmethod(lambda: False),
+            "step": staticmethod(lambda _optimizer: None),
+            "update": staticmethod(lambda: None),
+            "scale": staticmethod(lambda value: value),
+        },
+    )()
+    model.G_optimizer = type("OptimizerStub", (), {"zero_grad": staticmethod(lambda: None), "step": staticmethod(lambda: None)})()
+    model.fusion_debug = type(
+        "DebugStub",
+        (),
+        {
+            "should_dump_phase1_last": staticmethod(lambda *args, **kwargs: False),
+            "arm": staticmethod(lambda: None),
+            "disarm": staticmethod(lambda: None),
+        },
+    )()
+
+    bare = _BareNet()
+    bare.spynet_conv.weight.requires_grad_(False)
+    bare.pa_deform_conv.weight.requires_grad_(False)
+    bare.lora_A.requires_grad_(False)
+    bare.lora_B.requires_grad_(False)
+    bare.backbone_base.weight.requires_grad_(False)
+    model.netG = bare
+    model.get_bare_model = lambda net: net
+    model._phase1_fusion_forward = lambda: None
+    model.netG_forward = lambda: setattr(model, "E", torch.zeros(1, 1, 3, 4, 4, requires_grad=True))
+    model._compute_fusion_aux_loss = lambda is_phase1, current_step=None: torch.tensor(0.0, requires_grad=True)
+    model.G_lossfn_weight = 0.0
+    model.G_lossfn = lambda pred, target: pred.sum() * 0.0
+    model.H = torch.zeros(1, 1, 3, 4, 4)
+
+    model.optimize_parameters(current_step=0)
+    assert bare.fusion_adapter.operator.last_stage == "writeback_only"
+
+    model.optimize_parameters(current_step=3)
+    assert bare.fusion_adapter.operator.last_stage == "token_mixer"
+
+    model.optimize_parameters(current_step=10)
+    assert bare.fusion_adapter.operator.last_stage == "full"
+    assert bare.spynet_conv.weight.requires_grad is True
+    assert bare.pa_deform_conv.weight.requires_grad is True
+    assert bare.lora_A.requires_grad is True
+    assert bare.lora_B.requires_grad is True
+    assert bare.backbone_base.weight.requires_grad is False
+
+
 def test_full_t_hybrid_rejects_non_spikecv_tfp_from_test_dataset():
     opt = {
         "netG": {
