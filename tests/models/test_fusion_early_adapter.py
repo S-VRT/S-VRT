@@ -7,6 +7,23 @@ from models.fusion.factory import create_fusion_adapter, create_fusion_operator
 
 
 class RecordingOperator(nn.Module):
+    frame_contract = "expanded"
+
+    def __init__(self):
+        super().__init__()
+        self.last_rgb = None
+        self.last_spike = None
+
+    def forward(self, rgb, spike):
+        self.last_rgb = rgb
+        self.last_spike = spike
+        return rgb
+
+
+class StructuredRecordingOperator(nn.Module):
+    frame_contract = "collapsed"
+    expects_structured_early = True
+
     def __init__(self):
         super().__init__()
         self.last_rgb = None
@@ -24,6 +41,20 @@ def test_concat_operator_shape():
     spike_feat = torch.randn(2, 5, 1, 16, 16)
     out = op(rgb_feat, spike_feat)
     assert out.shape == (2, 5, 3, 16, 16)
+
+
+@pytest.mark.parametrize(
+    ("operator_name", "expected_frame_contract"),
+    [
+        ("gated", "expanded"),
+        ("concat", "expanded"),
+        ("pase", "expanded"),
+        ("mamba", "collapsed"),
+    ],
+)
+def test_fusion_operator_frame_contract_metadata(operator_name, expected_frame_contract):
+    op = create_fusion_operator(operator_name, 3, 1, 3, {})
+    assert getattr(op, "frame_contract", None) == expected_frame_contract
 
 
 def test_gated_operator_shape():
@@ -54,13 +85,55 @@ def test_mamba_operator_shape_or_missing_dep():
         assert out.shape == (2, 5, 3, 16, 16)
 
 
+def test_early_adapter_returns_main_and_exec_for_expanded_operator():
+    class ExpandedStub(torch.nn.Module):
+        frame_contract = "expanded"
+
+        def forward(self, rgb_rep, spk):
+            return rgb_rep
+
+    adapter = EarlyFusionAdapter(operator=ExpandedStub(), mode="replace", inject_stages=[], spike_chans=4)
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+
+    result = adapter(rgb, spike)
+
+    assert set(result.keys()) == {"fused_main", "backbone_view", "aux_view", "meta"}
+    assert result["meta"]["frame_contract"] == "expanded"
+    assert result["fused_main"].shape == (1, 2, 3, 8, 8)
+    assert result["backbone_view"].shape == (1, 8, 3, 8, 8)
+    assert result["aux_view"].shape == (1, 8, 3, 8, 8)
+    assert result["meta"]["main_from_exec_rule"] == "center_subframe"
+
+
+def test_early_adapter_returns_main_and_exec_for_collapsed_operator():
+    class CollapsedStub(torch.nn.Module):
+        frame_contract = "collapsed"
+
+        def forward(self, rgb, spike):
+            return rgb
+
+    adapter = EarlyFusionAdapter(operator=CollapsedStub(), mode="replace", inject_stages=[], spike_chans=4)
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+
+    result = adapter(rgb, spike)
+
+    assert result["meta"]["frame_contract"] == "collapsed"
+    assert result["fused_main"].shape == (1, 2, 3, 8, 8)
+    assert result["backbone_view"].shape == (1, 2, 3, 8, 8)
+    assert result["aux_view"] is None
+    assert result["meta"]["main_from_exec_rule"] is None
+
+
 def test_early_adapter_expands_time():
     op = create_fusion_operator("concat", 3, 1, 3, {})
     adapter = EarlyFusionAdapter(operator=op)
     rgb = torch.randn(2, 6, 3, 12, 12)
     spike = torch.randn(2, 6, 8, 12, 12)
-    out = adapter(rgb=rgb, spike=spike)
-    assert out.shape == (2, 48, 3, 12, 12)
+    result = adapter(rgb=rgb, spike=spike)
+    assert result["fused_main"].shape == (2, 6, 3, 12, 12)
+    assert result["backbone_view"].shape == (2, 48, 3, 12, 12)
 
 
 def test_spike_upsample_shape():
@@ -93,8 +166,9 @@ def test_early_adapter_spatial_mismatch():
     adapter = EarlyFusionAdapter(operator=op, spike_chans=8)
     rgb = torch.randn(2, 6, 3, 12, 12)
     spike = torch.randn(2, 6, 8, 6, 6)
-    out = adapter(rgb=rgb, spike=spike)
-    assert out.shape == (2, 48, 3, 12, 12)
+    result = adapter(rgb=rgb, spike=spike)
+    assert result["fused_main"].shape == (2, 6, 3, 12, 12)
+    assert result["backbone_view"].shape == (2, 48, 3, 12, 12)
     assert op.last_rgb.shape == (2, 48, 3, 12, 12)
     assert op.last_spike.shape == (2, 48, 1, 12, 12)
 
@@ -122,8 +196,9 @@ def test_early_adapter_receives_spike_chans_via_factory():
 
     rgb = torch.randn(2, 6, 3, 12, 12)
     spike = torch.randn(2, 6, 8, 6, 6)
-    out = adapter(rgb=rgb, spike=spike)
-    assert out.shape == (2, 48, 3, 12, 12)
+    result = adapter(rgb=rgb, spike=spike)
+    assert result["fused_main"].shape == (2, 6, 3, 12, 12)
+    assert result["backbone_view"].shape == (2, 48, 3, 12, 12)
 
 
 def test_early_adapter_gated_spatial_mismatch():
@@ -131,8 +206,9 @@ def test_early_adapter_gated_spatial_mismatch():
     adapter = EarlyFusionAdapter(operator=op, spike_chans=8)
     rgb = torch.randn(2, 6, 3, 12, 12)
     spike = torch.randn(2, 6, 8, 6, 6)
-    out = adapter(rgb=rgb, spike=spike)
-    assert out.shape == (2, 48, 3, 12, 12)
+    result = adapter(rgb=rgb, spike=spike)
+    assert result["fused_main"].shape == (2, 6, 3, 12, 12)
+    assert result["backbone_view"].shape == (2, 48, 3, 12, 12)
 
 
 def test_early_adapter_output_is_3_channels():
@@ -140,28 +216,36 @@ def test_early_adapter_output_is_3_channels():
     adapter = EarlyFusionAdapter(operator=op, spike_chans=8)
     rgb = torch.randn(2, 6, 3, 12, 12)
     spike = torch.randn(2, 6, 8, 6, 6)
-    out = adapter(rgb=rgb, spike=spike)
-    assert out.shape[2] == 3
+    result = adapter(rgb=rgb, spike=spike)
+    assert result["fused_main"].shape[2] == 3
+    assert result["backbone_view"].shape[2] == 3
 
 
-@pytest.mark.parametrize("operator_name", ["gated", "pase", "mamba"])
-def test_early_adapter_supports_all_early_operators(operator_name):
+@pytest.mark.parametrize(
+    ("operator_name", "expected_main_steps", "expected_exec_steps"),
+    [
+        ("gated", 6, 48),
+        ("pase", 6, 48),
+        ("mamba", 6, 6),
+    ],
+)
+def test_early_adapter_supports_all_early_operators(operator_name, expected_main_steps, expected_exec_steps):
     op = create_fusion_operator(operator_name, 3, 1, 3, {})
     adapter = EarlyFusionAdapter(operator=op)
     rgb = torch.randn(2, 6, 3, 12, 12)
     spike = torch.randn(2, 6, 8, 12, 12)
     try:
-        out = adapter(rgb=rgb, spike=spike)
+        result = adapter(rgb=rgb, spike=spike)
     except RuntimeError as exc:
         if operator_name == "mamba":
             assert "mamba_ssm is required" in str(exc)
             return
         raise
-    assert out.shape == (2, 48, 3, 12, 12)
+    assert result["fused_main"].shape == (2, expected_main_steps, 3, 12, 12)
+    assert result["backbone_view"].shape == (2, expected_exec_steps, 3, 12, 12)
 
 
 def test_gated_operator_passthrough_at_init():
-    """At init, gate≈0 and correction≈0, so output should equal rgb input."""
     op = create_fusion_operator("gated", 3, 1, 3, {})
     rgb = torch.ones(1, 1, 3, 8, 8) * 0.5
     spike = torch.zeros(1, 1, 1, 8, 8)
@@ -173,15 +257,13 @@ def test_gated_operator_passthrough_at_init():
 
 
 def test_gated_operator_no_rgb_proj():
-    """GatedFusionOperator must not have an rgb_proj attribute after redesign."""
     op = create_fusion_operator("gated", 3, 1, 3, {})
-    assert not hasattr(op, 'rgb_proj'), "rgb_proj should be removed from GatedFusionOperator"
+    assert not hasattr(op, "rgb_proj"), "rgb_proj should be removed from GatedFusionOperator"
 
 
 def test_gated_operator_has_correction():
-    """GatedFusionOperator must have a correction attribute (renamed from fuse)."""
     op = create_fusion_operator("gated", 3, 1, 3, {})
-    assert hasattr(op, 'correction'), "GatedFusionOperator must have 'correction' attribute"
+    assert hasattr(op, "correction"), "GatedFusionOperator must have 'correction' attribute"
 
 
 def test_mamba_operator_structured_early_shape_or_missing_dep():
@@ -234,36 +316,30 @@ def test_mamba_operator_passthrough_at_init_or_missing_dep():
     assert torch.allclose(out, rgb, atol=1e-5)
 
 
-class StructuredRecordingOperator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.last_rgb = None
-        self.last_spike = None
-
-    def forward(self, rgb, spike):
-        self.last_rgb = rgb
-        self.last_spike = spike
-        return rgb
-
-
 def test_early_adapter_mamba_keeps_frame_structure():
     op = StructuredRecordingOperator()
-    setattr(op, "expects_structured_early", True)
     adapter = EarlyFusionAdapter(operator=op, spike_chans=8)
     rgb = torch.randn(2, 6, 3, 12, 12)
     spike = torch.randn(2, 6, 8, 12, 12)
-    out = adapter(rgb=rgb, spike=spike)
-    assert out.shape == (2, 6, 3, 12, 12)
+    result = adapter(rgb=rgb, spike=spike)
+    assert result["fused_main"].shape == (2, 6, 3, 12, 12)
+    assert result["backbone_view"].shape == (2, 6, 3, 12, 12)
     assert op.last_rgb.shape == (2, 6, 3, 12, 12)
     assert op.last_spike.shape == (2, 6, 8, 12, 12)
 
 
 def test_early_adapter_mamba_upsamples_without_flattening():
     op = StructuredRecordingOperator()
-    setattr(op, "expects_structured_early", True)
     adapter = EarlyFusionAdapter(operator=op, spike_chans=8)
     rgb = torch.randn(2, 6, 3, 12, 12)
     spike = torch.randn(2, 6, 8, 6, 6)
-    out = adapter(rgb=rgb, spike=spike)
-    assert out.shape == (2, 6, 3, 12, 12)
+    result = adapter(rgb=rgb, spike=spike)
+    assert result["fused_main"].shape == (2, 6, 3, 12, 12)
+    assert result["backbone_view"].shape == (2, 6, 3, 12, 12)
     assert op.last_spike.shape == (2, 6, 8, 12, 12)
+
+
+def test_early_wrapper_inferrs_contract_from_operator_without_new_config():
+    op = create_fusion_operator("mamba", 3, 1, 3, {})
+    adapter = EarlyFusionAdapter(operator=op, mode="replace", inject_stages=[], spike_chans=4)
+    assert getattr(adapter.operator, "frame_contract", None) == "collapsed"

@@ -7,6 +7,8 @@ from models.spk_encoder import PixelAdaptiveSpikeEncoder
 
 
 class PaseFusionOperator(nn.Module):
+    frame_contract = "expanded"
+
     def __init__(
         self,
         rgb_chans: int,

@@ -5,6 +5,8 @@ from torch import nn
 
 
 class ConcatFusionOperator(nn.Module):
+    frame_contract = "expanded"
+
     def __init__(
         self,
         rgb_chans: int,

@@ -12,6 +12,8 @@ class GatedFusionOperator(nn.Module):
     the operator starts as a pure passthrough.
     """
 
+    frame_contract = "expanded"
+
     def __init__(
         self,
         rgb_chans: int,

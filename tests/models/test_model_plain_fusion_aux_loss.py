@@ -1,6 +1,6 @@
 """Tests for ModelPlain._compute_fusion_aux_loss and phase-aware loss weighting."""
-import torch
 import pytest
+import torch
 
 
 def _make_opt(phase1_aux=1.0, phase2_aux=0.2, passthrough=0.2, fix_iter=10):
@@ -77,34 +77,37 @@ def _make_opt(phase1_aux=1.0, phase2_aux=0.2, passthrough=0.2, fix_iter=10):
     }
 
 
-def _inject_fusion_hook(model, fusion_out, spike_bins):
+def _inject_fusion_hook(model, fusion_main, spike_bins, fusion_exec=None, fusion_aux=None, fusion_meta=None):
     bare = model.get_bare_model(model.netG)
-    bare._last_fusion_out = fusion_out
+    bare._last_fusion_main = fusion_main
+    bare._last_fusion_exec = fusion_exec if fusion_exec is not None else fusion_main
+    bare._last_fusion_aux = fusion_aux
+    bare._last_fusion_meta = fusion_meta or {}
     bare._last_spike_bins = spike_bins
-    B = fusion_out.shape[0]
-    N = fusion_out.shape[1] // spike_bins
-    H, W = fusion_out.shape[-2], fusion_out.shape[-1]
-    model.H = torch.zeros(B, N, 3, H, W)
-    # self.L: [B, N, 3+spike_chans, H, W]; first 3 channels = blur_rgb
-    model.L = torch.ones(B, N, 7, H, W)
+    bsz, steps = fusion_main.shape[:2]
+    height, width = fusion_main.shape[-2:]
+    model.H = torch.zeros(bsz, steps, 3, height, width)
+    model.L = torch.ones(bsz, steps, 7, height, width)
 
 
 def test_fusion_aux_loss_phase1_returns_nonzero():
     from models.model_plain import ModelPlain
+
     model = ModelPlain(_make_opt())
     model.define_loss()
-    fusion_out = torch.randn(1, 24, 3, 8, 8)  # N=6, S=4
-    _inject_fusion_hook(model, fusion_out, spike_bins=4)
+    fusion_main = torch.randn(1, 6, 3, 8, 8)
+    _inject_fusion_hook(model, fusion_main, spike_bins=4)
     loss = model._compute_fusion_aux_loss(is_phase1=True)
     assert loss.item() > 0.0
 
 
 def test_fusion_aux_loss_phase2_smaller_than_phase1():
     from models.model_plain import ModelPlain
+
     model = ModelPlain(_make_opt(phase1_aux=1.0, phase2_aux=0.2))
     model.define_loss()
-    fusion_out = torch.randn(1, 24, 3, 8, 8)
-    _inject_fusion_hook(model, fusion_out, spike_bins=4)
+    fusion_main = torch.randn(1, 6, 3, 8, 8)
+    _inject_fusion_hook(model, fusion_main, spike_bins=4)
     loss_p1 = model._compute_fusion_aux_loss(is_phase1=True)
     loss_p2 = model._compute_fusion_aux_loss(is_phase1=False)
     assert loss_p2.item() < loss_p1.item()
@@ -112,35 +115,60 @@ def test_fusion_aux_loss_phase2_smaller_than_phase1():
 
 def test_fusion_aux_loss_zero_when_all_weights_zero():
     from models.model_plain import ModelPlain
+
     model = ModelPlain(_make_opt(phase1_aux=0.0, phase2_aux=0.0, passthrough=0.0))
     model.define_loss()
-    fusion_out = torch.randn(1, 24, 3, 8, 8)
-    _inject_fusion_hook(model, fusion_out, spike_bins=4)
+    fusion_main = torch.randn(1, 6, 3, 8, 8)
+    _inject_fusion_hook(model, fusion_main, spike_bins=4)
     loss = model._compute_fusion_aux_loss(is_phase1=True)
     assert loss.item() == 0.0
 
 
 def test_fusion_aux_loss_no_hook_returns_zero():
     from models.model_plain import ModelPlain
+
     model = ModelPlain(_make_opt())
     model.define_loss()
-    fusion_out = torch.randn(1, 24, 3, 8, 8)
-    _inject_fusion_hook(model, fusion_out, spike_bins=4)
-    del model.get_bare_model(model.netG)._last_fusion_out
+    fusion_main = torch.randn(1, 6, 3, 8, 8)
+    _inject_fusion_hook(model, fusion_main, spike_bins=4)
+    del model.get_bare_model(model.netG)._last_fusion_main
     loss = model._compute_fusion_aux_loss(is_phase1=True)
     assert loss.item() == 0.0
 
 
-def test_fusion_aux_loss_center_frame_indexing():
-    """S//2::S indexing must select frames 2,6,10,14,18,22 for S=4."""
+def test_fusion_aux_loss_reads_last_fusion_main_only():
     from models.model_plain import ModelPlain
-    model = ModelPlain(_make_opt())
+
+    model = ModelPlain(_make_opt(passthrough=0.0))
     model.define_loss()
-    fusion_out = torch.zeros(1, 24, 3, 8, 8)
-    fusion_out[:, 2::4, :, :, :] = 1.0   # center frames = 1.0
-    _inject_fusion_hook(model, fusion_out, spike_bins=4)
-    model.H = torch.ones(1, 6, 3, 8, 8)  # GT = 1.0
+
+    bare = model.get_bare_model(model.netG)
+    bare._last_fusion_main = torch.ones(1, 6, 3, 8, 8)
+    bare._last_fusion_exec = torch.zeros(1, 24, 3, 8, 8)
+    bare._last_fusion_aux = torch.zeros(1, 24, 3, 8, 8)
+    bare._last_fusion_meta = {"frame_contract": "expanded"}
+    bare._last_spike_bins = 4
+    model.H = torch.ones(1, 6, 3, 8, 8)
+    model.L = torch.zeros(1, 6, 7, 8, 8)
+
     loss = model._compute_fusion_aux_loss(is_phase1=True)
-    # fusion_center == GT == 1.0 → Charbonnier loss at floor (sqrt(eps) per element)
-    # floor = (aux_weight + pass_weight) * sqrt(eps) = 1.2 * sqrt(1e-6) ≈ 0.0012
     assert loss.item() < 0.002
+
+
+def test_fusion_aux_loss_rejects_time_mismatch_in_last_fusion_main():
+    from models.model_plain import ModelPlain
+
+    model = ModelPlain(_make_opt(passthrough=0.0))
+    model.define_loss()
+
+    bare = model.get_bare_model(model.netG)
+    bare._last_fusion_main = torch.zeros(1, 5, 3, 8, 8)
+    bare._last_fusion_exec = torch.zeros(1, 20, 3, 8, 8)
+    bare._last_fusion_aux = None
+    bare._last_fusion_meta = {"frame_contract": "expanded"}
+    bare._last_spike_bins = 4
+    model.H = torch.zeros(1, 6, 3, 8, 8)
+    model.L = torch.zeros(1, 6, 7, 8, 8)
+
+    with pytest.raises(ValueError, match="Fusion aux loss expected canonical main timeline"):
+        model._compute_fusion_aux_loss(is_phase1=True)
