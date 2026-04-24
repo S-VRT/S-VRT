@@ -4,81 +4,89 @@
 
 ## Summary
 
-Refactor early fusion so the wrapper, not the training loop, owns frame packaging and output-shape semantics.
+Refactor early fusion so the wrapper, not the training loop, owns frame packaging and time-axis semantics.
 
-The new early-fusion contract is a dual-output interface:
+The early-fusion wrapper should expose three distinct outputs:
 
-- `fused_main`: canonical fused frames with shape `[B, N, C, H, W]`
-- `aux_view`: optional operator-specific auxiliary view, commonly `[B, N*S, C, H, W]`
-- `meta`: lightweight metadata describing the contract and frame semantics
+- `fused_main`: canonical supervision view with shape `[B, N, C, H, W]`
+- `backbone_view`: execution view consumed by downstream flow/VRT backbone, with shape `[B, T_exec, C, H, W]`
+- `aux_view`: optional analysis/debug view
+- `meta`: lightweight metadata describing how the wrapper derived those views
 
-This design keeps `mamba` as a temporal fusion operator while preserving existing early-fusion schemes that still depend on expanded `N*S` behavior.
+This design keeps `mamba` as a temporal fusion operator, preserves existing `N*S`-based early-fusion operators, and removes shape guessing from loss code.
 
 ## Problem Statement
 
-Current early fusion mixes three responsibilities across multiple layers:
+Current early fusion mixes three different concerns:
 
-1. Operator-specific frame packaging
-2. Main training supervision semantics
-3. Debug and visualization semantics
+1. How operator inputs are packaged
+2. Which tensor is supervised against GT
+3. Which tensor drives downstream execution
 
 That coupling caused the current `mamba` instability:
 
-- `mamba` produces a collapsed `[B, N, 3, H, W]` output
-- phase-1 fusion aux loss historically assumed expanded `[B, N*S, 3, H, W]`
-- training code inferred semantics from tensor shape and slicing rules
-- when the assumption was wrong, the loss path silently degraded into incorrect supervision
+- `mamba` naturally outputs a collapsed `[B, N, 3, H, W]` tensor
+- phase-1 aux loss historically assumed an expanded `[B, N*S, 3, H, W]` tensor
+- VRT forward and loss code inferred tensor meaning from shape and slicing conventions
+- when those assumptions diverged, supervision semantics became incorrect
 
-The root architectural issue is not only the `mamba` implementation. The actual problem is that the training path has no explicit contract for what fusion returns.
+There is also a second architectural constraint:
+
+- existing expanded early-fusion operators do not merely expose `N*S` for debug
+- they use the expanded time axis as part of the actual downstream execution path
+
+Therefore the correct solution is not “everything becomes `N`”. The correct solution is to separate supervision time axis from execution time axis.
 
 ## Goals
 
 1. Preserve `mamba` as a temporal fusion operator.
-2. Make main training supervision shape-invariant and explicit.
-3. Move frame packaging and reduction into the fusion wrapper.
-4. Preserve existing early-fusion operators that rely on expanded `N*S` semantics.
-5. Keep debug and visualization able to inspect expanded or operator-specific intermediate views.
+2. Make fusion supervision explicitly operate on canonical `N` frames.
+3. Preserve existing expanded early-fusion operators whose execution path relies on `N*S`.
+4. Move frame packaging, reduction, and contract declaration into the wrapper.
+5. Keep existing config files valid by default.
 
 ## Non-Goals
 
-1. No redesign of middle fusion or hybrid fusion semantics in this change.
+1. No redesign of middle or hybrid fusion in this change.
 2. No mandatory rewrite of existing expanded operators like `gated`, `concat`, or `pase`.
-3. No change to dataset-side spike packaging contract (`rgb[N]`, `spike[N,S]` remains the input).
-4. No redesign of phase-2 LoRA or full VRT restoration behavior beyond consuming the new wrapper outputs.
+3. No dataset-side change to the current input contract `rgb[B,N,3,H,W]` + `spike[B,N,S,H,W]`.
+4. No required config migration for existing experiment JSON files.
 
-## Design Overview
+## Core Design
 
-### 1. Canonical Wrapper Output
+### 1. Separate Supervision View from Execution View
 
-Early fusion wrapper returns a structured result instead of a bare tensor.
-
-Canonical fields:
+The wrapper must return semantically distinct tensors:
 
 ```python
 {
-    "fused_main": Tensor,   # [B, N, C, H, W]
+    "fused_main": Tensor,      # [B, N, C, H, W]
+    "backbone_view": Tensor,   # [B, T_exec, C, H, W]
     "aux_view": Tensor | None,
     "meta": {
         "operator_name": str,
-        "frame_contract": str,   # "expanded" | "collapsed"
+        "frame_contract": str,        # "expanded" | "collapsed"
         "spike_bins": int,
-        "main_steps": int,
+        "main_steps": int,            # N
+        "exec_steps": int,            # T_exec
         "aux_steps": int | None,
+        "main_from_exec_rule": str | None,
     },
 }
 ```
 
 Rules:
 
-- `fused_main` is always the only tensor used by main training and backbone ingress.
-- `aux_view` is optional and never required for correctness of training.
-- `meta` carries explicit semantics so downstream code never infers meaning from shape alone.
+- `fused_main` is the only tensor used for fusion supervision, metrics, and default debug view.
+- `backbone_view` is the only tensor used for downstream flow estimation and VRT backbone execution.
+- `aux_view` is optional and intended for analysis or visualization only.
+- downstream code must never infer semantics from tensor shape alone when `meta` already declares them.
 
 ### 2. Two Early-Fusion Contracts
 
 #### Collapsed Contract
 
-Used by operators whose natural output is already `[B, N, C, H, W]`.
+Used by operators whose natural execution view already matches the canonical RGB frame axis.
 
 Initial target:
 
@@ -87,15 +95,16 @@ Initial target:
 Behavior:
 
 - operator receives `rgb[B,N,3,H,W]` and `spike[B,N,S,H,W]`
-- operator performs per-frame sub-sequence temporal modeling internally
+- operator internally models subframe dynamics
 - wrapper returns:
-  - `fused_main = operator_output`
-  - `aux_view = optional operator-specific diagnostic tensor or None`
+  - `fused_main[B,N,C,H,W]`
+  - `backbone_view[B,N,C,H,W]`
+  - `aux_view=None` unless operator later chooses to expose diagnostics
   - `meta.frame_contract = "collapsed"`
 
 #### Expanded Contract
 
-Used by operators that naturally work on subframe-expanded time axes.
+Used by operators whose downstream execution path naturally works on expanded time axes.
 
 Initial targets:
 
@@ -105,76 +114,85 @@ Initial targets:
 
 Behavior:
 
-- wrapper prepares the operator input in its expected expanded form
-- operator may continue to compute over `N*S`
-- wrapper reduces the expanded result into canonical `fused_main[B,N,C,H,W]`
-- wrapper preserves the original expanded tensor in `aux_view`
-- `meta.frame_contract = "expanded"`
+- wrapper prepares operator-facing expanded inputs
+- operator computes its natural expanded output on `N*S`
+- wrapper returns:
+  - `backbone_view[B,N*S,C,H,W]`
+  - `fused_main[B,N,C,H,W]`, derived explicitly from `backbone_view`
+  - `aux_view`, optionally equal to `backbone_view` when useful for debug
+  - `meta.frame_contract = "expanded"`
 
-This preserves existing `N*S`-dependent schemes without forcing them to adopt collapsed semantics.
+This preserves the current operational meaning of expanded early fusion while giving training a stable canonical supervision tensor.
 
 ## Wrapper Responsibilities
 
-The early-fusion wrapper becomes the single contract layer for:
+The early wrapper becomes the single contract layer for:
 
 1. Input packaging
-2. Output reduction
-3. Metadata declaration
+2. Execution-view normalization
+3. Canonical supervision-view derivation
+4. Metadata declaration
 
 ### Input Packaging
 
-Wrapper input remains:
+Wrapper input remains unchanged:
 
 - `rgb[B,N,3,H,W]`
 - `spike[B,N,S,H,W]`
 
-Packaging behavior depends on `frame_contract`:
+Packaging depends on `frame_contract`:
 
-- `collapsed`: pass original `N` timeline and `S` subframes directly
-- `expanded`: construct the operator-facing expanded timeline or equivalent flattened view
+- `collapsed`: pass original `N` timeline and per-frame `S` subframes directly
+- `expanded`: construct expanded operator-facing views on `N*S`
 
-Main training code does not know or care which path was used.
+### Execution View
 
-### Output Reduction
+Wrapper must expose the tensor that downstream flow/VRT backbone should actually execute on:
 
-Wrapper must guarantee canonical `fused_main[B,N,C,H,W]`.
+- `collapsed`: `backbone_view = operator_output`
+- `expanded`: `backbone_view = expanded_operator_output`
 
-Reduction rules:
+This makes execution semantics explicit instead of piggybacking on whichever tensor happened to come out of fusion.
 
-- `collapsed`: identity reduction
-- `expanded`: explicit wrapper-owned reduction from `N*S` to `N`
+### Canonical Supervision View
 
-The reduction strategy must be explicit and deterministic. It cannot be encoded as hidden slicing logic in training loss code.
+Wrapper must also expose a canonical `fused_main[B,N,C,H,W]`.
 
-Initial reduction rule for compatibility:
+Derivation rules:
 
-- preserve the current “center subframe per RGB frame” behavior for expanded early-fusion outputs
+- `collapsed`: identity (`fused_main = backbone_view`)
+- `expanded`: reduce `backbone_view[N*S]` to canonical `N`
 
-That rule moves out of `ModelPlain` and into wrapper-owned reduction logic.
+The reduction policy must be explicit and owned by the wrapper. It must not live in the training loss code.
+
+Initial compatibility reduction:
+
+- preserve the current center-subframe-per-RGB-frame rule
+- encode that in `meta.main_from_exec_rule = "center_subframe"`
 
 ### Metadata
 
-Wrapper emits `meta` so downstream code can reason explicitly:
+Wrapper emits metadata so downstream code can reason explicitly:
 
 - `operator_name`
 - `frame_contract`
 - `spike_bins`
 - `main_steps`
+- `exec_steps`
 - `aux_steps`
-- optional fields later if needed, such as `reduction_mode`
+- `main_from_exec_rule`
 
 ## Training Path Changes
 
 ### Main Principle
 
-Training must consume only `fused_main`.
+Supervision and execution intentionally use different views.
 
-This applies to:
+Training rules:
 
-- phase-1 fusion-only fast path
-- full VRT backbone ingress
-- flow alignment time-axis selection
-- phase-1 and phase-2 fusion auxiliary losses
+- phase-1 fusion aux loss reads only `fused_main`
+- phase-2 fusion aux loss reads only `fused_main`
+- downstream flow and VRT backbone execute only on `backbone_view`
 
 ### Phase-1 Fusion Aux Loss
 
@@ -185,24 +203,21 @@ Phase-1 supervision becomes:
 
 This removes:
 
-- shape guessing
-- `S // 2 :: S` slicing in the loss path
-- accidental broadcasting caused by mismatched time dimensions
+- shape guessing in loss code
+- implicit `S // 2 :: S` slicing in `ModelPlain`
+- silent broadcasting caused by incompatible time dimensions
 
 ### Cached Fusion Outputs
 
-Replace ambiguous cached state:
-
-- `_last_fusion_out`
-
-With explicit cached state:
+Replace ambiguous cache fields like `_last_fusion_out` with explicit fields:
 
 - `_last_fusion_main`
+- `_last_fusion_exec`
 - `_last_fusion_aux`
 - `_last_fusion_meta`
 - `_last_spike_bins`
 
-Any training or debug code reading fusion intermediates must read one of these explicit fields.
+Any training or debug code reading fusion state must use these fields by semantic purpose.
 
 ## VRT Forward Integration
 
@@ -211,43 +226,70 @@ Any training or debug code reading fusion intermediates must read one of these e
 For early fusion:
 
 1. call wrapper
-2. store explicit cached outputs
-3. feed only `fused_main` into downstream flow and backbone logic
+2. cache explicit main/exec/aux/meta outputs
+3. pass only `backbone_view` into flow estimation and downstream backbone logic
 
-Flow alignment behavior:
+This is the key compatibility rule:
 
-- flow path should align with `fused_main.size(1)` only
-- expanded `aux_view` is never used as the operational time axis for backbone execution
-
-This ensures backbone and restoration path always operate on the canonical `N` timeline.
+- `fused_main` is not the downstream execution tensor for expanded operators
+- `backbone_view` preserves the original `N*S` execution semantics where needed
 
 ## Debug and Visualization
 
-Debug remains able to inspect fine-grained views without polluting training semantics.
+Debug should default to the canonical supervision view:
 
-Rules:
+- default debug target: `fused_main`
+- when requested, expanded operators may also dump `backbone_view` or `aux_view`
+- dump naming/indexing must rely on `meta.frame_contract` and `meta.main_from_exec_rule`, not pure shape inference
 
-- default debug target is `fused_main`
-- when `aux_view` exists and debug config requests subframe inspection, dump `aux_view`
-- naming and indexing rules should use `meta.frame_contract` instead of inferring from tensor shape
-
-This preserves visibility into expanded early fusion while keeping training semantics stable.
+This keeps debug informative without contaminating training semantics.
 
 ## Compatibility Strategy
 
-Compatibility requirement: do not break existing `N*S`-dependent early-fusion schemes.
+Compatibility requirement: existing `N*S`-based early-fusion schemes must keep their downstream behavior.
 
 Chosen strategy:
 
-- explicit split between `expanded` and `collapsed` early contracts
-- wrapper normalizes both into the same dual-output result
-- old expanded operators keep their natural behavior
-- new collapsed operators like `mamba` do not need to fake `N*S`
+- `expanded` and `collapsed` contracts coexist explicitly
+- wrapper normalizes both into the same structured result
+- `expanded` operators retain expanded execution semantics through `backbone_view`
+- `collapsed` operators like `mamba` operate naturally on `N`
 
-This avoids the two common failure modes:
+This avoids both bad extremes:
 
-1. forcing old operators into an unnatural `N` output
-2. forcing collapsed operators to emit synthetic `N*S` tensors just to satisfy historical training code
+1. forcing old operators to collapse to `N` and changing their behavior
+2. forcing collapsed operators to emit fake `N*S` tensors just to satisfy historical loss code
+
+## Configuration Strategy
+
+This refactor should use config-compatible defaults.
+
+### Existing Configs Must Continue to Work
+
+These existing fields remain valid and unchanged:
+
+- `fusion.operator`
+- `fusion.placement`
+- `fusion.mode`
+- `fusion.out_chans`
+- `fusion.operator_params`
+- existing debug switches
+
+The wrapper should infer behavior from operator defaults:
+
+- `mamba` defaults to `frame_contract = "collapsed"`
+- `gated`, `concat`, and `pase` default to `frame_contract = "expanded"`
+
+### New Config Must Be Optional
+
+New config should only be added for special override cases, not required for existing runs.
+
+Optional future fields may include:
+
+- `fusion.wrapper.main_from_exec`
+- `fusion.debug.view`
+
+But default behavior should be fully derivable from operator type and wrapper rules, so existing experiment JSON files remain usable without migration.
 
 ## Operator Expectations
 
@@ -257,35 +299,38 @@ This avoids the two common failure modes:
 
 Desired semantics:
 
-- operate over the `S` subframes for each RGB frame
-- return `fused_main[B,N,3,H,W]`
-- optionally expose intermediate diagnostics through `aux_view` or metadata later
+- operate over `S` subframes for each RGB frame
+- output canonical execution view on `N`
+- optionally expose later diagnostics through `aux_view`
 
-No training code may assume `mamba` outputs expanded `N*S`.
+`mamba` must never be forced to masquerade as an expanded `N*S` operator.
 
 ### Existing Expanded Operators
 
-`gated`, `concat`, and `pase` continue as expanded-contract early operators unless explicitly migrated later.
+`gated`, `concat`, and `pase` remain expanded-contract early operators unless deliberately migrated later.
 
 Desired semantics:
 
 - keep current operator logic as much as possible
-- wrapper reduces their expanded output to canonical `fused_main`
-- debug can still inspect their full `aux_view`
+- preserve expanded downstream execution through `backbone_view`
+- derive canonical `fused_main` in wrapper for supervision
+- expose expanded view for debug when needed
 
 ## Testing Strategy
 
-### Unit Tests
+### Wrapper Unit Tests
 
-Add contract-focused wrapper tests covering:
+Add wrapper tests that verify:
 
 1. collapsed operator returns:
    - `fused_main[N]`
+   - `backbone_view[N]`
    - `aux_view` optional
    - `meta.frame_contract == "collapsed"`
 2. expanded operator returns:
    - `fused_main[N]`
-   - `aux_view[N*S]`
+   - `backbone_view[N*S]`
+   - `aux_view` optional or equal to expanded execution view
    - `meta.frame_contract == "expanded"`
 
 ### ModelPlain / Loss Tests
@@ -293,8 +338,8 @@ Add contract-focused wrapper tests covering:
 Add or update tests so phase-1 aux loss:
 
 - consumes only `_last_fusion_main`
-- ignores `aux_view` for supervision
-- fails loudly on incompatible shapes instead of broadcasting
+- rejects time mismatch in `_last_fusion_main`
+- never depends on expanded slicing rules
 
 ### VRT Integration Tests
 
@@ -302,63 +347,65 @@ Add or update tests to verify:
 
 1. early expanded operator:
    - cached main output is `N`
-   - cached aux output is `N*S`
+   - cached exec output is `N*S`
+   - downstream execution follows exec steps
 2. early collapsed operator:
    - cached main output is `N`
-   - cached aux output is optional
-3. downstream flow and backbone path follow `fused_main` timeline only
+   - cached exec output is `N`
+3. downstream flow alignment follows `backbone_view` timeline, not `fused_main`
 
-### Regression Tests
+### Debug Tests
 
-Preserve existing behavior for current expanded early operators:
+Add tests to verify:
 
-- no operator-level regression in expected output path
-- no loss regression from historical expanded schemes
+- debug defaults to `fused_main`
+- expanded views are dumped only when explicitly requested
 
 ## Risks
 
-### Risk 1: Hidden coupling to `_last_fusion_out`
+### Risk 1: Hidden coupling to legacy cache names
 
-Other code may still read the old field.
+Some code may still read `_last_fusion_out`.
 
 Mitigation:
 
 - replace all readers in this refactor
-- add focused tests for cached fusion state names and shapes
+- add tests for new cache-field expectations
 
-### Risk 2: Wrapper reduction policy ambiguity
+### Risk 2: Wrapper reduction ambiguity
 
-Expanded outputs still need a deterministic `N*S -> N` policy.
-
-Mitigation:
-
-- make reduction explicit in wrapper metadata and implementation
-- keep current center-subframe rule initially for compatibility
-
-### Risk 3: Debug tooling may assume tensor-only fusion outputs
-
-Current debug code may expect a bare tensor and infer frame semantics.
+Expanded outputs still require deterministic `N*S -> N` derivation.
 
 Mitigation:
 
-- adapt debug entry points to explicit cached fields
-- route subframe-specific dumps through `aux_view`
+- make the rule explicit in wrapper implementation and metadata
+- keep center-subframe reduction initially for compatibility
+
+### Risk 3: Config drift
+
+The refactor could accidentally make new wrapper config mandatory.
+
+Mitigation:
+
+- derive defaults from operator contract
+- keep new config override-only and optional
 
 ## Migration Plan
 
-1. Introduce a structured dual-output result for early fusion wrapper.
-2. Teach wrapper to normalize `expanded` and `collapsed` operators.
-3. Update `VRT.forward()` and phase-1 fast path to cache explicit main/aux/meta outputs.
-4. Update fusion aux loss to consume only canonical `fused_main`.
-5. Update debug and visualization to use `aux_view` when requested.
-6. Update tests to encode the new contract.
+1. Introduce structured wrapper output with `fused_main`, `backbone_view`, `aux_view`, and `meta`.
+2. Encode explicit `expanded` / `collapsed` operator contracts.
+3. Update VRT to cache explicit main/exec/aux/meta outputs and execute on `backbone_view`.
+4. Update phase-1 and phase-2 fusion supervision to read only `fused_main`.
+5. Update debug tooling to default to `fused_main` and optionally expose expanded execution views.
+6. Preserve config compatibility by deriving default wrapper behavior from operator type.
+7. Lock the new semantics with focused wrapper, loss, and integration tests.
 
 ## Expected Outcome
 
 After this refactor:
 
 - `mamba` is trained under the correct `N`-frame supervision contract
-- existing `N*S`-based early-fusion operators still work
-- wrapper owns frame packaging and reduction
-- training code becomes contract-driven instead of shape-guessing
-- debug retains access to expanded intermediate views without contaminating main training logic
+- existing `N*S`-based expanded operators keep their downstream execution semantics
+- wrapper owns frame packaging and time-axis normalization
+- training code becomes semantic and contract-driven instead of shape-guessing
+- config files remain compatible by default
