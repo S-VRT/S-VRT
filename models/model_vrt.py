@@ -227,6 +227,8 @@ class ModelVRT(ModelPlain):
         else:
             lq_rgb = lq[:, :, :3, :, :]
             lq_spike = lq[:, :, 3:, :, :]
+        gt = batch.get('H')
+        lq_paths = batch.get('lq_path')
 
         # Full-frame debug should preserve spatial resolution, but it does not need
         # to re-run the fusion adapter on an entire long validation clip when the
@@ -236,11 +238,9 @@ class ModelVRT(ModelPlain):
             lq_rgb = lq_rgb[:, :max_frames, ...]
             lq_spike = lq_spike[:, :max_frames, ...]
 
-            gt = batch.get('H')
             if isinstance(gt, torch.Tensor) and gt.ndim == 5 and gt.size(1) > 0:
-                batch['H'] = gt[:, :min(gt.size(1), max_frames), ...]
+                gt = gt[:, :min(gt.size(1), max_frames), ...]
 
-            lq_paths = batch.get('lq_path')
             if isinstance(lq_paths, list):
                 trimmed_paths = []
                 for clip_paths in lq_paths:
@@ -248,7 +248,7 @@ class ModelVRT(ModelPlain):
                         trimmed_paths.append(clip_paths[:max_frames])
                     else:
                         trimmed_paths.append(clip_paths)
-                batch['lq_path'] = trimmed_paths
+                lq_paths = trimmed_paths
 
         cpu_adapter = copy.deepcopy(fusion_adapter).cpu().eval()
         with torch.no_grad():
@@ -262,9 +262,9 @@ class ModelVRT(ModelPlain):
             fusion_meta=fusion_result["meta"],
             current_step=current_step,
             folder=batch.get('folder'),
-            gt=batch.get('H'),
+            gt=gt,
             rank=self.opt.get('rank', 0),
-            lq_paths=batch.get('lq_path'),
+            lq_paths=lq_paths,
         )
 
     # ----------------------------------------

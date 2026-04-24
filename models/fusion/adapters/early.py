@@ -100,6 +100,11 @@ class EarlyFusionAdapter(nn.Module):
         frame_contract = str(getattr(self.operator, "frame_contract", self.frame_contract)).strip().lower()
         if frame_contract == "collapsed":
             backbone_view = self.operator(rgb, spike)
+            if backbone_view.dim() != 5 or backbone_view.size(1) != steps:
+                raise ValueError(
+                    "Collapsed early fusion operators must return [B, N, C, H, W] "
+                    f"with N={steps}, got {tuple(backbone_view.shape)}."
+                )
             return {
                 "fused_main": backbone_view,
                 "backbone_view": backbone_view,
@@ -122,6 +127,12 @@ class EarlyFusionAdapter(nn.Module):
         rgb_rep = rgb_rep.reshape(bsz, steps * spike_steps_per_frame, rgb_chans, height, width)
         spk = spike.reshape(bsz, steps * spike_steps_per_frame, 1, height, width)
         backbone_view = self.operator(rgb_rep, spk)
+        expected_exec_steps = steps * spike_steps_per_frame
+        if backbone_view.dim() != 5 or backbone_view.size(1) != expected_exec_steps:
+            raise ValueError(
+                "Expanded early fusion operators must return [B, N*S, C, H, W] "
+                f"with N*S={expected_exec_steps}, got {tuple(backbone_view.shape)}."
+            )
         fused_main = self._reduce_expanded_exec_to_main(backbone_view, spike_steps_per_frame)
         return {
             "fused_main": fused_main,

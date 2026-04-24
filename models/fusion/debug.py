@@ -60,7 +60,10 @@ class FusionDebugDumper:
             return
         tensor = None
         if isinstance(output, dict):
-            tensor = output.get("fused_main", None)
+            if self.source_view == "exec":
+                tensor = output.get("backbone_view", None)
+            if tensor is None:
+                tensor = output.get("fused_main", None)
         elif isinstance(output, (tuple, list)):
             tensor = output[0]
         else:
