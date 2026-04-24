@@ -194,3 +194,28 @@ def test_model_plain_optimizer_keeps_frozen_mamba_params_for_later_unfreeze():
     }
     frozen_param_ids = {id(param) for param in model.netG.fusion_operator.rgb_context_encoder.parameters()}
     assert frozen_param_ids <= optimizer_param_ids
+
+
+def test_model_plain_current_log_includes_selected_fusion_diagnostics():
+    from collections import OrderedDict
+    from models.model_plain import ModelPlain
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.log_dict = OrderedDict([("G_loss", 1.0)])
+    model.timer = type("TimerStub", (), {"get_current_timings": staticmethod(lambda: {})})()
+
+    model._record_fusion_diagnostics_to_log(
+        {
+            "gate_mean": 0.25,
+            "effective_update_norm": 0.01,
+            "delta_norm": 0.02,
+            "warmup_stage": "token_mixer",
+            "token_norm": 1.5,
+        }
+    )
+
+    log = model.current_log()
+    assert log["fusion_gate_mean"] == 0.25
+    assert log["fusion_effective_update_norm"] == 0.01
+    assert log["fusion_delta_norm"] == 0.02
+    assert log["fusion_warmup_stage"] == "token_mixer"

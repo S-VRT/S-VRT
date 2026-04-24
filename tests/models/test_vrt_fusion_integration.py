@@ -1049,6 +1049,74 @@ def test_model_vrt_optimize_parameters_switches_mamba_warmup_stage_and_phase2_un
     assert bare.backbone_base.weight.requires_grad is False
 
 
+def test_vrt_collapsed_mamba_meta_merges_operator_diagnostics(monkeypatch):
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[6, 8, 8],
+        window_size=[6, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt={
+            "netG": {
+                "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 7},
+                "fusion": {
+                    "placement": "early",
+                    "operator": "mamba",
+                    "out_chans": 3,
+                    "operator_params": {"token_dim": 8, "token_stride": 2, "num_layers": 1},
+                    "early": {"expand_to_full_t": False},
+                },
+                "output_mode": "restoration",
+            }
+        },
+    )
+
+    monkeypatch.setattr(model.fusion_adapter.operator, "forward", lambda rgb, spike: rgb)
+    monkeypatch.setattr(
+        model.fusion_adapter.operator,
+        "diagnostics",
+        lambda: {
+            "token_norm": 1.0,
+            "mamba_norm": 2.0,
+            "delta_norm": 3.0,
+            "gate_mean": 0.25,
+            "effective_update_norm": 0.0,
+            "warmup_stage": "token_mixer",
+        },
+    )
+
+    dummy_flows = [
+        torch.zeros(1, 5, 2, 8, 8),
+        torch.zeros(1, 5, 2, 4, 4),
+        torch.zeros(1, 5, 2, 2, 2),
+        torch.zeros(1, 5, 2, 1, 1),
+    ]
+
+    monkeypatch.setattr(model, "get_flows", lambda _x, flow_spike=None: (dummy_flows, dummy_flows))
+    monkeypatch.setattr(
+        model,
+        "get_aligned_image_2frames",
+        lambda _x, _fb, _ff: [torch.zeros(1, 6, model.backbone_in_chans * 4, 8, 8)] * 2,
+    )
+    monkeypatch.setattr(model, "forward_features", lambda _x, *_args, **_kwargs: torch.zeros_like(_x))
+
+    x = torch.randn(1, 6, 7, 8, 8)
+    with torch.no_grad():
+        _ = model(x)
+
+    assert model._last_fusion_meta["token_norm"] == 1.0
+    assert model._last_fusion_meta["mamba_norm"] == 2.0
+    assert model._last_fusion_meta["gate_mean"] == 0.25
+    assert model._last_fusion_meta["warmup_stage"] == "token_mixer"
+
+
 def test_full_t_hybrid_rejects_non_spikecv_tfp_from_test_dataset():
     opt = {
         "netG": {

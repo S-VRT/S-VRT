@@ -414,6 +414,15 @@ class ModelPlain(ModelBase):
         operator.set_warmup_stage(stage)
         return stage
 
+    def _record_fusion_diagnostics_to_log(self, fusion_meta) -> None:
+        if not isinstance(fusion_meta, dict):
+            return
+        for key in ("token_norm", "mamba_norm", "delta_norm", "gate_mean", "effective_update_norm"):
+            if key in fusion_meta:
+                self.log_dict[f"fusion_{key}"] = float(fusion_meta[key])
+        if "warmup_stage" in fusion_meta:
+            self.log_dict["fusion_warmup_stage"] = str(fusion_meta["warmup_stage"])
+
     def feed_data(self, data, need_H=True, current_step=None):
         with self.timer.timer('data_load'):
             self.batch_folder = data.get('folder')
@@ -584,6 +593,9 @@ class ModelPlain(ModelBase):
 
         # self.log_dict['G_loss'] = G_loss.item()/self.E.size()[0]  # if `reduction='sum'`
         self.log_dict['G_loss'] = G_loss.item()
+
+        vrt = self.get_bare_model(self.netG)
+        self._record_fusion_diagnostics_to_log(getattr(vrt, "_last_fusion_meta", None))
 
         if self.opt_train['E_decay'] > 0:
             with self.timer.timer('update_E'):

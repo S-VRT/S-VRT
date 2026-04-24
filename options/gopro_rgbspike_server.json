@@ -359,19 +359,25 @@
       "operator": "mamba",
       "mode": "replace",
       "out_chans": 3,
-      "operator_params": {},
+      "operator_params": {
+        "token_dim": 48,
+        "token_stride": 4,
+        "d_state": 32,
+        "d_conv": 4,
+        "expand": 2,
+        "num_layers": 3,
+        "alpha_init": 0.05,
+        "gate_bias_init": -2.0,
+        "enable_diagnostics": true
+      },
       "debug": {
         "enable": true,
         "save_images": true,
         "trigger": "phase1_last",
-        "source": "val_full_frame",
-        "full_frame": true,
-        "subdir": "fusion_phase1_last_full",
+        "source": "train_batch",
+        "subdir": "fusion_phase1_last_train",
         "max_batches": 1,
-        "max_frames": 24,
-        "val_overrides": {
-          "size_patch_testing": 0
-        }
+        "max_frames": 24
       }
     }
     ,
@@ -579,6 +585,13 @@
     "phase2_fusion_aux_loss_weight": 0.2
     ,
     "fusion_passthrough_loss_weight": 0.2
+    ,
+    "fusion_warmup": {
+      "head_only_iters": 2000,
+      "passthrough_weight_start": 0.2,
+      "passthrough_weight_end": 0.0,
+      "update_penalty_weight": 0.01
+    }
     // Charbonnier 损失的 epsilon 参数：用于平滑 L1 损失的小常数
     ,
     "G_charbonnier_eps": 1e-6
