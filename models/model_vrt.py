@@ -216,6 +216,28 @@ class ModelVRT(ModelPlain):
             lq_rgb = lq[:, :, :3, :, :]
             lq_spike = lq[:, :, 3:, :, :]
 
+        # Full-frame debug should preserve spatial resolution, but it does not need
+        # to re-run the fusion adapter on an entire long validation clip when the
+        # dumper is only configured to save a limited number of frames.
+        max_frames = getattr(dumper, 'max_frames', None)
+        if max_frames is not None and lq_rgb.ndim == 5 and lq_rgb.size(1) > max_frames:
+            lq_rgb = lq_rgb[:, :max_frames, ...]
+            lq_spike = lq_spike[:, :max_frames, ...]
+
+            gt = batch.get('H')
+            if isinstance(gt, torch.Tensor) and gt.ndim == 5 and gt.size(1) > 0:
+                batch['H'] = gt[:, :min(gt.size(1), max_frames), ...]
+
+            lq_paths = batch.get('lq_path')
+            if isinstance(lq_paths, list):
+                trimmed_paths = []
+                for clip_paths in lq_paths:
+                    if isinstance(clip_paths, list):
+                        trimmed_paths.append(clip_paths[:max_frames])
+                    else:
+                        trimmed_paths.append(clip_paths)
+                batch['lq_path'] = trimmed_paths
+
         cpu_adapter = copy.deepcopy(fusion_adapter).cpu().eval()
         with torch.no_grad():
             fused = cpu_adapter(
