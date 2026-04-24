@@ -10,15 +10,22 @@ import cv2
 import utils.utils_video as utils_video
 from data.spike_recc import SpikeStream, voxelize_spikes_tfp
 from data.spike_recc.middle_tfp.reconstructor import MiddleTFPReconstructor
-from data.spike_recc.snn.reconstructor import SNNReconstructor
+from data.spike_recc.encoding25 import (
+    load_encoding25_artifact_with_shape,
+    validate_encoding25_tensor,
+    validate_subframes_tensor,
+)
 
 
 class TrainDatasetRGBSpike(data.Dataset):
     """Video dataset for training recurrent networks with RGB + Spike data.
 
     This dataset extends TrainDataset to support loading both
-    RGB frames and corresponding Spike camera data, then concatenates them
-    as input channels.
+    RGB frames and corresponding Spike camera data, with configurable
+    input packing:
+      - concat: return combined tensor in key `L`
+      - dual: return split tensors in keys `L_rgb` and `L_spike`
+        and optionally keep legacy `L` when `keep_legacy_l=True`
 
     The keys are generated from a meta info txt file.
     basicsr/data/meta_info/meta_info_XXX_GT.txt
@@ -59,7 +66,12 @@ class TrainDatasetRGBSpike(data.Dataset):
             
             spike_h (int): Spike camera height. Default: 250.
             spike_w (int): Spike camera width. Default: 400.
-            spike_channels (int): Number of spike channels after voxelization. Default: 1.
+            spike_channels (int): Legacy alias for spike reconstruction bins.
+                Prefer spike.reconstruction.num_bins when configuring new experiments.
+            input_pack_mode (str): Input packing mode. One of ['concat', 'dual'].
+                Default: 'concat'.
+            keep_legacy_l (bool): Legacy alias for compat.keep_legacy_L.
+                Default: True.
             spike_flipud (bool): Whether to flip spike data vertically. Default: True.
             tfp_half_win_length (int): Half window length fed into TFP. Default: 20.
             tfp_device (str): Torch device string for TFP reconstruction. Default: 'cpu'.
@@ -74,19 +86,73 @@ class TrainDatasetRGBSpike(data.Dataset):
         self.gt_root, self.lq_root = Path(opt['dataroot_gt']), Path(opt['dataroot_lq'])
         self.spike_root = Path(opt['dataroot_spike'])
         self.filename_tmpl = opt.get('filename_tmpl', '08d')
+        self._parse_spike_flow_config(opt, optical_flow_module=self._flow_module_name_from_opt(opt))
         self.filename_ext = opt.get('filename_ext', 'png')
         self.num_frame = opt['num_frame']
 
         # Spike configuration
         self.spike_h = opt.get('spike_h', 360)
         self.spike_w = opt.get('spike_w', 640)
-        self.spike_channels = opt.get('spike_channels', 4) # Default updated to 4 for TFP
+        spike_cfg = opt.get('spike', {}) if isinstance(opt.get('spike', {}), dict) else {}
+        spike_precomputed_cfg = spike_cfg.get('precomputed', {}) if isinstance(spike_cfg.get('precomputed', {}), dict) else {}
+        compat_cfg = opt.get('compat', {}) if isinstance(opt.get('compat', {}), dict) else {}
+        spike_reconstruction_nested = spike_cfg.get('reconstruction', {})
+        if not isinstance(spike_reconstruction_nested, dict):
+            spike_reconstruction_nested = {}
+        nested_num_bins = spike_reconstruction_nested.get('num_bins', None)
+        legacy_reconstruction = opt.get('spike_reconstruction', None)
+        legacy_reconstruction_cfg = legacy_reconstruction if isinstance(legacy_reconstruction, dict) else {}
+        if spike_reconstruction_nested and legacy_reconstruction is not None:
+            nested_type = str(spike_reconstruction_nested.get('type', 'spikecv_tfp')).strip().lower()
+            if legacy_reconstruction_cfg:
+                legacy_type = str(legacy_reconstruction_cfg.get('type', 'spikecv_tfp')).strip().lower()
+            else:
+                legacy_type = str(legacy_reconstruction).strip().lower()
+            if nested_type != legacy_type:
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] Conflicting reconstruction types: "
+                    f"spike.reconstruction.type={nested_type!r} vs spike_reconstruction={legacy_type!r}."
+                )
+        legacy_middle_center = opt.get('middle_tfp_center', None)
+        if legacy_middle_center is None and legacy_reconstruction_cfg and 'middle_tfp_center' in legacy_reconstruction_cfg:
+            legacy_middle_center = legacy_reconstruction_cfg.get('middle_tfp_center')
+        if spike_reconstruction_nested and legacy_middle_center is not None and 'middle_tfp_center' in spike_reconstruction_nested:
+            nested_center = int(spike_reconstruction_nested['middle_tfp_center'])
+            if nested_center != int(legacy_middle_center):
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] Conflicting middle_tfp_center values: "
+                    f"spike.reconstruction.middle_tfp_center={nested_center} vs "
+                    f"middle_tfp_center={int(legacy_middle_center)}."
+                )
+        default_spike_channels = int(nested_num_bins) if nested_num_bins is not None else 4
+        self.spike_channels = int(opt.get('spike_channels', default_spike_channels))
+        if nested_num_bins is not None and 'spike_channels' in opt and int(opt['spike_channels']) != int(nested_num_bins):
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] Conflicting channel settings: spike_channels={int(opt['spike_channels'])} "
+                f"vs spike.reconstruction.num_bins={int(nested_num_bins)}."
+            )
+        if self.use_encoding25_flow and self.spike_flow_subframes > 1:
+            if self.spike_flow_subframes != self.spike_channels:
+                raise ValueError(
+                    f"spike_flow.subframes ({self.spike_flow_subframes}) must equal "
+                    f"spike_channels ({self.spike_channels}) for early-fusion temporal "
+                    f"axis alignment."
+                )
         self.spike_flipud = opt.get('spike_flipud', True)
         self.tfp_half_win_length = opt.get('tfp_half_win_length', 20)
-        spike_reconstruction_cfg = opt.get('spike_reconstruction', 'spikecv_tfp')
+        self.use_precomputed_spike = bool(spike_precomputed_cfg.get('enable', False))
+        self.precomputed_spike_format = str(spike_precomputed_cfg.get('format', 'npy')).strip().lower()
+        precomputed_root_value = spike_precomputed_cfg.get('root', 'auto')
+        if str(precomputed_root_value).strip().lower() == 'auto':
+            self.precomputed_spike_root = self.spike_root
+        else:
+            self.precomputed_spike_root = Path(precomputed_root_value)
+        spike_reconstruction_cfg = spike_reconstruction_nested or opt.get('spike_reconstruction', 'spikecv_tfp')
         if isinstance(spike_reconstruction_cfg, dict):
             self.spike_reconstruction = str(spike_reconstruction_cfg.get('type', 'spikecv_tfp')).strip().lower()
-            self.middle_tfp_center = int(spike_reconstruction_cfg.get('middle_tfp_center', 44))
+            self.middle_tfp_center = int(
+                spike_reconstruction_cfg.get('middle_tfp_center', opt.get('middle_tfp_center', 44))
+            )
         else:
             self.spike_reconstruction = str(spike_reconstruction_cfg).strip().lower()
             self.middle_tfp_center = int(opt.get('middle_tfp_center', 44))
@@ -114,6 +180,13 @@ class TrainDatasetRGBSpike(data.Dataset):
             if self.spike_channels != 1:
                 self.spike_channels = 1
             snn_cfg = spike_reconstruction_cfg if isinstance(spike_reconstruction_cfg, dict) else {}
+            try:
+                from data.spike_recc.snn.reconstructor import SNNReconstructor
+            except ModuleNotFoundError as exc:
+                raise ModuleNotFoundError(
+                    "[TrainDatasetRGBSpike] spike_reconstruction='snn' requires optional dependency "
+                    "'snntorch'. Install it before using SNN reconstruction."
+                ) from exc
             # Use device from config or fallback to tfp_device
             snn_device = snn_cfg.get('device', self.tfp_device if self.tfp_device else 'cpu')
             self._snn_reconstructor = SNNReconstructor(
@@ -124,8 +197,22 @@ class TrainDatasetRGBSpike(data.Dataset):
             )
         self.rgb_norm_stats = self._build_norm_stats(opt.get('rgb_normalize', None), num_channels=3, preset='imagenet')
         self.spike_norm_stats = self._build_norm_stats(opt.get('spike_normalize', None), num_channels=self.spike_channels)
+        raw_input_pack_mode = opt.get('input_pack_mode', 'concat')
+        if raw_input_pack_mode is None:
+            raw_input_pack_mode = 'concat'
+        normalized_input_pack_mode = str(raw_input_pack_mode).strip().lower()
+        supported_pack_modes = {'concat', 'dual'}
+        if normalized_input_pack_mode not in supported_pack_modes:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] input_pack_mode must be one of {supported_pack_modes}, got '{raw_input_pack_mode}'."
+            )
+        self.input_pack_mode = normalized_input_pack_mode
+        self.keep_legacy_l = bool(compat_cfg.get('keep_legacy_L', opt.get('keep_legacy_l', True)))
+        self._dual_mode = self.input_pack_mode == 'dual'
+        self._precomputed_spike_warned = set()
+        # Raw ingress width remains RGB 3 + spike bins; dual mode may still emit the
+        # concatenated `L` tensor for compatibility when keep_legacy_l=True.
         self.expected_lq_channels = 3 + self.spike_channels
-
         keys = []
         total_num_frames = [] # some clips may not have 100 frames
         start_frames = [] # some clips may not start from 00000
@@ -217,7 +304,8 @@ class TrainDatasetRGBSpike(data.Dataset):
         img_lqs = []
         img_gts = []
         spike_voxels = []
-        
+        flow_spikes = []
+
         img_gt_path_reference = None
         for neighbor in neighbor_list:
             neighbor_key = f'{clip_name}/{neighbor:{self.filename_tmpl}}'
@@ -225,45 +313,94 @@ class TrainDatasetRGBSpike(data.Dataset):
             img_lqs.append(sample['lq'])
             img_gts.append(sample['gt'])
             spike_voxels.append(sample['spike'])
+            if self.use_encoding25_flow:
+                flow_spikes.append(self._load_encoded_flow_spike(clip_name, neighbor))
             img_gt_path_reference = sample['gt_path']
 
-        # randomly crop RGB frames
-        img_gts, img_lqs = utils_video.paired_random_crop(img_gts, img_lqs, self.gt_size, self.scale, img_gt_path_reference)
+        lq_h_orig, lq_w_orig = img_lqs[0].shape[:2]
 
-        # Resize spike voxels to match the cropped RGB size
+        # randomly crop RGB frames
+        img_gts, img_lqs, crop_params = utils_video.paired_random_crop(
+            img_gts, img_lqs, self.gt_size, self.scale, img_gt_path_reference
+        )
+
         cropped_h, cropped_w = img_lqs[0].shape[:2]
+
+        def _crop_resize_chw(arr_chw, expected_channels, name):
+            if arr_chw.ndim != 3:
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] {name} must be [C,H,W], got shape {arr_chw.shape}."
+                )
+            if expected_channels is not None and arr_chw.shape[0] != expected_channels:
+                label = "Spike" if name == "Spike voxel" else name
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] {label} channels mismatch before resize: "
+                    f"expected {expected_channels}, got {arr_chw.shape[0]}."
+                )
+
+            src_h, src_w = arr_chw.shape[1:]
+            ratio_h = src_h / lq_h_orig
+            ratio_w = src_w / lq_w_orig
+            src_top = round(crop_params['top'] * ratio_h)
+            src_left = round(crop_params['left'] * ratio_w)
+            src_crop_h = max(round(crop_params['lq_patch_size'] * ratio_h), 1)
+            src_crop_w = max(round(crop_params['lq_patch_size'] * ratio_w), 1)
+            src_top = max(min(src_top, src_h - src_crop_h), 0)
+            src_left = max(min(src_left, src_w - src_crop_w), 0)
+            arr_cropped = arr_chw[:, src_top:src_top + src_crop_h, src_left:src_left + src_crop_w]
+
+            resized = []
+            for ch in range(arr_cropped.shape[0]):
+                ch_resized = cv2.resize(arr_cropped[ch], (cropped_w, cropped_h), interpolation=cv2.INTER_LINEAR)
+                resized.append(ch_resized)
+            return np.stack(resized, axis=0).astype(np.float32)
+
+        # Crop spike voxels to the RGB-corresponding region, then resize to the RGB crop size.
         spike_voxels_resized = []
         for spike_voxel in spike_voxels:
-            # spike_voxel: (S, H, W)
-            spike_voxel_resized = []
-            for ch in range(self.spike_channels):
-                spike_ch = spike_voxel[ch]  # (H, W)
-                spike_ch_resized = cv2.resize(spike_ch, (cropped_w, cropped_h), interpolation=cv2.INTER_LINEAR)
-                spike_voxel_resized.append(spike_ch_resized)
-            spike_voxel_resized = np.stack(spike_voxel_resized, axis=0)  # (S, H, W)
-            spike_voxels_resized.append(spike_voxel_resized)
+            spike_voxels_resized.append(_crop_resize_chw(spike_voxel, self.spike_channels, "Spike voxel"))
+
+        flow_spikes_resized = []
+        if self.use_encoding25_flow:
+            for flow_spike in flow_spikes:
+                if self.spike_flow_subframes > 1:
+                    # Subframe mode: [S, 25, H, W] → crop each sub-window independently
+                    for s_idx in range(self.spike_flow_subframes):
+                        sub_window = flow_spike[s_idx]  # [25, H, W]
+                        validate_encoding25_tensor(sub_window)
+                        flow_spikes_resized.append(_crop_resize_chw(sub_window, 25, "Flow spike"))
+                else:
+                    validate_encoding25_tensor(flow_spike)
+                    flow_spikes_resized.append(_crop_resize_chw(flow_spike, 25, "Flow spike"))
 
         # Concatenate RGB and Spike channels
         # Channel Order: 
         #   0~2: RGB (0-1 float)
-        #   3~6: Spike TFP Voxels (0-1 float, 4 channels)
-        # Total: 7 channels
+        #   3~(3+S-1): Spike voxels (0-1 float, S=self.spike_channels)
+        # Total: 3 + self.spike_channels
         img_lqs_with_spike = []
         for img_lq, spike_voxel in zip(img_lqs, spike_voxels_resized):
             # img_lq: (H, W, 3), spike_voxel: (S, H, W)
             # Convert spike_voxel to (H, W, S)
             spike_voxel_hwc = np.transpose(spike_voxel, (1, 2, 0))  # (H, W, S)
+            self._validate_raw_rgb_spike_pair(img_lq, spike_voxel_hwc)
             # Concatenate along channel dimension
             img_lq_with_spike = np.concatenate([img_lq, spike_voxel_hwc], axis=2)  # (H, W, 3+S)
             img_lqs_with_spike.append(img_lq_with_spike)
 
         # augmentation - flip, rotate
-        img_lqs_with_spike.extend(img_gts)
-        img_results = utils_video.augment(img_lqs_with_spike, self.opt['use_hflip'], self.opt['use_rot'])
+        flow_hwc_list = [np.transpose(arr, (1, 2, 0)) for arr in flow_spikes_resized] if self.use_encoding25_flow else []
+        merge_list = img_lqs_with_spike + flow_hwc_list + img_gts
+        img_results = utils_video.augment(merge_list, self.opt['use_hflip'], self.opt['use_rot'])
 
         img_results = utils_video.img2tensor(img_results, bgr2rgb=False)
-        img_gts = torch.stack(img_results[len(img_lqs_with_spike) // 2:], dim=0)
-        img_lqs = torch.stack(img_results[:len(img_lqs_with_spike) // 2], dim=0)
+        lq_count = len(img_lqs_with_spike)
+        flow_count = len(flow_hwc_list)
+        img_lqs = torch.stack(img_results[:lq_count], dim=0)
+        flow_tensor = None
+        if flow_count > 0:
+            flow_tensor = torch.stack(img_results[lq_count:lq_count + flow_count], dim=0)
+        img_gts = torch.stack(img_results[lq_count + flow_count:], dim=0)
         if img_lqs.size(1) != self.expected_lq_channels:
             raise ValueError(
                 f"[TrainDatasetRGBSpike] Expected {self.expected_lq_channels} channels "
@@ -272,10 +409,27 @@ class TrainDatasetRGBSpike(data.Dataset):
             )
         img_lqs = self._apply_channel_normalization(img_lqs)
 
-        # img_lqs: (t, c, h, w) where c = 3 + spike_channels
-        # img_gts: (t, c, h, w) where c = 3
-        # key: str
-        return {'L': img_lqs, 'H': img_gts, 'key': key}
+        sample = {'H': img_gts, 'key': key}
+        if self._dual_mode:
+            L_rgb = img_lqs[:, :3, :, :]
+            L_spike = img_lqs[:, 3:, :, :]
+            self._validate_dual_tensor_contract(L_rgb, L_spike)
+            sample['L_rgb'] = L_rgb
+            sample['L_spike'] = L_spike
+            if self.keep_legacy_l:
+                sample['L'] = img_lqs
+        else:
+            sample['L'] = img_lqs
+
+        if self.use_encoding25_flow:
+            if flow_tensor is None:
+                raise ValueError("SCFlow strict mode expected non-empty flow_tensor.")
+            if flow_tensor.ndim != 4 or flow_tensor.size(1) != 25:
+                raise ValueError(
+                    f"Expected L_flow_spike shape [T*S,25,H,W], got {tuple(flow_tensor.shape)}"
+                )
+            sample['L_flow_spike'] = flow_tensor.float()
+        return sample
 
     def __len__(self):
         return len(self.keys)
@@ -315,27 +469,7 @@ class TrainDatasetRGBSpike(data.Dataset):
         # get Spike data
         spike_file = self.spike_root / clip_name / 'spike' / f'{neighbor:{self.filename_tmpl}}.dat'
         if spike_file.exists():
-            spike_stream = SpikeStream(
-                offline=True,
-                filepath=str(spike_file),
-                spike_h=self.spike_h,
-                spike_w=self.spike_w,
-                print_dat_detail=False,
-            )
-            spike_matrix = spike_stream.get_spike_matrix(flipud=self.spike_flipud)  # (T, H, W)
-            if self.spike_reconstruction in {'middle_tfp', 'middle-tfp'}:
-                spike_frame = self._middle_tfp_reconstructor(spike_matrix)  # (H, W)
-                spike_voxel = spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
-            elif self.spike_reconstruction == 'snn':
-                spike_frame = self._snn_reconstructor(spike_matrix)  # (H, W)
-                spike_voxel = spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
-            else:
-                spike_voxel = voxelize_spikes_tfp(
-                    spike_matrix,
-                    num_channels=self.spike_channels,
-                    device=self._select_tfp_device(),
-                    half_win_length=self.tfp_half_win_length,
-                )  # (S, H, W)
+            spike_voxel = self._load_spike_voxel(clip_name, neighbor, spike_file)
         else:
             # If spike file doesn't exist, create zeros
             spike_voxel = np.zeros((self.spike_channels, self.spike_h, self.spike_w), dtype=np.float32)
@@ -346,6 +480,192 @@ class TrainDatasetRGBSpike(data.Dataset):
             'spike': spike_voxel,
             'gt_path': img_gt_path,
         }
+
+    def _load_spike_voxel(self, clip_name, neighbor, spike_file):
+        if self.use_precomputed_spike:
+            precomputed = self._load_precomputed_spike_voxel(clip_name, neighbor)
+            if precomputed is not None:
+                return precomputed
+
+        spike_stream = SpikeStream(
+            offline=True,
+            filepath=str(spike_file),
+            spike_h=self.spike_h,
+            spike_w=self.spike_w,
+            print_dat_detail=False,
+        )
+        spike_matrix = spike_stream.get_spike_matrix(flipud=self.spike_flipud)  # (T, H, W)
+        if self.spike_reconstruction in {'middle_tfp', 'middle-tfp'}:
+            spike_frame = self._middle_tfp_reconstructor(spike_matrix)  # (H, W)
+            return spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+        if self.spike_reconstruction == 'snn':
+            spike_frame = self._snn_reconstructor(spike_matrix)  # (H, W)
+            return spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+        return voxelize_spikes_tfp(
+            spike_matrix,
+            num_channels=self.spike_channels,
+            device=self._select_tfp_device(),
+            half_win_length=self.tfp_half_win_length,
+        )  # (S, H, W)
+
+    def _build_precomputed_spike_base_path(self, clip_name, frame_idx):
+        dir_name = f'tfp_b{self.spike_channels}_hw{self.tfp_half_win_length}'
+        frame_name = f'{frame_idx:{self.filename_tmpl}}'
+        return self.precomputed_spike_root / clip_name / dir_name / frame_name
+
+    def _load_precomputed_spike_voxel(self, clip_name, frame_idx):
+        base_path = self._build_precomputed_spike_base_path(clip_name, frame_idx)
+        if self.precomputed_spike_format == 'npy':
+            path = base_path.with_suffix('.npy')
+            if not path.exists():
+                warn_key = (clip_name, 'npy')
+                if warn_key not in self._precomputed_spike_warned:
+                    self._precomputed_spike_warned.add(warn_key)
+                    print(
+                        f"[TRAIN_DATASET] precomputed spike miss for clip={clip_name}: "
+                        f"expected {path}; falling back to raw .dat reconstruction.",
+                        flush=True,
+                    )
+                return None
+            spike_voxel = np.load(path)
+        elif self.precomputed_spike_format == 'npz':
+            path = base_path.with_suffix('.npz')
+            if not path.exists():
+                warn_key = (clip_name, 'npz')
+                if warn_key not in self._precomputed_spike_warned:
+                    self._precomputed_spike_warned.add(warn_key)
+                    print(
+                        f"[TRAIN_DATASET] precomputed spike miss for clip={clip_name}: "
+                        f"expected {path}; falling back to raw .dat reconstruction.",
+                        flush=True,
+                    )
+                return None
+            with np.load(path) as data:
+                spike_voxel = data['spike_voxel']
+        else:
+            raise ValueError(f"Unsupported precomputed spike format: {self.precomputed_spike_format!r}")
+
+        spike_voxel_arr = np.asarray(spike_voxel)
+        if np.issubdtype(spike_voxel_arr.dtype, np.integer):
+            # Precomputed uint8 artifacts store the original 0..255 TFP output losslessly.
+            spike_voxel = spike_voxel_arr.astype(np.float32) / 255.0
+        else:
+            spike_voxel = spike_voxel_arr.astype(np.float32)
+        if spike_voxel.ndim != 3:
+            raise ValueError(
+                f"Precomputed spike voxel must be [C,H,W], got {spike_voxel.shape} from {path}"
+            )
+        if spike_voxel.shape[0] != self.spike_channels:
+            raise ValueError(
+                f"Precomputed spike voxel channels mismatch: expected {self.spike_channels}, "
+                f"got {spike_voxel.shape[0]} from {path}"
+            )
+        return spike_voxel
+
+    def _validate_raw_rgb_spike_pair(self, rgb_hwc, spike_hwc):
+        if rgb_hwc.ndim != 3 or spike_hwc.ndim != 3:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] Raw rgb/spike tensors must be HWC. "
+                f"Got rgb ndim={rgb_hwc.ndim}, spike ndim={spike_hwc.ndim}."
+            )
+        if rgb_hwc.shape[:2] != spike_hwc.shape[:2]:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] dual pack mode requires matching spatial shape before concat: "
+                f"rgb={rgb_hwc.shape[:2]}, spike={spike_hwc.shape[:2]}."
+            )
+        if spike_hwc.shape[2] != self.spike_channels:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] dual spike channels mismatch before concat: "
+                f"expected {self.spike_channels}, got {spike_hwc.shape[2]}."
+            )
+
+
+    def _flow_module_name_from_opt(self, opt):
+        netg = opt.get('netG', {}) if isinstance(opt, dict) else {}
+        if isinstance(netg, dict):
+            optical_flow = netg.get('optical_flow', {})
+            if isinstance(optical_flow, dict):
+                return str(optical_flow.get('module', '')).strip().lower()
+        return str(opt.get('optical_flow_module', '')).strip().lower() if isinstance(opt, dict) else ''
+
+    def _parse_spike_flow_config(self, opt, optical_flow_module=''):
+        spike_flow_cfg = opt.get('spike_flow', {}) if isinstance(opt.get('spike_flow', {}), dict) else {}
+        self.spike_flow_representation = str(spike_flow_cfg.get('representation', '')).strip().lower()
+        self.spike_flow_dt = int(spike_flow_cfg.get('dt', 10))
+        self.spike_flow_root = spike_flow_cfg.get('root', 'auto')
+        self.spike_flow_subframes = int(spike_flow_cfg.get('subframes', 1))
+        self.spike_flow_format = str(spike_flow_cfg.get('format', 'auto')).strip().lower()
+        self.use_encoding25_flow = self.spike_flow_representation == 'encoding25'
+
+        flow_module = str(optical_flow_module or '').strip().lower()
+        if flow_module == 'spike_flow':
+            flow_module = 'scflow'
+        if flow_module == 'scflow' and self.spike_flow_representation != 'encoding25':
+            raise ValueError(
+                "SCFlow strict mode requires spike_flow.representation='encoding25'. "
+                f"Got {self.spike_flow_representation!r}."
+            )
+
+    def _load_encoded_flow_spike(self, clip_name, frame_idx):
+        flow_root = self.spike_root if str(self.spike_flow_root).strip().lower() == 'auto' else Path(self.spike_flow_root)
+        frame_name = f'{frame_idx:{self.filename_tmpl}}'
+
+        if self.spike_flow_subframes > 1:
+            dir_name = f'encoding25_dt{self.spike_flow_dt}_s{self.spike_flow_subframes}'
+            base_path = flow_root / clip_name / dir_name / frame_name
+            try:
+                arr = load_encoding25_artifact_with_shape(
+                    base_path,
+                    artifact_format=self.spike_flow_format,
+                    num_subframes=self.spike_flow_subframes,
+                    spike_h=self.spike_h,
+                    spike_w=self.spike_w,
+                )
+            except FileNotFoundError as exc:
+                raise ValueError(
+                    f"Missing subframe encoding25 artifact: {base_path}.npy or .dat. "
+                    "Run prepare_scflow_encoding25.py --subframes first."
+                ) from exc
+            validate_subframes_tensor(arr, self.spike_flow_subframes)
+            return arr
+        else:
+            base_path = flow_root / clip_name / f'encoding25_dt{self.spike_flow_dt}' / frame_name
+            try:
+                arr = load_encoding25_artifact_with_shape(
+                    base_path,
+                    artifact_format=self.spike_flow_format,
+                    num_subframes=1,
+                    spike_h=self.spike_h,
+                    spike_w=self.spike_w,
+                )
+            except FileNotFoundError as exc:
+                raise ValueError(
+                    f"Missing encoding25 artifact: {base_path}.npy or .dat. "
+                    "Run scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py first."
+                ) from exc
+            validate_encoding25_tensor(arr)
+            return arr
+
+    def _validate_dual_tensor_contract(self, l_rgb, l_spike):
+        if l_rgb.ndim != 4 or l_spike.ndim != 4:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] dual tensors must be [T,C,H,W], got "
+                f"L_rgb ndim={l_rgb.ndim}, L_spike ndim={l_spike.ndim}."
+            )
+        if l_rgb.size(1) != 3:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] dual RGB tensor should have 3 channels, got {l_rgb.size(1)}."
+            )
+        if l_spike.size(1) != self.spike_channels:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] dual spike channels mismatch: "
+                f"expected {self.spike_channels}, got {l_spike.size(1)}."
+            )
+        if l_rgb.shape[0] != l_spike.shape[0] or l_rgb.shape[2:] != l_spike.shape[2:]:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] dual temporal/spatial mismatch between L_rgb {l_rgb.shape} "
+                f"and L_spike {l_spike.shape}."
+            )
 
     def _normalize_single_tfp_device(self, device_value):
         """Normalize a single TFP device specification."""
@@ -472,4 +792,3 @@ class TrainDatasetRGBSpike(data.Dataset):
         if self.spike_norm_stats is not None and tensor.size(1) > 3:
             tensor[:, 3:, :, :] = (tensor[:, 3:, :, :] - self.spike_norm_stats['mean']) / self.spike_norm_stats['std']
         return tensor
-

@@ -51,7 +51,8 @@
   ,
   "scale": 1
   // 输出图像通道数：3 表示输出 RGB 三通道图像（GT 图像的通道数）
-  // 注意：实际输入通道数由 netG.in_chans 控制（这里是 4：RGB+Spike），输出通道数由 netG.out_chans 控制
+  // 注意：netG.input.raw_ingress_chans / netG.in_chans 表示原始入口宽度
+  // 在 fusion 策略下，实际 backbone 通道数会先由 fusion.out_chans 收缩，再进入后续主干
   // 代码会自动处理输入输出通道数不匹配的情况（残差连接时只使用前 out_chans 个通道）
   ,
   "n_channels": 3
@@ -114,13 +115,36 @@
           0
         ]
       }
-      // Spike 数据通道数：4 表示 TFP 体素 (4通道)
+      // Spike 重建 bin 数：legacy 字段名仍叫 spike_channels，但语义上仅表示 Spike 表征宽度
+      // 新配置优先看 spike.reconstruction.num_bins
       ,
       "spike_channels": 8
+      ,
+      "input_pack_mode": "dual"
+      ,
+      "compat": {
+        "keep_legacy_L": true
+      }
+      ,
+      "keep_legacy_l": true
+      ,
+      "spike": {
+        "reconstruction": {
+          "type": "spikecv_tfp",
+          "num_bins": 8
+        }
+      }
       // Spike 重建配置：使用字典级配置项
       ,
       "spike_reconstruction": {
         "type": "spikecv_tfp"
+      }
+      ,
+      "spike_flow": {
+        "representation": "encoding25",
+        "dt": 10,
+        "root": "auto",
+        "subframes": 4
       }
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
@@ -218,13 +242,35 @@
       // Spike 数据宽度：Spike 图像的宽度（像素）
       ,
       "spike_w": 400
-      // Spike 数据通道数：4 表示 TFP 体素 (4通道)
+      // Spike 重建 bin 数：legacy 字段名仍叫 spike_channels，但语义上仅表示 Spike 表征宽度
       ,
       "spike_channels": 8
+      ,
+      "input_pack_mode": "dual"
+      ,
+      "compat": {
+        "keep_legacy_L": true
+      }
+      ,
+      "keep_legacy_l": true
+      ,
+      "spike": {
+        "reconstruction": {
+          "type": "spikecv_tfp",
+          "num_bins": 8
+        }
+      }
       // Spike 重建配置：使用字典级配置项
       ,
       "spike_reconstruction": {
         "type": "spikecv_tfp"
+      }
+      ,
+      "spike_flow": {
+        "representation": "encoding25",
+        "dt": 10,
+        "root": "auto",
+        "subframes": 4
       }
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
@@ -285,8 +331,34 @@
   "netG": {
     // 网络类型：指定为 "vrt" (Video Restoration Transformer)
     "net_type": "vrt"
-    // 输入通道数：7 表示 RGB (3) + Spike TFP (4) 通道拼接
-    // 注意：当 pa_frames>0 时，经过对齐后实际输入 conv_first 的通道数为 in_chans * 9 = 63
+    ,
+    "input": {
+      "strategy": "fusion",
+      "mode": "dual",
+      "raw_ingress_chans": 11
+    }
+    ,
+    // concat 与 fusion 是并列输入策略；当前配置选择 fusion，因此 concat 留空
+    "concat": {}
+    ,
+    "input_mode": "dual"
+    ,
+    "output_mode": "restoration"
+    ,
+    "restoration_reducer": {
+      "type": "index",
+      "index": 4
+    }
+    ,
+    "fusion": {
+      "enable": true,
+      "placement": "early",
+      "operator": "gated",
+      "out_chans": 3,
+      "operator_params": {}
+    }
+    // 原始入口宽度：RGB 3 + Spike 重建 bins 8 = 11
+    // 在 fusion 策略下，对齐前使用的是 raw ingress 宽度；进入 backbone 后会由 fusion.out_chans 决定主干宽度
     // 2 (frames) * 4 (expansion) + 1 (current) = 9 倍
     ,
     "in_chans": 11
@@ -448,6 +520,10 @@
     // 初始化类型：网络参数的初始化方式，"default" 表示使用默认初始化
     ,
     "init_type": "default"
+    ,
+    "init_bn_type": "uniform"
+    ,
+    "init_gain": 0.2
   }
   // ========================================
   // 训练配置
@@ -457,6 +533,23 @@
     // 损失函数配置
     // 生成器损失函数类型："charbonnier" 表示使用 Charbonnier 损失（L1 损失的平滑版本）
     "G_lossfn_type": "charbonnier"
+    ,
+    "freeze_backbone": true
+    ,
+    "partial_load": true
+    ,
+    "phase2_lora_mode": true
+    ,
+    "use_lora": true
+    ,
+    "lora_rank": 8
+    ,
+    "lora_alpha": 16
+    ,
+    "lora_target_modules": [
+      "qkv",
+      "proj"
+    ]
     // 生成器损失函数权重：损失函数的权重系数
     ,
     "G_lossfn_weight": 1.0
@@ -476,7 +569,7 @@
     "G_optimizer_type": "adam"
     // 生成器学习率：初始学习率
     ,
-    "G_optimizer_lr": 4e-4
+    "G_optimizer_lr": 2e-4
     // Adam 优化器的 beta 参数：[beta1, beta2]，用于计算梯度的一阶和二阶矩估计
     ,
     "G_optimizer_betas": [
@@ -495,16 +588,16 @@
     // 固定参数配置（用于分阶段训练）
     // 固定参数的迭代次数：在前 fix_iter 次迭代中，fix_keys 指定的参数保持固定
     ,
-    "fix_iter": 20000
+    "fix_iter": 6000
     // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
     ,
-    "fix_lr_mul": 0.125
-    // 需要固定的参数键：["spynet", "deform"] 表示固定光流网络（SpyNet）和可变形对齐模块（DCNv2PackFlowGuided）
+    "fix_lr_mul": 0.1
+    // 需要固定的参数键：["spynet", "pa_deform"] 表示固定光流网络（SCFlow）和可变形对齐模块（DCNv4）
     // 在前 fix_iter 次迭代中，这些模块的参数不会被更新，学习率会被乘以 fix_lr_mul
     ,
     "fix_keys": [
       "spynet",
-      "deform"
+      "pa_deform"
     ]
     // 学习率调度器配置
     // 总迭代次数：训练的总迭代步数
@@ -619,5 +712,29 @@
     // SwanLab 运行模式：可设置 cloud/offline/local；留空自动根据 API key 决定
     ,
     "swanlab_mode": null
+    // 是否启用 Logfire：true 表示启用 Logfire 日志上报
+    ,
+    "use_logfire": true
+    // Logfire Token：请替换为你的真实 token
+    ,
+    "logfire_token": "REPLACE_WITH_YOUR_LOGFIRE_TOKEN"
+    // Logfire 项目名称：可用于区分项目
+    ,
+    "logfire_project_name": "Deblur"
+    // Logfire 服务名称：默认 s-vrt
+    ,
+    "logfire_service_name": "s-vrt"
+    // Logfire 环境名称：可用于区分 local/server
+    ,
+    "logfire_environment": "local"
+    // 是否将文本日志发送到 Logfire
+    ,
+    "logfire_log_text": true
+    // 是否将训练/验证标量指标发送到 Logfire
+    ,
+    "logfire_log_metrics": true
+    // 是否将计时指标发送到 Logfire
+    ,
+    "logfire_log_timings": true
   }
 }

@@ -20,6 +20,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 from models.blocks.dcn import DCNv2PackFlowGuided, DCNv4PackFlowGuided
 
+# Skip all DCNv4-dependent tests if the CUDA extension is not installed
+def _dcnv4_available():
+    try:
+        from models.op.dcnv4 import DCNv4  # noqa: F401
+        return True
+    except (ImportError, RuntimeError):
+        return False
+
+pytestmark = pytest.mark.skipif(not _dcnv4_available(), reason="DCNv4 CUDA extension not installed")
+
 
 def cuda_memory_monitor(func):
     """Decorator to monitor CUDA memory usage."""

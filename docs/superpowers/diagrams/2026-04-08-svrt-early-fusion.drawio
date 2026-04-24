@@ -1,0 +1,76 @@
+<mxfile host="app.diagrams.net" modified="2026-04-08T12:00:00.000Z" agent="Codex" version="24.7.17">
+  <diagram id="svrt-early-fusion" name="S-VRT Early Fusion">
+    <mxGraphModel dx="1600" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2200" pageHeight="1400" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="S-VRT Temporal Fusion: Early Path (Based on Plan + Implemented Code)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=20;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="900" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="cfg" value="Config Gate&#xa;fusion.enable = true&#xa;placement in {early, hybrid}" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="90" width="230" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="input" value="VRT Input x&#xa;shape: [B, N, C, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="320" y="90" width="220" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="split" value="Split Modalities&#xa;rgb = x[:, :, :3, :, :]&#xa;spike = x[:, :, 3:, :, :]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="600" y="90" width="290" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="early_adapter" value="EarlyFusionAdapter.forward(rgb, spike)&#xa;Input expected 5D tensors" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="940" y="90" width="310" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="check" value="Shape Checks&#xa;rgb, spike must share:&#xa;(B, N, H, W)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="940" y="220" width="220" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="expand" value="Time Expansion&#xa;T = spike.shape[2]&#xa;rgb.unsqueeze(2).expand -&gt; [B, N, T, 3, H, W]&#xa;reshape -&gt; rgb_rep [B, N*T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="220" width="360" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="spike_reshape" value="Spike Flatten&#xa;spike.reshape -&gt; spk [B, N*T, 1, H, W]&#xa;(Current impl treats expanded spike as 1 channel/time step)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="380" width="360" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="operator" value="Fusion Operator&#xa;create_fusion_operator(...):&#xa;concat | gated | pase | mamba&#xa;forward(rgb_rep, spk)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="530" width="360" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="fused_out" value="Fused Sequence&#xa;x_fused: [B, N*T, out_chans, H, W]&#xa;(early/hybrid-early output)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cce5ff;strokeColor=#4a86e8;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="920" y="560" width="250" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="vrt_main" value="Back to VRT Main Path&#xa;get_flows(x_fused) -&gt; alignment -&gt; conv_first -&gt; forward_features -&gt; reconstruction head" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="560" y="560" width="320" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="note_spec" value="Spec Intent: full-T early aligns with reconstructed fixed-length spike sequence&#xa;(N -&gt; N*T temporal resolution)" style="shape=note;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="260" width="380" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="note_impl" value="Current Practice Snapshot (implemented):&#xa;1) middle/hybrid-middle hook not wired yet (hybrid currently equals early path)&#xa;2) early full-T reconstruction-type guard not present in code yet" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="380" width="470" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="cfg" target="input">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="input" target="split">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="split" target="early_adapter">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="early_adapter" target="check">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="check" target="expand">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="expand" target="spike_reshape">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="spike_reshape" target="operator">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="operator" target="fused_out">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="fused_out" target="vrt_main">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

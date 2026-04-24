@@ -62,7 +62,7 @@ class OpticalFlowModule(nn.Module):
         if max_displacement is not None:
             displacement = torch.sqrt(processed_flow[:, 0:1, :, :] ** 2 + processed_flow[:, 1:2, :, :] ** 2)
             mask = displacement > max_displacement
-            scale = max_displacement / (displacement + 1e-8)
+            scale = max_displacement / (displacement + 1e-6)
             scale = torch.clamp(scale, max=1.0)
             processed_flow[:, 0:1, :, :] *= scale
             processed_flow[:, 1:2, :, :] *= scale
@@ -84,5 +84,9 @@ class OpticalFlowModule(nn.Module):
 
     def load_checkpoint(self, path: str) -> None:
         raise NotImplementedError
+
+    def _should_track_gradients(self) -> bool:
+        """Track flow gradients only after phase logic marks flow params trainable."""
+        return torch.is_grad_enabled() and any(param.requires_grad for param in self.parameters())
 
 

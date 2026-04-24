@@ -1,0 +1,15 @@
+{
+  "samples": [
+    {
+      "clip": "GOPR0384_11_02",
+      "frame": "001301",
+      "frame_index": 3,
+      "mask": {
+        "type": "box",
+        "xyxy": [120, 80, 220, 160],
+        "label": "motion_boundary"
+      },
+      "reason": "fast motion edge"
+    }
+  ]
+}

@@ -230,3 +230,23 @@ python scripts/data_preparation/prepare_gopro_spike_dataset.py --force --generat
 - `../../launch_train.sh`: Integrated training launcher with data preparation
 - `../../options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike_local.json`: Training configuration
 
+
+## SCFlow strict encoding25 preparation
+
+Use the dedicated script to generate strict 25-slice flow artifacts next to each clip:
+
+```bash
+PYTHONPATH=. python scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py \
+  --spike-root /path/to/GOPRO_Large_spike_seq/train \
+  --dt 10 \
+  --num-workers 16 \
+  --short-policy pad_edge
+```
+
+Optional flags:
+
+- `--short-policy strict|pad_edge|pad_zero` controls behavior when a `.dat` file has `T<25`.
+- `--num-workers 1` to run single-process mode (default).
+- `--max-clips N` to limit clip count for quick sanity checks.
+- `--dry-run` to report what would be generated.
+- `--overwrite` to regenerate existing `.npy` files.

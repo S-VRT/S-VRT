@@ -11,6 +11,6 @@ einops
 tensorboard
 wandb
 swanlab
+logfire
 matplotlib
-flash-attn>=2.8.0
 snntorch

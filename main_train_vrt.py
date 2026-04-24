@@ -9,6 +9,7 @@ import math  # 数学运算，用于计算迭代次数等
 import argparse  # 命令行参数解析
 import time  # 时间相关功能
 import random  # 随机数生成，用于设置随机种子
+import copy  # 深拷贝配置，避免阶段配置污染原始配置
 import cv2  # OpenCV，用于图像读写
 import numpy as np  # 数值计算库
 from collections import OrderedDict  # 有序字典，用于保持测试结果的顺序
@@ -28,7 +29,132 @@ from utils.utils_dist import get_dist_info, init_dist, barrier_safe, setup_distr
 
 # 数据集和模型定义
 from data.select_dataset import define_Dataset  # 数据集工厂函数
+from models.model_vrt import should_score_validation_batch
 from models.select_model import define_Model  # 模型工厂函数
+
+
+def resolve_phase_value(value, is_phase1, key_name):
+    """Resolve scalar or [phase1, phase2] value to active phase value."""
+    if isinstance(value, int):
+        resolved = value
+    elif isinstance(value, (list, tuple)) and len(value) == 2:
+        resolved = value[0] if is_phase1 else value[1]
+    else:
+        raise ValueError(
+            f"{key_name} must be an int or a length-2 list/tuple [phase1, phase2], got {value!r}"
+        )
+
+    if not isinstance(resolved, int):
+        raise ValueError(f"{key_name} resolved value must be int, got {type(resolved).__name__}")
+    if resolved <= 0:
+        raise ValueError(f"{key_name} must be > 0, got {resolved}")
+    return resolved
+
+
+def build_phase_train_dataset_opt(train_dataset_opt, is_phase1):
+    """Build per-phase dataset options with resolved gt_size and dataloader_batch_size."""
+    resolved = copy.deepcopy(train_dataset_opt)
+    resolved["gt_size"] = resolve_phase_value(train_dataset_opt.get("gt_size", 256), is_phase1, "gt_size")
+    resolved["dataloader_batch_size"] = resolve_phase_value(
+        train_dataset_opt["dataloader_batch_size"], is_phase1, "dataloader_batch_size"
+    )
+    if is_phase1:
+        spike_flow_cfg = resolved.get("spike_flow")
+        if isinstance(spike_flow_cfg, dict) and str(spike_flow_cfg.get("representation", "")).strip().lower() == "encoding25":
+            spike_flow_cfg["representation"] = ""
+            spike_flow_cfg["phase1_disabled"] = True
+    return resolved
+
+
+def compute_is_phase1(current_step, fix_iter):
+    return fix_iter > 0 and current_step < fix_iter
+
+
+def init_dataloader_worker(_worker_id):
+    """Keep each DataLoader worker single-threaded to avoid CPU oversubscription."""
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    try:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+    try:
+        cv2.setNumThreads(0)
+    except Exception:
+        pass
+
+
+def record_data_wait(model, elapsed):
+    timer = getattr(model, "timer", None)
+    timings = getattr(timer, "current_timings", None)
+    if isinstance(timings, dict):
+        timings["data_wait"] = elapsed
+
+
+def build_train_loader_bundle(opt, train_dataset_opt, is_phase1, seed, logger):
+    dataset_opt = build_phase_train_dataset_opt(train_dataset_opt, is_phase1)
+    train_set = define_Dataset(dataset_opt)
+
+    batch_size = dataset_opt["dataloader_batch_size"]
+    if opt["dist"]:
+        if batch_size % opt["num_gpu"] != 0:
+            raise ValueError(
+                f"dataloader_batch_size={batch_size} is not divisible by num_gpu={opt['num_gpu']}"
+            )
+        per_gpu_batch = batch_size // opt["num_gpu"]
+        if per_gpu_batch <= 0:
+            raise ValueError(
+                f"per-GPU batch size must be > 0, got {per_gpu_batch} "
+                f"(global batch={batch_size}, num_gpu={opt['num_gpu']})"
+            )
+
+        train_sampler = DistributedSampler(
+            train_set,
+            shuffle=dataset_opt["dataloader_shuffle"],
+            drop_last=True,
+            seed=seed,
+        )
+        per_gpu_workers = dataset_opt["dataloader_num_workers"] // opt["num_gpu"]
+        kwargs = dict(
+            batch_size=per_gpu_batch,
+            shuffle=False,
+            num_workers=per_gpu_workers,
+            drop_last=True,
+            pin_memory=True,
+            sampler=train_sampler,
+        )
+        if per_gpu_workers > 0:
+            kwargs["persistent_workers"] = dataset_opt.get("dataloader_persistent_workers", False)
+            kwargs["prefetch_factor"] = dataset_opt.get("dataloader_prefetch_factor", 2)
+            kwargs["multiprocessing_context"] = "spawn"
+            kwargs["worker_init_fn"] = init_dataloader_worker
+        train_loader = DataLoader(train_set, **kwargs)
+    else:
+        train_sampler = None
+        workers = dataset_opt["dataloader_num_workers"]
+        kwargs = dict(
+            batch_size=batch_size,
+            shuffle=dataset_opt["dataloader_shuffle"],
+            num_workers=workers,
+            drop_last=True,
+            pin_memory=True,
+        )
+        if workers > 0:
+            kwargs["persistent_workers"] = dataset_opt.get("dataloader_persistent_workers", False)
+            kwargs["prefetch_factor"] = dataset_opt.get("dataloader_prefetch_factor", 2)
+            kwargs["multiprocessing_context"] = "spawn"
+            kwargs["worker_init_fn"] = init_dataloader_worker
+        train_loader = DataLoader(train_set, **kwargs)
+
+    return {
+        "dataset_opt": dataset_opt,
+        "train_set": train_set,
+        "train_sampler": train_sampler,
+        "train_loader": train_loader,
+    }
 
 
 def get_memory_usage():
@@ -49,6 +175,47 @@ def log_memory_stage(logger, stage_name, rank=0):
         logger.info(f'[MEMORY] {stage_name} - Current memory usage: {mem_usage:.2f} GB')
         return mem_usage
     return 0.0
+
+
+def log_validation_probe(logger, label, rank=0):
+    """Log a compact validation-stage probe with process and CUDA memory state."""
+    if rank != 0 or logger is None:
+        return
+    try:
+        process = psutil.Process(os.getpid())
+        rss_gb = process.memory_info().rss / (1024 ** 3)
+        vms_gb = process.memory_info().vms / (1024 ** 3)
+        cuda_parts = []
+        if torch.cuda.is_available():
+            for dev_idx in range(torch.cuda.device_count()):
+                try:
+                    alloc_gb = torch.cuda.memory_allocated(dev_idx) / (1024 ** 3)
+                    reserved_gb = torch.cuda.memory_reserved(dev_idx) / (1024 ** 3)
+                    cuda_parts.append(f'cuda:{dev_idx} alloc={alloc_gb:.2f}GB reserved={reserved_gb:.2f}GB')
+                except Exception as cuda_exc:
+                    cuda_parts.append(f'cuda:{dev_idx} error={cuda_exc}')
+        cuda_summary = '; '.join(cuda_parts) if cuda_parts else 'cuda:unavailable'
+        logger.info(f'[VAL_PROBE] {label} | rss={rss_gb:.2f}GB vms={vms_gb:.2f}GB | {cuda_summary}')
+    except Exception as exc:
+        logger.warning(f'[VAL_PROBE] {label} probe failed: {exc}')
+
+
+def should_dump_full_frame_fusion_debug(model, current_step):
+    """Return whether phase1 last-step validation full-frame debug is active."""
+    dumper = getattr(model, 'fusion_debug', None)
+    return (
+        dumper is not None
+        and dumper.should_dump_phase1_last(current_step, model.fix_iter, source='val_full_frame')
+    )
+
+
+def maybe_dump_full_frame_fusion_debug_from_batch(model, batch, current_step, batch_idx):
+    """Reuse the first real validation batch for fusion debug to avoid a second loader pass."""
+    if batch_idx != 0:
+        return False
+    if not should_dump_full_frame_fusion_debug(model, current_step):
+        return False
+    return model.dump_full_frame_fusion_only_from_batch(batch, current_step)
 
 
 def main():
@@ -173,7 +340,7 @@ def main():
     if opt['rank'] == 0:
         logger_name = 'train'
         # 设置日志文件路径
-        utils_logger.logger_info(logger_name, os.path.join(opt['path']['log'], logger_name+'.log'))
+        utils_logger.logger_info(logger_name, os.path.join(opt['path']['log'], logger_name+'.log'), opt=opt)
         logger = logging.getLogger(logger_name)
         # 记录完整的配置信息到日志
         logger.info(option.dict2str(opt))
@@ -228,39 +395,28 @@ def main():
                 logger.info('[DATASET] Creating training dataset...')
             mem_before_train = log_memory_stage(logger, 'Before creating train dataset', opt['rank'])
 
-            train_set = define_Dataset(dataset_opt)
+            train_dataset_opt_base = opt["datasets"]["train"]
+            is_phase1 = compute_is_phase1(current_step, opt["train"].get("fix_iter", 0))
+            bundle = build_train_loader_bundle(opt, train_dataset_opt_base, is_phase1, seed, logger)
+            train_set = bundle["train_set"]
+            train_sampler = bundle["train_sampler"]
+            train_loader = bundle["train_loader"]
+            active_train_dataset_opt = bundle["dataset_opt"]
 
             mem_after_train = log_memory_stage(logger, 'After creating train dataset', opt['rank'])
             if opt['rank'] == 0:
                 logger.info('[DATASET] Train dataset created. Memory delta: {:.2f} GB'.format(mem_after_train - mem_before_train))
+                logger.info(
+                    "[TRAIN_PHASE] phase=%s batch_size=%d gt_size=%d",
+                    "phase1" if is_phase1 else "phase2",
+                    active_train_dataset_opt["dataloader_batch_size"],
+                    active_train_dataset_opt["gt_size"],
+                )
 
             # 计算训练迭代次数（向上取整）
-            train_size = int(math.ceil(len(train_set) / dataset_opt['dataloader_batch_size']))
+            train_size = int(math.ceil(len(train_set) / active_train_dataset_opt['dataloader_batch_size']))
             if opt['rank'] == 0:
                 logger.info('Number of train images: {:,d}, iters: {:,d}'.format(len(train_set), train_size))
-            
-            if opt['dist']:
-                # 分布式训练模式
-                # 使用 DistributedSampler 确保每个进程看到不同的数据子集
-                train_sampler = DistributedSampler(train_set, shuffle=dataset_opt['dataloader_shuffle'],
-                                                   drop_last=True, seed=seed)  # 使用基础种子，不是 seed_rank
-                # 创建数据加载器
-                # 批次大小需要除以 GPU 数量，因为每个 GPU 处理一部分数据
-                train_loader = DataLoader(train_set,
-                                          batch_size=dataset_opt['dataloader_batch_size']//opt['num_gpu'],
-                                          shuffle=False,  # 分布式训练时由 sampler 控制打乱
-                                          num_workers=dataset_opt['dataloader_num_workers']//opt['num_gpu'],  # 每个 GPU 的工作进程数
-                                          drop_last=True,  # 丢弃最后一个不完整的批次
-                                          pin_memory=True,  # 将数据固定在内存中，加速 GPU 传输
-                                          sampler=train_sampler)  # 使用分布式采样器
-            else:
-                # 单 GPU 训练模式
-                train_loader = DataLoader(train_set,
-                                          batch_size=dataset_opt['dataloader_batch_size'],
-                                          shuffle=dataset_opt['dataloader_shuffle'],
-                                          num_workers=dataset_opt['dataloader_num_workers'],
-                                          drop_last=True,
-                                          pin_memory=True)
 
         elif phase == 'test':
             # 创建测试/验证数据集
@@ -301,21 +457,49 @@ def main():
                 # 例如：9个样本，3个GPU -> 每个GPU分配3个样本
                 #      10个样本，3个GPU -> rank0:4个, rank1:3个, rank2:3个
                 # drop_last=False确保所有数据都会被处理，即使分配不完全均匀
-                test_loader = DataLoader(test_set,
-                                         batch_size=per_gpu_batch_size,
-                                         shuffle=False,
-                                         num_workers=per_gpu_num_workers,
-                                         drop_last=False,
-                                         pin_memory=True,
-                                         sampler=test_sampler)
+                test_loader_kwargs = dict(
+                    batch_size=per_gpu_batch_size,
+                    shuffle=False,
+                    num_workers=per_gpu_num_workers,
+                    drop_last=False,
+                    pin_memory=True,
+                    sampler=test_sampler,
+                )
+                if per_gpu_num_workers > 0:
+                    test_loader_kwargs['persistent_workers'] = dataset_opt.get('dataloader_persistent_workers', False)
+                    test_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
+                    test_loader_kwargs['multiprocessing_context'] = 'spawn'
+                test_loader = DataLoader(test_set, **test_loader_kwargs)
             else:
                 # 单卡验证 / 测试
-                test_loader = DataLoader(test_set,
-                                         batch_size=test_batch_size,
-                                         shuffle=test_shuffle,
-                                         num_workers=test_num_workers,
-                                         drop_last=False,
-                                         pin_memory=True)
+                test_loader_kwargs = dict(
+                    batch_size=test_batch_size,
+                    shuffle=test_shuffle,
+                    num_workers=test_num_workers,
+                    drop_last=False,
+                    pin_memory=True,
+                )
+                if test_num_workers > 0:
+                    test_loader_kwargs['persistent_workers'] = dataset_opt.get('dataloader_persistent_workers', False)
+                    test_loader_kwargs['prefetch_factor'] = dataset_opt.get('dataloader_prefetch_factor', 2)
+                    test_loader_kwargs['multiprocessing_context'] = 'spawn'
+                test_loader = DataLoader(test_set, **test_loader_kwargs)
+
+            requested_dist_patch_val = bool(opt.get('val', {}).get('distributed_patch_testing', False))
+            dist_world_size = dist.get_world_size() if opt['dist'] and dist.is_initialized() else opt.get('world_size', 1)
+            active_dist_patch_val = requested_dist_patch_val and opt['dist'] and dist_world_size > 1 and len(test_set) == 1
+            opt.setdefault('val', {})['distributed_patch_testing_active'] = active_dist_patch_val
+            if requested_dist_patch_val and opt['rank'] == 0:
+                if active_dist_patch_val:
+                    logger.info(
+                        '[VALIDATION] Distributed patch testing active for single-sample validation '
+                        f'(world_size={dist_world_size}).'
+                    )
+                else:
+                    logger.info(
+                        '[VALIDATION] Distributed patch testing requested but inactive '
+                        f'(dist={opt["dist"]}, world_size={dist_world_size}, test_set_size={len(test_set)}).'
+                    )
         else:
             raise NotImplementedError("Phase [%s] is not recognized." % phase)
 
@@ -330,15 +514,20 @@ def main():
     # 初始化训练相关组件（优化器、损失函数、学习率调度器等）
     model.init_train()
     if opt['rank'] == 0:
-        # 记录网络结构和参数信息
-        logger.info(model.info_network())  # 网络架构信息
-        logger.info(model.info_params())  # 参数数量信息
+        # 关闭初始化阶段的网络结构/参数明细打印，避免训练日志开头过长。
+        # 记录网络结构和参数信息。
+        # logger.info(model.info_network())  # 网络架构信息
+        # logger.info(model.info_params())  # 参数/权重统计信息
+        pass
 
     '''
     # ----------------------------------------
     # 步骤 4: 主训练循环 (main training)
     # ----------------------------------------
     '''
+
+    fix_iter = opt["train"].get("fix_iter", 0)
+    last_is_phase1 = is_phase1
 
     # 开始训练循环（最多运行 1000000 个 epoch，实际由 total_iter 控制）
     for epoch in range(1000000):  # 持续运行直到达到总迭代次数
@@ -347,9 +536,37 @@ def main():
             train_sampler.set_epoch(epoch)
         
         # 遍历训练数据
-        for i, train_data in enumerate(train_loader):
+        train_loader_iter = iter(train_loader)
+        while True:
+            next_step = current_step + 1
+            is_phase1_now = compute_is_phase1(next_step, fix_iter)
+            if is_phase1_now != last_is_phase1:
+                bundle = build_train_loader_bundle(opt, train_dataset_opt_base, is_phase1_now, seed, logger)
+                train_set = bundle["train_set"]
+                train_sampler = bundle["train_sampler"]
+                train_loader = bundle["train_loader"]
+                active_train_dataset_opt = bundle["dataset_opt"]
+                if opt['dist']:
+                    train_sampler.set_epoch(epoch)
+                train_loader_iter = iter(train_loader)
 
-            current_step += 1  # 更新当前训练步数
+                if opt["rank"] == 0:
+                    logger.info(
+                        "[TRAIN_PHASE] switch=%s batch_size=%d gt_size=%d (rebuild train loader)",
+                        "phase1" if is_phase1_now else "phase2",
+                        active_train_dataset_opt["dataloader_batch_size"],
+                        active_train_dataset_opt["gt_size"],
+                    )
+                last_is_phase1 = is_phase1_now
+
+            try:
+                data_wait_start = time.time()
+                train_data = next(train_loader_iter)
+                data_wait_elapsed = time.time() - data_wait_start
+            except StopIteration:
+                break
+
+            current_step = next_step  # 更新当前训练步数
 
             # -------------------------------
             # 1) 更新学习率
@@ -361,13 +578,14 @@ def main():
             # 2) 输入数据对（低质量图像和高质量图像）
             # -------------------------------
             # 将训练数据（低质量输入和高质量标签）送入模型
-            model.feed_data(train_data)
+            model.feed_data(train_data, current_step=current_step)
 
             # -------------------------------
             # 3) 优化模型参数
             # -------------------------------
             # 执行前向传播、计算损失、反向传播和参数更新
             model.optimize_parameters(current_step)
+            record_data_wait(model, data_wait_elapsed)
 
             # -------------------------------
             # 4) 记录训练信息
@@ -433,7 +651,12 @@ def main():
             # 6) 模型测试和评估
             # -------------------------------
             # 每隔一定步数在测试集上评估模型性能
-            if current_step % opt['train']['checkpoint_test'] == 0:
+            _ckpt_test = opt['train']['checkpoint_test']
+            if isinstance(_ckpt_test, list):
+                _do_test = current_step in _ckpt_test
+            else:
+                _do_test = current_step % _ckpt_test == 0
+            if _do_test:
 
                 if opt['rank'] == 0:
                     logger.info('[VALIDATION] Starting model validation/test phase...')
@@ -456,10 +679,35 @@ def main():
 
                 # 遍历测试数据
                 for idx, test_data in enumerate(test_loader):
+                    if opt['rank'] == 0:
+                        maybe_dump_full_frame_fusion_debug_from_batch(model, test_data, current_step, idx)
+                    if idx < 2:
+                        log_validation_probe(logger, f'before feed_data batch={idx}', opt['rank'])
+                        if opt['rank'] == 0:
+                            batch_summary = []
+                            for key, value in test_data.items():
+                                if hasattr(value, 'shape'):
+                                    batch_summary.append(f'{key}:{tuple(value.shape)}')
+                                elif isinstance(value, (list, tuple)):
+                                    batch_summary.append(f'{key}:len={len(value)}')
+                                else:
+                                    batch_summary.append(f'{key}:{type(value).__name__}')
+                            logger.info(f'[VAL_BATCH] idx={idx} contents: {", ".join(batch_summary)}')
                     # 将测试数据送入模型
                     model.feed_data(test_data)
+                    if idx < 2:
+                        log_validation_probe(logger, f'after feed_data batch={idx}', opt['rank'])
                     # 执行测试（前向传播，不更新梯度）
+                    if idx < 2 and opt['rank'] == 0:
+                        logger.info(f'[VAL_BATCH] idx={idx} entering model.test()')
                     model.test()
+                    if idx < 2:
+                        log_validation_probe(logger, f'after model.test batch={idx}', opt['rank'])
+                        if opt['rank'] == 0:
+                            logger.info(f'[VAL_BATCH] idx={idx} model.test() completed')
+
+                    if not should_score_validation_batch(opt):
+                        continue
 
                     # 获取模型输出和真实标签
                     visuals = model.current_visuals()
@@ -694,6 +942,8 @@ def main():
                 if opt['rank'] == 0:
                     logger.info('Finish training.')
                     model.save(current_step)  # 保存最终模型
+                    if hasattr(model, 'save_merged'):
+                        model.save_merged(current_step)
                     if tb_logger is not None:
                         tb_logger.close()  # 关闭日志记录器
                 sys.exit()  # 退出程序

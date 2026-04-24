@@ -21,6 +21,26 @@ class ModelBase():
         
         self.is_train = opt['is_train']        # training or not
         self.schedulers = []                   # schedulers
+        self._amp_dtypes = {
+            'float16': torch.float16,
+            'fp16': torch.float16,
+            'half': torch.float16,
+            'bfloat16': torch.bfloat16,
+            'bf16': torch.bfloat16,
+        }
+
+    def _resolve_amp_dtype(self, raw_dtype, default='float16'):
+        key = str(raw_dtype or default).strip().lower()
+        if key not in self._amp_dtypes:
+            raise ValueError(
+                f'Unsupported AMP dtype {raw_dtype!r}. '
+                f'Expected one of {sorted(self._amp_dtypes.keys())}.'
+            )
+        return self._amp_dtypes[key]
+
+    def _autocast_context(self, enabled=False, dtype=torch.float16):
+        enabled = bool(enabled) and self.device.type == 'cuda'
+        return torch.amp.autocast(device_type='cuda', enabled=enabled, dtype=dtype)
 
     """
     # ----------------------------------------
@@ -216,6 +236,27 @@ class ModelBase():
                 state_dict[key] = param_old
             network.load_state_dict(state_dict, strict=True)
             del state_dict_old, state_dict
+
+    def load_network_partial(self, load_path, network, param_key='params'):
+        network = self.get_bare_model(network)
+        state_dict_old = torch.load(load_path)
+        if param_key in state_dict_old.keys():
+            state_dict_old = state_dict_old[param_key]
+
+        state_dict = network.state_dict()
+        matched = {}
+        skipped = []
+        for key_old, param_old in state_dict_old.items():
+            if key_old in state_dict and state_dict[key_old].shape == param_old.shape:
+                matched[key_old] = param_old
+            else:
+                skipped.append(key_old)
+
+        state_dict.update(matched)
+        network.load_state_dict(state_dict, strict=True)
+        print(
+            f"Partial load: matched {len(matched)} tensors, skipped {len(skipped)} tensors from {load_path}"
+        )
 
     # ----------------------------------------
     # save the state_dict of the optimizer

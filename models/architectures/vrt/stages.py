@@ -443,7 +443,7 @@ class Stage(nn.Module):
                                      max_residue_magnitude=max_residue_magnitude, pa_frames=pa_frames)
             self.pa_fuse = Mlp_GEGLU(dim * (1 + 2), dim * (1 + 2), dim)
 
-    def forward(self, x, flows_backward, flows_forward):
+    def forward(self, x, flows_backward, flows_forward, fusion_hook=None, stage_idx=None, spike_ctx=None):
         x = self.reshape(x)
         x = self.linear1(self.residual_group1(x).transpose(1, 4)).transpose(1, 4) + x
         x = self.linear2(self.residual_group2(x).transpose(1, 4)).transpose(1, 4) + x
@@ -451,7 +451,15 @@ class Stage(nn.Module):
         if self.pa_frames:
             x = x.transpose(1, 2)
             x_backward, x_forward = getattr(self, f'get_aligned_feature_{self.pa_frames}frames')(x, flows_backward, flows_forward)
-            x = self.pa_fuse(torch.cat([x, x_backward, x_forward], 2).permute(0, 1, 3, 4, 2)).permute(0, 4, 1, 2, 3)
+            x_pa = torch.cat([x, x_backward, x_forward], 2).permute(0, 1, 3, 4, 2)
+            if torch.is_autocast_enabled(x_pa.device.type):
+                with torch.autocast(device_type=x_pa.device.type, enabled=False):
+                    x = self.pa_fuse(x_pa.float()).permute(0, 4, 1, 2, 3)
+            else:
+                x = self.pa_fuse(x_pa).permute(0, 4, 1, 2, 3)
+
+        if fusion_hook is not None and stage_idx is not None and spike_ctx is not None:
+            x = fusion_hook(stage_idx=stage_idx, x=x, spike_ctx=spike_ctx)
 
         return x
 

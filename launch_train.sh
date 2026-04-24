@@ -35,10 +35,44 @@
 # ================================================================================
 
 # Default configuration
-DEFAULT_CONFIG="options/gopro_rgbspike_local.json"
-DEFAULT_GOPRO_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large"
-DEFAULT_SPIKE_ROOT="/media/mallm/hd4t/modelrepostore/datasets/gopro_spike/GOPRO_Large_spike_seq"
+DEFAULT_CONFIG="options/gopro_rgbspike_server.json"
+DEFAULT_GOPRO_ROOT="/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large"
+DEFAULT_SPIKE_ROOT="/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq"
 DEFAULT_GPU_COUNT=1
+
+if command -v uv >/dev/null 2>&1 && uv run python -c "import sys" >/dev/null 2>&1; then
+    PYTHON_BIN="$(uv run python -c 'import sys; print(sys.executable)')"
+elif [[ -x ".venv/bin/python" ]]; then
+    PYTHON_BIN="$(pwd)/.venv/bin/python"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="$(command -v python)"
+else
+    echo "Python not found."
+    exit 1
+fi
+
+export CUDA_HOME=/usr/local/cuda-13.0
+export PATH="$(dirname "$PYTHON_BIN"):/usr/local/cuda-13.0/bin:$PATH"
+export LD_LIBRARY_PATH="$(dirname "$PYTHON_BIN")/../lib/python3.11/site-packages/torch/lib:/usr/local/cuda-13.0/lib64:${LD_LIBRARY_PATH:-}"
+export TORCH_CUDA_ARCH_LIST=8.9
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+sanitize_positive_thread_env() {
+    local name="$1"
+    local default_value="$2"
+    local current_value="${!name:-}"
+    if [[ -z "$current_value" || ! "$current_value" =~ ^[1-9][0-9]*$ ]]; then
+        export "$name=$default_value"
+    fi
+}
+
+# External shells may inject invalid values such as OMP_NUM_THREADS=0. Keep
+# per-process thread pools bounded because DataLoader workers also inherit them.
+CPU_THREADS_PER_PROCESS="${CPU_THREADS_PER_PROCESS:-4}"
+sanitize_positive_thread_env OMP_NUM_THREADS "$CPU_THREADS_PER_PROCESS"
+sanitize_positive_thread_env MKL_NUM_THREADS "$CPU_THREADS_PER_PROCESS"
+sanitize_positive_thread_env OPENBLAS_NUM_THREADS "$CPU_THREADS_PER_PROCESS"
+sanitize_positive_thread_env NUMEXPR_NUM_THREADS "$CPU_THREADS_PER_PROCESS"
 
 # Parse arguments
 GPU_COUNT=""
@@ -206,20 +240,81 @@ ensure_python_package() {
     local import_name="$1"
     local pip_name="$2"
 
-    if python -c "import ${import_name}" >/dev/null 2>&1; then
+    if "$PYTHON_BIN" -c "import ${import_name}" >/dev/null 2>&1; then
         echo "Dependency check: ${pip_name} already installed."
         return 0
     fi
 
     echo "Dependency check: ${pip_name} missing, installing..."
-    python -m pip install "${pip_name}"
+    if command -v uv >/dev/null 2>&1; then
+        uv pip install --python "$PYTHON_BIN" "${pip_name}"
+    else
+        "$PYTHON_BIN" -m ensurepip --upgrade
+        "$PYTHON_BIN" -m pip install "${pip_name}"
+    fi
+}
+
+ensure_python_package_version() {
+    local import_name="$1"
+    local version_expr="$2"
+    local pip_name="${3:-${import_name}${version_expr}}"
+
+    if "$PYTHON_BIN" - "$import_name" "$version_expr" >/dev/null 2>&1 <<'PY'
+import importlib
+import sys
+from packaging.version import Version
+
+module_name, required = sys.argv[1:3]
+mod = importlib.import_module(module_name)
+installed = getattr(mod, "__version__", None)
+if installed is None:
+    raise SystemExit(1)
+required = required.strip()
+if required.startswith(">="):
+    ok = Version(installed) >= Version(required[2:])
+elif required.startswith("=="):
+    ok = Version(installed) == Version(required[2:])
+else:
+    raise SystemExit(1)
+raise SystemExit(0 if ok else 1)
+PY
+    then
+        echo "Dependency check: ${pip_name} already compatible."
+        return 0
+    fi
+
+    echo "Dependency check: ${pip_name} incompatible or missing, installing..."
+    if command -v uv >/dev/null 2>&1; then
+        uv pip install --python "$PYTHON_BIN" "${pip_name}"
+    else
+        "$PYTHON_BIN" -m ensurepip --upgrade
+        "$PYTHON_BIN" -m pip install "${pip_name}"
+    fi
 }
 
 ensure_dcnv4_module() {
-    if python -c "from models.op.dcnv4 import DCNv4; from DCNv4 import ext" >/dev/null 2>&1; then
+    local import_output=""
+    import_output=$("$PYTHON_BIN" - <<'PY' 2>&1
+import glob
+import os
+
+print("DCNv4 import probe:")
+for path in sorted(glob.glob("DCNv4/ext*.so")):
+    print(f"  artifact: {os.path.abspath(path)}")
+
+from models.op.dcnv4 import DCNv4  # noqa: F401
+from DCNv4 import ext
+
+print(f"  import ok: {getattr(ext, '__file__', '<unknown>')}")
+PY
+)
+    if [[ $? -eq 0 ]]; then
+        echo "$import_output"
         echo "Dependency check: DCNv4 module already available."
         return 0
     fi
+    echo "$import_output"
+    echo "Dependency check: DCNv4 import probe failed, rebuilding..."
 
     if [[ ! -d "models/op/dcnv4" ]]; then
         echo "Warning: models/op/dcnv4 not found, skip DCNv4 build."
@@ -227,43 +322,236 @@ ensure_dcnv4_module() {
     fi
 
     echo "Dependency check: DCNv4 module missing, building with setup.py develop..."
+    # setup.py builds extension name "DCNv4.ext" and copies it into a top-level
+    # "DCNv4/" directory. Ensure this destination exists to avoid:
+    # "could not create 'DCNv4/ext....so': No such file or directory".
+    mkdir -p DCNv4
+    if [[ ! -f "DCNv4/__init__.py" ]]; then
+        cat > DCNv4/__init__.py <<'PYINIT'
+from . import ext
+PYINIT
+    fi
+
     # Important: setup.py declares packages as models.op.dcnv4.*, so it must
     # be executed from repo root instead of models/op/dcnv4 directory.
-    python models/op/dcnv4/setup.py develop
+    "$PYTHON_BIN" models/op/dcnv4/setup.py develop
     local dcn_exit_code=$?
     if [[ $dcn_exit_code -ne 0 ]]; then
         handle_error $dcn_exit_code "DCNv4 构建失败，请检查上面的错误信息。"
     fi
 
     # Post-build sanity check: ensure extension can be imported in current env.
-    if ! python -c "from models.op.dcnv4 import DCNv4; from DCNv4 import ext" >/dev/null 2>&1; then
+    if ! "$PYTHON_BIN" -c "from models.op.dcnv4 import DCNv4; from DCNv4 import ext" >/dev/null 2>&1; then
         handle_error 1 "DCNv4 扩展导入失败（DCNv4.ext 不可用），请检查编译环境与 Python 环境是否一致。"
     fi
 }
 
-echo "=========================================="
-echo "VRT Training Launch Script"
-echo "=========================================="
-echo "Config: $CONFIG_PATH"
-echo "Requested GPUs: $GPU_COUNT"
-echo "GPU List: $GPU_LIST"
-echo "Prepare Data: $PREPARE_DATA"
-echo "Generate LMDB: $GENERATE_LMDB"
-echo "Dataset Root: ${DATASET_ROOT:-<none>}"
-echo "GoPro Root: $EFFECTIVE_GOPRO_ROOT"
-echo "Spike Root: $EFFECTIVE_SPIKE_ROOT"
-echo ""
+resolve_train_log_dir() {
+    local opt_path="$1"
+    "$PYTHON_BIN" - "$opt_path" <<'PY'
+import contextlib
+import io
+import sys
+from utils import utils_option
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(sys.argv[1], is_train=True)
+print(opt['path']['log'])
+PY
+}
+
+launch_echo() {
+    local logger_name="$1"
+    local launch_phase="$2"
+    local launch_mode="$3"
+    local level="$4"
+    shift 4
+    local message="$*"
+
+    launch_echo_lines "$logger_name" "$launch_phase" "$launch_mode" "$level" "$message"
+}
+
+launch_emit_record() {
+    local logger_name="$1"
+    local launch_phase="$2"
+    local launch_mode="$3"
+    local level="$4"
+    local launch_stream="$5"
+    shift 5
+    local message="$*"
+
+    printf '%s\t%s\t%s\t%s\t%s\n' "$level" "$launch_phase" "$launch_mode" "$launch_stream" "$message" >&5
+}
+
+launch_echo_lines() {
+    local logger_name="$1"
+    local launch_phase="$2"
+    local launch_mode="$3"
+    local level="$4"
+    shift 4
+
+    local message
+    for message in "$@"; do
+        launch_emit_record "$logger_name" "$launch_phase" "$launch_mode" "$level" "-" "$message"
+    done
+}
+
+start_launch_logger() {
+    local logger_name="$1"
+    local log_file="$2"
+    local opt_path="$3"
+    local daemon_code='
+import contextlib
+import io
+import sys
+from utils import utils_option, utils_logger
+
+logger_name, log_file, opt_path = sys.argv[1:4]
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(opt_path, is_train=True)
+utils_logger.logger_info(logger_name, log_file, opt=opt, verbose=False)
+for raw in sys.stdin:
+    raw = raw.rstrip("\n")
+    if not raw:
+        continue
+    try:
+        level, phase, mode, stream, message = raw.split("\t", 4)
+    except ValueError:
+        level, phase, mode, stream, message = "warning", "launch", None, "stderr", raw
+    utils_logger.emit_launch_wrapper_log(
+        logger_name, level, message,
+        launch_stream=None if stream == "-" else stream,
+        launch_phase=phase or None,
+        launch_mode=mode or None,
+    )
+'
+
+    LAUNCH_LOG_PIPE="$(mktemp -u /tmp/s-vrt-launch-logger.XXXXXX)"
+    mkfifo "$LAUNCH_LOG_PIPE"
+    "$PYTHON_BIN" -c "$daemon_code" "$logger_name" "$log_file" "$opt_path" < "$LAUNCH_LOG_PIPE" &
+    LAUNCH_LOGGER_PID=$!
+    exec 5>"$LAUNCH_LOG_PIPE"
+}
+
+cleanup_launch_logger() {
+    local status=$?
+    trap - EXIT
+    if [[ -n "${LAUNCH_LOGGER_PID:-}" ]]; then
+        exec 5>&- 2>/dev/null || true
+        wait "$LAUNCH_LOGGER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${LAUNCH_LOG_PIPE:-}" ]]; then
+        rm -f "$LAUNCH_LOG_PIPE"
+    fi
+    return "$status"
+}
+
+run_with_wrapper() {
+    local logger_name="$1"
+    local launch_phase="$2"
+    local launch_mode="$3"
+    shift 3
+
+    local cmd=("$@")
+
+    local stdout_pipe stderr_pipe
+    stdout_pipe="$(mktemp -u /tmp/s-vrt-wrapper-stdout.XXXXXX)"
+    stderr_pipe="$(mktemp -u /tmp/s-vrt-wrapper-stderr.XXXXXX)"
+    mkfifo "$stdout_pipe" "$stderr_pipe"
+
+    while IFS= read -r line; do
+        if [[ -n "$line" ]]; then
+            launch_emit_record "$logger_name" "$launch_phase" "$launch_mode" "info" "stdout" "$line"
+        fi
+    done < "$stdout_pipe" &
+    local stdout_reader_pid=$!
+
+    while IFS= read -r line; do
+        if [[ -n "$line" ]]; then
+            launch_emit_record "$logger_name" "$launch_phase" "$launch_mode" "warning" "stderr" "$line"
+        fi
+    done < "$stderr_pipe" &
+    local stderr_reader_pid=$!
+
+    exec 3>"$stdout_pipe" 4>"$stderr_pipe"
+    "${cmd[@]}" >&3 2>&4 &
+    local cmd_pid=$!
+    exec 3>&- 4>&-
+
+    wait "$cmd_pid"
+    local cmd_exit_code=$?
+    wait "$stdout_reader_pid"
+    wait "$stderr_reader_pid"
+    rm -f "$stdout_pipe" "$stderr_pipe"
+
+    return "$cmd_exit_code"
+}
+
+ensure_launch_logger() {
+    local logger_name="$1"
+    local log_dir="$2"
+    local opt_path="$3"
+
+    mkdir -p "$log_dir"
+    "$PYTHON_BIN" - "$logger_name" "$log_dir" "$opt_path" <<'PY'
+import sys, logging
+from utils import utils_logger
+
+logger_name, log_dir, opt_path = sys.argv[1:4]
+utils_logger.logger_info(logger_name, f"{log_dir}/{logger_name}.log", opt=None,
+    add_stream_handler=False, verbose=False)
+log = logging.getLogger(logger_name)
+for h in log.handlers:
+    if hasattr(h, 'baseFilename'):
+        print(h.baseFilename)
+        break
+PY
+}
+
+run_dependency_preparation() {
+    ensure_python_package "snntorch" "snntorch"
+    ensure_python_package "cv2" "opencv-python-headless"
+    ensure_python_package_version "google.protobuf" ">=6.32.1" "protobuf>=6.32.1"
+    ensure_python_package "wandb" "wandb"
+    ensure_python_package "swanlab" "swanlab"
+    ensure_dcnv4_module
+}
+
+# Resolve the training log directory from the config before any logging begins.
+TRAIN_LOG_DIR="$(resolve_train_log_dir "$CONFIG_PATH")"
+if [[ -z "$TRAIN_LOG_DIR" ]]; then
+    echo "Error: could not resolve log dir from $CONFIG_PATH" >&2
+    exit 1
+fi
+LAUNCH_LOG_FILE="$(ensure_launch_logger "train" "$TRAIN_LOG_DIR" "$CONFIG_PATH")"
+start_launch_logger "train" "$LAUNCH_LOG_FILE" "$CONFIG_PATH"
+trap cleanup_launch_logger EXIT
+
+launch_echo_lines "train" "launch" "local_single" "info" \
+    "==========================================" \
+    "VRT Training Launch Script" \
+    "==========================================" \
+    "Config: $CONFIG_PATH" \
+    "Requested GPUs: $GPU_COUNT" \
+    "GPU List: $GPU_LIST" \
+    "Prepare Data: $PREPARE_DATA" \
+    "Generate LMDB: $GENERATE_LMDB" \
+    "Dataset Root: ${DATASET_ROOT:-<none>}" \
+    "GoPro Root: $EFFECTIVE_GOPRO_ROOT" \
+    "Spike Root: $EFFECTIVE_SPIKE_ROOT" \
+    "Python: $PYTHON_BIN" \
+    ""
 
 # ================================================================================
 # Data Preparation (if requested)
 # ================================================================================
 if [[ "$PREPARE_DATA" == true ]]; then
-    echo "=========================================="
-    echo "Data Preparation Phase"
-    echo "=========================================="
-    echo "GoPro Root: $EFFECTIVE_GOPRO_ROOT"
-    echo "Spike Root: $EFFECTIVE_SPIKE_ROOT"
-    echo ""
+    launch_echo_lines "train" "prepare" "local_single" "info" \
+        "==========================================" \
+        "Data Preparation Phase" \
+        "==========================================" \
+        "GoPro Root: $EFFECTIVE_GOPRO_ROOT" \
+        "Spike Root: $EFFECTIVE_SPIKE_ROOT" \
+        ""
     
     PREP_ARGS="--gopro_root $EFFECTIVE_GOPRO_ROOT --spike_root $EFFECTIVE_SPIKE_ROOT"
     if [[ -n "$DATASET_ROOT" ]]; then
@@ -272,41 +560,45 @@ if [[ "$PREPARE_DATA" == true ]]; then
     
     if [[ "$GENERATE_LMDB" == true ]]; then
         PREP_ARGS="$PREP_ARGS --generate_lmdb"
-        echo "LMDB generation: ENABLED"
+        launch_echo "train" "prepare" "local_single" "info" "LMDB generation: ENABLED"
     else
-        echo "LMDB generation: DISABLED (use --generate-lmdb to enable)"
+        launch_echo "train" "prepare" "local_single" "info" "LMDB generation: DISABLED (use --generate-lmdb to enable)"
     fi
     
     if [[ "$FORCE_PREPARE" == true ]]; then
         PREP_ARGS="$PREP_ARGS --force"
-        echo "Force preparation: ENABLED"
+        launch_echo "train" "prepare" "local_single" "info" "Force preparation: ENABLED"
     fi
     
-    echo ""
-    echo "Running data preparation script..."
-    echo "Command: python scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS"
-    echo ""
+    launch_echo_lines "train" "prepare" "local_single" "info" \
+        "" \
+        "Running data preparation script..." \
+        "Command: python scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS" \
+        ""
     
-    python scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS
-    
+    run_with_wrapper "train" "prepare" "local_single" \
+        "$PYTHON_BIN" scripts/data_preparation/prepare_gopro_spike_dataset.py $PREP_ARGS
+
     PREP_EXIT_CODE=$?
-    echo ""
+    launch_echo "train" "prepare" "local_single" "info" ""
     
     if [[ $PREP_EXIT_CODE -ne 0 ]]; then
-        echo "=========================================="
-        echo "Data preparation FAILED (exit code: $PREP_EXIT_CODE)"
-        echo "=========================================="
-        echo ""
-        echo "Please fix the data preparation issues before training."
-        echo "Check the error messages above for details."
+        launch_echo_lines "train" "prepare" "local_single" "error" \
+            "==========================================" \
+            "Data preparation FAILED (exit code: $PREP_EXIT_CODE)" \
+            "==========================================" \
+            "" \
+            "Please fix the data preparation issues before training." \
+            "Check the error messages above for details."
         handle_error $PREP_EXIT_CODE "数据准备失败，请检查上面的错误信息。"
         # handle_error will exit with code 0 to keep terminal open
     fi
     
-    echo "=========================================="
-    echo "Data preparation completed successfully!"
-    echo "=========================================="
-    echo ""
+    launch_echo_lines "train" "prepare" "local_single" "info" \
+        "==========================================" \
+        "Data preparation completed successfully!" \
+        "==========================================" \
+        ""
     
     # Brief pause to let user see the summary
     sleep 2
@@ -315,33 +607,37 @@ fi
 # ================================================================================
 # Dependency Preparation
 # ================================================================================
-echo "=========================================="
-echo "Dependency Preparation"
-echo "=========================================="
-ensure_python_package "snntorch" "snntorch"
-ensure_python_package "swanlab" "swanlab"
-ensure_dcnv4_module
-echo ""
+launch_echo_lines "train" "dependency" "local_single" "info" \
+    "==========================================" \
+    "Dependency Preparation" \
+    "=========================================="
+run_with_wrapper "train" "dependency" "local_single" \
+    /bin/bash -lc "PYTHON_BIN='$PYTHON_BIN'; export CUDA_HOME='$CUDA_HOME'; export PATH='$PATH'; export LD_LIBRARY_PATH='$LD_LIBRARY_PATH'; export TORCH_CUDA_ARCH_LIST='$TORCH_CUDA_ARCH_LIST'; export PYTORCH_CUDA_ALLOC_CONF='$PYTORCH_CUDA_ALLOC_CONF'; $(declare -f ensure_python_package); $(declare -f ensure_python_package_version); $(declare -f ensure_dcnv4_module); $(declare -f handle_error); run_dependency_preparation() { $(declare -f run_dependency_preparation | tail -n +2); }; run_dependency_preparation"
+launch_echo "train" "dependency" "local_single" "info" ""
 
 # ================================================================================
 # Training Phase
 # ================================================================================
-echo "=========================================="
-echo "Training Phase"
-echo "=========================================="
-echo ""
+launch_echo_lines "train" "train" "local_single" "info" \
+    "==========================================" \
+    "Training Phase" \
+    "==========================================" \
+    ""
 
 # Create a temporary config with runtime-resolved dataset paths
 RUNTIME_CONFIG="$CONFIG_PATH"
 TMP_CONFIG=""
-if command -v python >/dev/null 2>&1; then
+if [[ -n "$PYTHON_BIN" ]]; then
     TMP_CONFIG="$(mktemp /tmp/vrt_config.XXXXXX.json)"
-    python - "$CONFIG_PATH" "$TMP_CONFIG" "$EFFECTIVE_GOPRO_ROOT" "$EFFECTIVE_SPIKE_ROOT" <<'PYUPDATE'
-import json, sys, pathlib
+    "$PYTHON_BIN" - "$CONFIG_PATH" "$TMP_CONFIG" "$EFFECTIVE_GOPRO_ROOT" "$EFFECTIVE_SPIKE_ROOT" <<'PYUPDATE'
+import json, re, sys, pathlib
 src, dst, gopro_root, spike_root = sys.argv[1:5]
-p = pathlib.Path(src)
+
+def strip_json_comments(text: str) -> str:
+    return re.sub(r'^\s*//.*$', '', text, flags=re.MULTILINE)
+
 with open(src, 'r') as f:
-    cfg = json.load(f)
+    cfg = json.loads(strip_json_comments(f.read()))
 # Defensive: walk expected keys if present
 ds = cfg.get('datasets', {})
 train = ds.get('train', {})
@@ -360,14 +656,14 @@ print(dst)
 PYUPDATE
     if [[ -s "$TMP_CONFIG" ]]; then
         RUNTIME_CONFIG="$TMP_CONFIG"
-        echo "Using runtime config: $RUNTIME_CONFIG"
+        launch_echo "train" "train" "local_single" "info" "Using runtime config: $RUNTIME_CONFIG"
     else
-        echo "Warning: Failed to materialize runtime config; falling back to original."
+        launch_echo "train" "train" "local_single" "warning" "Warning: Failed to materialize runtime config; falling back to original."
         rm -f "$TMP_CONFIG"
         TMP_CONFIG=""
     fi
 else
-    echo "Warning: Python not found to rewrite config paths; using original config."
+    launch_echo "train" "train" "local_single" "warning" "Warning: Python not found to rewrite config paths; using original config."
 fi
 
 # Check if we're in platform DDP mode
@@ -375,63 +671,68 @@ if [[ -n "${WORLD_SIZE:-}" && "${WORLD_SIZE:-0}" -gt 1 ]]; then
     # ========================================
     # Platform DDP Mode
     # ========================================
-    echo "Platform DDP detected:"
-    echo "  RANK=$RANK"
-    echo "  LOCAL_RANK=$LOCAL_RANK"
-    echo "  WORLD_SIZE=$WORLD_SIZE"
-    echo "  MASTER_ADDR=$MASTER_ADDR"
-    echo "  MASTER_PORT=$MASTER_PORT"
-    echo ""
-    echo "Running: python -u main_train_vrt.py --opt $RUNTIME_CONFIG"
-    echo "=========================================="
+    launch_echo_lines "train" "train" "platform_ddp" "info" \
+        "Platform DDP detected:" \
+        "  RANK=$RANK" \
+        "  LOCAL_RANK=$LOCAL_RANK" \
+        "  WORLD_SIZE=$WORLD_SIZE" \
+        "  MASTER_ADDR=$MASTER_ADDR" \
+        "  MASTER_PORT=$MASTER_PORT" \
+        "" \
+        "Running: $PYTHON_BIN -u main_train_vrt.py --opt $RUNTIME_CONFIG" \
+        "=========================================="
     
-    # Platform has already set up environment, just run python directly
-    python -u main_train_vrt.py --opt "$RUNTIME_CONFIG"
+    # The training process owns the train logger; do not wrap it again here.
+    "$PYTHON_BIN" -u main_train_vrt.py --opt "$RUNTIME_CONFIG"
 
 else
     # ========================================
     # Local/Self-managed Mode
     # ========================================
-    echo "Local training mode"
-    
     if [[ "$GPU_COUNT" -gt 1 ]]; then
         # Multi-GPU: use torchrun
-        echo "Multi-GPU training with torchrun"
-        echo "  GPUs: $GPU_COUNT"
-        echo "  CUDA_VISIBLE_DEVICES: $GPU_LIST"
-        echo ""
-        echo "Running: torchrun --nproc_per_node=$GPU_COUNT main_train_vrt.py --opt $RUNTIME_CONFIG"
-        echo "=========================================="
+        launch_echo_lines "train" "train" "local_multi" "info" \
+            "Local training mode" \
+            "Multi-GPU training with torchrun" \
+            "  GPUs: $GPU_COUNT" \
+            "  CUDA_VISIBLE_DEVICES: $GPU_LIST" \
+            "" \
+            "Running: $PYTHON_BIN -m torch.distributed.run --nproc_per_node=$GPU_COUNT main_train_vrt.py --opt $RUNTIME_CONFIG" \
+            "=========================================="
         
-        CUDA_VISIBLE_DEVICES="$GPU_LIST" \
-        torchrun \
+        env CUDA_VISIBLE_DEVICES="$GPU_LIST" \
+            "$PYTHON_BIN" -m torch.distributed.run \
             --nproc_per_node="$GPU_COUNT" \
             --standalone \
             main_train_vrt.py --opt "$RUNTIME_CONFIG"
     else
         # Single GPU: plain python
-        echo "Single GPU training"
         SINGLE_GPU_ID="${GPU_ID_ARRAY[0]}"
-        echo "  CUDA_VISIBLE_DEVICES: $SINGLE_GPU_ID"
-        echo ""
-        echo "Running: python main_train_vrt.py --opt $RUNTIME_CONFIG"
-        echo "=========================================="
-        
-        CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" python main_train_vrt.py --opt "$RUNTIME_CONFIG"
+        launch_echo_lines "train" "train" "local_single" "info" \
+            "Local training mode" \
+            "Single GPU training" \
+            "  CUDA_VISIBLE_DEVICES: $SINGLE_GPU_ID" \
+            "" \
+            "Running: $PYTHON_BIN main_train_vrt.py --opt $RUNTIME_CONFIG" \
+            "=========================================="
+
+        env CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" \
+            "$PYTHON_BIN" main_train_vrt.py --opt "$RUNTIME_CONFIG"
     fi
 fi
 
 EXIT_CODE=$?
-echo ""
-echo "=========================================="
+launch_echo_lines "train" "launch" "local_single" "info" "" "=========================================="
 if [[ $EXIT_CODE -eq 0 ]]; then
-    echo "Training completed successfully"
-    echo "=========================================="
+    launch_echo_lines "train" "launch" "local_single" "info" \
+        "Training completed successfully" \
+        "=========================================="
     # Success - exit normally
     exit 0
 else
-    echo "Training exited with code: $EXIT_CODE"
-    echo "=========================================="
+    launch_echo_lines "train" "launch" "local_single" "error" \
+        "Training exited with code: $EXIT_CODE" \
+        "=========================================="
     # Use handle_error to show error and keep terminal open
     handle_error $EXIT_CODE "训练失败，请检查上面的错误信息。"
     # handle_error will exit with code 0 to keep terminal open

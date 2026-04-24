@@ -13,6 +13,14 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def _require_dcnv4_or_skip():
+    """Skip tests that require compiled DCNv4 extension when unavailable."""
+    try:
+        from models.op.dcnv4 import DCNv4  # noqa: F401
+    except Exception as exc:
+        pytest.skip(f"DCNv4 extension unavailable: {exc}")
+
+
 @pytest.mark.smoke
 class TestDCNv4Integration:
     """DCNv4集成测试类"""
@@ -89,7 +97,10 @@ class TestDCNv4Integration:
             sgp_w=1,
             sgp_k=3,
             sgp_reduction=8,
-            opt=config
+            dcn_config={
+                'type': config['netG']['dcn_type'],
+                'apply_softmax': config['netG'].get('dcn_apply_softmax', False),
+            }
         )
 
         assert stage is not None
@@ -98,6 +109,7 @@ class TestDCNv4Integration:
 
     def test_dcnv4_stage_creation(self, minimal_vrt_config):
         """测试DCNv4 Stage创建"""
+        _require_dcnv4_or_skip()
         from models.architectures.vrt.stages import Stage
 
         config = minimal_vrt_config.copy()
@@ -125,7 +137,10 @@ class TestDCNv4Integration:
             sgp_w=1,
             sgp_k=3,
             sgp_reduction=8,
-            opt=config
+            dcn_config={
+                'type': config['netG']['dcn_type'],
+                'apply_softmax': config['netG'].get('dcn_apply_softmax', False),
+            }
         )
 
         assert stage is not None
@@ -135,6 +150,7 @@ class TestDCNv4Integration:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_dcnv4_stage_forward(self, minimal_vrt_config):
         """测试DCNv4 Stage前向传播（需要CUDA）"""
+        _require_dcnv4_or_skip()
         from models.architectures.vrt.stages import Stage
 
         config = minimal_vrt_config.copy()
@@ -162,7 +178,10 @@ class TestDCNv4Integration:
             sgp_w=1,
             sgp_k=3,
             sgp_reduction=8,
-            opt=config
+            dcn_config={
+                'type': config['netG']['dcn_type'],
+                'apply_softmax': config['netG'].get('dcn_apply_softmax', False),
+            }
         ).cuda()
 
         # 创建测试输入 (VRT Stage期望格式: [num_frames, channels, depth, height, width])
@@ -187,18 +206,28 @@ class TestDCNv4Integration:
         # 测试DCNv2
         config = minimal_vrt_config.copy()
         config['netG']['dcn_type'] = 'DCNv2'
-        DCNv2Class = get_deformable_module(config)
-        assert DCNv2Class.__name__ == 'DCNv2PackFlowGuided'
-
-        # 测试DCNv4
-        config['netG']['dcn_type'] = 'DCNv4'
-        DCNv4Class = get_deformable_module(config)
-        assert DCNv4Class.__name__ == 'DCNv4PackFlowGuided'
+        dcnv2_creator = get_deformable_module(config)
+        dcnv2_module = dcnv2_creator(
+            32, 32, 3, padding=1, deformable_groups=4, max_residue_magnitude=10, pa_frames=2
+        )
+        assert dcnv2_module.__class__.__name__ == 'DCNv2PackFlowGuided'
 
         # 测试默认值
         config['netG'].pop('dcn_type', None)
-        DefaultClass = get_deformable_module(config)
-        assert DefaultClass.__name__ == 'DCNv2PackFlowGuided'
+        default_creator = get_deformable_module(config)
+        default_module = default_creator(
+            32, 32, 3, padding=1, deformable_groups=4, max_residue_magnitude=10, pa_frames=2
+        )
+        assert default_module.__class__.__name__ == 'DCNv2PackFlowGuided'
+
+        # 测试DCNv4（环境未安装扩展时跳过）
+        _require_dcnv4_or_skip()
+        config['netG']['dcn_type'] = 'DCNv4'
+        dcnv4_creator = get_deformable_module(config)
+        dcnv4_module = dcnv4_creator(
+            32, 32, 3, padding=1, deformable_groups=4, max_residue_magnitude=10, pa_frames=2
+        )
+        assert dcnv4_module.__class__.__name__ == 'DCNv4PackFlowGuided'
 
     def test_config_file_parsing(self):
         """测试配置文件中的dcn_type字段"""
@@ -234,3 +263,5 @@ class TestDCNv4Integration:
 
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])
+
+

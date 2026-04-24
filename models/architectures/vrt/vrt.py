@@ -1,4 +1,4 @@
-
+import logging
 import math
 import torch
 import torch.nn as nn
@@ -13,6 +13,13 @@ from models.blocks.mlp import Mlp_GEGLU
 from models.utils.flow import flow_warp
 from models.utils.init import trunc_normal_
 from models.spk_encoder import PixelAdaptiveSpikeEncoder
+from models.fusion.factory import create_fusion_operator, create_fusion_adapter
+from models.fusion.reducers import build_restoration_reducer
+
+LOGGER = logging.getLogger(__name__)
+INPUT_PATH_CONCAT = "concat_path"
+INPUT_PATH_DUAL = "dual_path"
+INPUT_PATH_DUAL_FALLBACK = "dual_fallback_to_concat_path"
 
 
 class Upsample(nn.Sequential):
@@ -120,7 +127,29 @@ class VRT(nn.Module):
                  dcn_config=None,  # DCN configuration dict: {'type': 'DCNv2'/'DCNv4', 'apply_softmax': bool}
                  opt=None):  # Global configuration for initialization
         super().__init__()
-        self.in_chans = in_chans
+        net_cfg = ((opt or {}).get('netG', {}) or {})
+        input_cfg = net_cfg.get('input', {}) if isinstance(net_cfg.get('input', {}), dict) else {}
+        fusion_cfg_from_opt = net_cfg.get('fusion', {}) if isinstance(net_cfg.get('fusion', {}), dict) else {}
+        raw_strategy = input_cfg.get(
+            'strategy',
+            'fusion' if fusion_cfg_from_opt.get('enable', False) else 'concat',
+        )
+        self.input_strategy = str(raw_strategy).strip().lower()
+        if self.input_strategy not in {'concat', 'fusion'}:
+            raise ValueError(
+                f"[VRT] Unsupported netG.input.strategy={raw_strategy!r}; expected 'concat' or 'fusion'."
+            )
+        raw_input_mode = input_cfg.get('mode', net_cfg.get('input_mode', 'concat'))
+        self.input_mode = str(raw_input_mode).strip().lower()
+        if self.input_mode not in {'concat', 'dual'}:
+            raise ValueError(
+                f"[VRT] Unsupported netG.input.mode={raw_input_mode!r}; expected 'concat' or 'dual'."
+            )
+        if self.input_strategy == 'fusion' and self.input_mode != 'dual':
+            raise ValueError("[VRT] input.strategy=fusion requires input.mode='dual'.")
+
+        resolved_in_chans = int(input_cfg.get('raw_ingress_chans', in_chans))
+        self.in_chans = resolved_in_chans
         self.out_chans = out_chans
         self.upscale = upscale
         self.pa_frames = pa_frames
@@ -142,8 +171,8 @@ class VRT(nn.Module):
             if self.spike_encoder_type == 'pase':
                 pase_params = spike_encoder_cfg.get('params', {}) or {}
                 self.spike_encoder = PixelAdaptiveSpikeEncoder(
-                    in_chans=in_chans,
-                    out_chans=in_chans,
+                    in_chans=resolved_in_chans,
+                    out_chans=resolved_in_chans,
                     kernel_size=pase_params.get('kernel_size', 3),
                     hidden_chans=pase_params.get('hidden_chans', 32),
                     normalize_kernel=pase_params.get('normalize_kernel', True),
@@ -151,14 +180,190 @@ class VRT(nn.Module):
             else:
                 raise ValueError(f"Unsupported spike encoder type: {self.spike_encoder_type}")
 
+        fusion_cfg = fusion_cfg_from_opt
+        self.fusion_enabled = self.input_strategy == 'fusion'
+        self.fusion_cfg = fusion_cfg
+        self.fusion_operator = None
+        self.fusion_adapter = None
+        self._last_fusion_main = None
+        self._last_fusion_exec = None
+        self._last_fusion_aux = None
+        self._last_fusion_meta = None
+        self._last_spike_bins = None
+        if self.fusion_enabled:
+            fusion_placement = str(fusion_cfg.get('placement', 'early'))
+            fusion_mode = fusion_cfg.get('mode', 'replace')
+            fusion_out_chans = int(fusion_cfg.get('out_chans', 3))
+            inject_stages = fusion_cfg.get('inject_stages', [])
+            early_cfg = (fusion_cfg.get('early', {}) or {})
+            middle_cfg = (fusion_cfg.get('middle', {}) or {})
+            early_out_chans = int(early_cfg.get('out_chans', fusion_out_chans))
+            middle_out_chans = int(middle_cfg.get('out_chans', fusion_out_chans))
+            spike_input_chans = self.in_chans - 3
+
+            middle_rgb_chans = None
+            middle_spike_chans = None
+            if self.input_mode == 'dual' and self.in_chans <= 3:
+                raise ValueError(
+                    f"[VRT] input_mode=dual requires in_chans>3 (rgb+spike), got in_chans={self.in_chans}."
+                )
+            if fusion_placement in {'middle', 'hybrid'}:
+                if spike_input_chans <= 0:
+                    raise ValueError(
+                        f"[VRT] input_mode={self.input_mode}, placement={fusion_placement} "
+                        f"requires spike channels in input (in_chans>3). Got in_chans={self.in_chans}."
+                    )
+                if inject_stages:
+                    if not isinstance(inject_stages, (list, tuple)):
+                        raise ValueError("Fusion inject_stages must be a list of stage indices.")
+                    invalid_stages = [
+                        stage for stage in inject_stages
+                        if not isinstance(stage, int) or isinstance(stage, bool) or stage < 1 or stage > 7
+                    ]
+                    if invalid_stages:
+                        raise ValueError(
+                            f"Fusion inject_stages must be integers in [1, 7], got {invalid_stages}."
+                        )
+                    stage_dims = [embed_dims[stage - 1] for stage in inject_stages]
+                    unique_dims = sorted(set(stage_dims))
+                    if len(unique_dims) > 1:
+                        raise ValueError(
+                            "Fusion inject_stages span multiple feature dims; "
+                            f"got dims {unique_dims} for stages {sorted(set(inject_stages))}."
+                        )
+                    middle_rgb_chans = unique_dims[0]
+                    if middle_out_chans != middle_rgb_chans:
+                        raise ValueError(
+                            f"[VRT] input_mode={self.input_mode}, placement={fusion_placement} "
+                            "requires middle out_chans to match injected stage dim. "
+                            f"Got out_chans={middle_out_chans}, expected {middle_rgb_chans}."
+                        )
+                else:
+                    middle_rgb_chans = embed_dims[0]
+                middle_spike_chans = 1 if fusion_placement == 'hybrid' else spike_input_chans
+
+            full_t_required = (
+                fusion_placement == 'hybrid'
+                or (fusion_placement == 'early' and bool(early_cfg.get('expand_to_full_t', False)))
+            )
+            if full_t_required:
+                datasets_cfg = ((opt or {}).get('datasets', {}) or {})
+                train_cfg = (datasets_cfg.get('train', {}) or {})
+                test_cfg = (datasets_cfg.get('test', {}) or {})
+                train_nested_recon = ((train_cfg.get('spike', {}) or {}).get('reconstruction', None))
+                test_nested_recon = ((test_cfg.get('spike', {}) or {}).get('reconstruction', None))
+                recon_cfg = train_nested_recon or test_nested_recon
+                if recon_cfg is None:
+                    recon_cfg = train_cfg.get('spike_reconstruction', None)
+                if recon_cfg is None:
+                    recon_cfg = test_cfg.get('spike_reconstruction', None)
+                if recon_cfg is None:
+                    recon_cfg = ((opt or {}).get('netG', {}) or {}).get('spike_reconstruction', None)
+                if recon_cfg is None:
+                    recon_cfg = (opt or {}).get('spike_reconstruction', None)
+                if isinstance(recon_cfg, dict):
+                    recon_type = recon_cfg.get('type', 'spikecv_tfp')
+                elif recon_cfg is None:
+                    recon_type = 'spikecv_tfp'
+                else:
+                    recon_type = recon_cfg
+                if str(recon_type).strip().lower() != 'spikecv_tfp':
+                    raise ValueError("full-T early fusion requires spikecv_tfp")
+
+            operator_name = fusion_cfg.get('operator', 'concat')
+            operator_params = fusion_cfg.get('operator_params', {})
+            if operator_name == 'mamba':
+                if fusion_placement != 'early':
+                    raise ValueError("fusion.operator='mamba' requires fusion.placement='early'.")
+                if early_out_chans != 3:
+                    raise ValueError("fusion.operator='mamba' requires fusion.out_chans=3 for early fusion.")
+                if bool(early_cfg.get('expand_to_full_t', False)):
+                    raise ValueError("fusion.operator='mamba' does not support fusion.early.expand_to_full_t=true.")
+            if fusion_placement == 'early':
+                self.fusion_operator = create_fusion_operator(
+                    operator_name=operator_name,
+                    rgb_chans=3,
+                    spike_chans=1,
+                    out_chans=early_out_chans,
+                    operator_params=operator_params,
+                )
+                self.fusion_adapter = create_fusion_adapter(
+                    placement=fusion_placement,
+                    operator=self.fusion_operator,
+                    mode=fusion_mode,
+                    inject_stages=inject_stages,
+                    spike_chans=spike_input_chans,
+                )
+            elif fusion_placement == 'middle':
+                self.fusion_operator = create_fusion_operator(
+                    operator_name=operator_name,
+                    rgb_chans=middle_rgb_chans,
+                    spike_chans=middle_spike_chans,
+                    out_chans=middle_out_chans,
+                    operator_params=operator_params,
+                )
+                self.fusion_adapter = create_fusion_adapter(
+                    placement=fusion_placement,
+                    operator=self.fusion_operator,
+                    mode=fusion_mode,
+                    inject_stages=inject_stages,
+                )
+            else:
+                early_operator = create_fusion_operator(
+                    operator_name=operator_name,
+                    rgb_chans=3,
+                    spike_chans=1,
+                    out_chans=early_out_chans,
+                    operator_params=operator_params,
+                )
+                middle_operator = create_fusion_operator(
+                    operator_name=operator_name,
+                    rgb_chans=middle_rgb_chans,
+                    spike_chans=middle_spike_chans,
+                    out_chans=middle_out_chans,
+                    operator_params=operator_params,
+                )
+                self.fusion_operator = early_operator
+                self.fusion_adapter = create_fusion_adapter(
+                    placement=fusion_placement,
+                    operator=early_operator,
+                    early_operator=early_operator,
+                    middle_operator=middle_operator,
+                    mode=fusion_mode,
+                    inject_stages=inject_stages,
+                    spike_chans=spike_input_chans,
+                )
+
+        if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
+            effective_in_chans = early_out_chans
+        else:
+            effective_in_chans = resolved_in_chans
+        # `in_chans` tracks the raw model ingress contract (e.g. RGB + spike bins),
+        # while the VRT backbone may see a reduced channel width after early/hybrid fusion.
+        self.backbone_in_chans = effective_in_chans
+
         if self.pa_frames:
             if self.nonblind_denoising:
-                conv_first_in_chans = in_chans * 9 + 1
+                conv_first_in_chans = self.backbone_in_chans * 9 + 1
             else:
-                conv_first_in_chans = in_chans * 9
+                conv_first_in_chans = self.backbone_in_chans * 9
         else:
-            conv_first_in_chans = in_chans
+            conv_first_in_chans = self.backbone_in_chans
         self.conv_first = nn.Conv3d(conv_first_in_chans, embed_dims[0], kernel_size=(1, 3, 3), padding=(0, 1, 1))
+        self.output_mode = ((opt or {}).get('netG', {}) or {}).get('output_mode', 'restoration')
+        if self.output_mode not in {'restoration', 'interpolation'}:
+            raise ValueError(
+                f"output_mode must be 'restoration' or 'interpolation', got '{self.output_mode}'"
+            )
+        reducer_cfg = ((opt or {}).get("netG", {}) or {}).get("restoration_reducer", {})
+        if self.output_mode == "restoration":
+            self.restoration_reducer = build_restoration_reducer(reducer_cfg)
+        else:
+            self.restoration_reducer = None
+        if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
+            self.spike_bins = resolved_in_chans - 3
+        else:
+            self.spike_bins = 1
 
         if self.pa_frames:
             # Instantiate a pluggable optical-flow backend via factory.
@@ -271,13 +476,56 @@ class VRT(nn.Module):
     def extract_rgb(self, x, channels=3):
         return x[:, :, :min(channels, x.size(2)), :, :]
 
+    def build_spike_context(self, x, expand_to_full_t=False):
+        if x.dim() != 5:
+            return None
+        if x.size(2) <= 3:
+            return None
+        spike = x[:, :, 3:, :, :]
+        if spike.numel() == 0:
+            return None
+        if expand_to_full_t:
+            bsz, steps, time_dim, height, width = spike.shape
+            spike = spike.reshape(bsz, steps * time_dim, 1, height, width)
+        return spike.transpose(1, 2)
+
     def set_timer(self, timer):
         """Inject a Timer instance for optional timing measurement."""
         self.timer = timer
 
-    def forward(self, x):
+    def set_input_path_marker(self, marker):
+        valid = {INPUT_PATH_CONCAT, INPUT_PATH_DUAL, INPUT_PATH_DUAL_FALLBACK}
+        if marker not in valid:
+            raise ValueError(f"[VRT] Unsupported input path marker {marker!r}, expected one of {sorted(valid)}.")
+        self._input_path_marker = marker
+
+    def _resolve_input_path_marker(self):
+        marker = getattr(self, "_input_path_marker", None)
+        if marker in {INPUT_PATH_CONCAT, INPUT_PATH_DUAL, INPUT_PATH_DUAL_FALLBACK}:
+            return marker
+        return INPUT_PATH_DUAL if self.input_mode == "dual" else INPUT_PATH_CONCAT
+
+    def forward(self, x, flow_spike=None):
         # x: (N, D, C, H, W)
         timer = getattr(self, 'timer', None)
+        path_marker = self._resolve_input_path_marker()
+        LOGGER.info("[VRT] input_path=%s", path_marker)
+        if hasattr(self, "_input_path_marker"):
+            delattr(self, "_input_path_marker")
+
+        fusion_placement = self.fusion_cfg.get('placement', 'early')
+        fusion_hook = None
+        spike_ctx = None
+        self._last_fusion_main = None
+        self._last_fusion_exec = None
+        self._last_fusion_aux = None
+        self._last_fusion_meta = None
+        if self.fusion_enabled and fusion_placement in {'middle', 'hybrid'}:
+            spike_ctx = self.build_spike_context(
+                x,
+                expand_to_full_t=(fusion_placement == 'hybrid'),
+            )
+            fusion_hook = self.fusion_adapter
 
         if self.pa_frames:
             if self.nonblind_denoising:
@@ -285,12 +533,36 @@ class VRT(nn.Module):
 
             x_lq = x.clone()
             x_lq_rgb = self.extract_rgb(x_lq)
+            spike_bins = 1
+            output_spike_bins = 1
+
+            if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
+                rgb = x[:, :, :3, :, :]
+                spike = x[:, :, 3:, :, :]
+                spike_bins = spike.shape[2]
+                fusion_result = self.fusion_adapter(rgb=rgb, spike=spike)
+                fused_main = fusion_result["fused_main"]
+                backbone_view = fusion_result["backbone_view"]
+                aux_view = fusion_result["aux_view"]
+                meta = fusion_result["meta"]
+                self._last_fusion_main = fused_main
+                self._last_fusion_exec = backbone_view
+                self._last_fusion_aux = aux_view
+                self._last_fusion_meta = meta
+                self._last_spike_bins = spike_bins
+                x = backbone_view
+                flow_spike = self._align_flow_spike_to_fused_time_axis(
+                    flow_spike=flow_spike,
+                    fused_steps=backbone_view.size(1),
+                    spike_bins=spike_bins,
+                )
+                output_spike_bins = spike_bins if backbone_view.size(1) != fused_main.size(1) else 1
 
             if timer is not None:
                 with timer.timer('flow_estimation'):
-                    flows_backward, flows_forward = self.get_flows(x)
+                    flows_backward, flows_forward = self.get_flows(x, flow_spike=flow_spike)
             else:
-                flows_backward, flows_forward = self.get_flows(x)
+                flows_backward, flows_forward = self.get_flows(x, flow_spike=flow_spike)
 
             if timer is not None:
                 with timer.timer('flow_warp'):
@@ -318,33 +590,89 @@ class VRT(nn.Module):
                     with timer.timer('conv_first'):
                         x = self.conv_first(x.transpose(1, 2))
                     with timer.timer('forward_features'):
-                        x_features = self.forward_features(x, flows_backward, flows_forward)
+                        x_features = self.forward_features(
+                            x,
+                            flows_backward,
+                            flows_forward,
+                            fusion_hook=fusion_hook,
+                            spike_ctx=spike_ctx,
+                        )
                     with timer.timer('conv_after_body'):
                         x = x + self.conv_after_body(x_features.transpose(1, 4)).transpose(1, 4)
                     with timer.timer('conv_last'):
                         x = self.conv_last(x).transpose(1, 2)
                 else:
                     x = self.conv_first(x.transpose(1, 2))
-                    x = x + self.conv_after_body(self.forward_features(x, flows_backward, flows_forward).transpose(1, 4)).transpose(1, 4)
+                    x = x + self.conv_after_body(
+                        self.forward_features(
+                            x,
+                            flows_backward,
+                            flows_forward,
+                            fusion_hook=fusion_hook,
+                            spike_ctx=spike_ctx,
+                        ).transpose(1, 4)
+                    ).transpose(1, 4)
                     x = self.conv_last(x).transpose(1, 2)
+                if self.output_mode == "restoration" and output_spike_bins > 1:
+                    if self.restoration_reducer is None:
+                        raise RuntimeError("restoration_reducer must be initialized for restoration mode.")
+                    reduced = self.restoration_reducer(x=x, spike_bins=output_spike_bins, base_rgb=x_lq_rgb)
+                    return reduced + x_lq_rgb
+                if self.output_mode == "interpolation" and output_spike_bins > 1:
+                    bsz, frames = x_lq_rgb.shape[:2]
+                    chans, height, width = x_lq_rgb.shape[2:]
+                    x_lq_rgb_exp = (
+                        x_lq_rgb.unsqueeze(2)
+                        .expand(bsz, frames, output_spike_bins, chans, height, width)
+                        .reshape(bsz, frames * output_spike_bins, chans, height, width)
+                    )
+                    return x + x_lq_rgb_exp
                 return x + x_lq_rgb
             else:
                 if timer is not None:
                     with timer.timer('conv_first'):
                         x = self.conv_first(x.transpose(1, 2))
                     with timer.timer('forward_features'):
-                        x_features = self.forward_features(x, flows_backward, flows_forward)
+                        x_features = self.forward_features(
+                            x,
+                            flows_backward,
+                            flows_forward,
+                            fusion_hook=fusion_hook,
+                            spike_ctx=spike_ctx,
+                        )
                     with timer.timer('conv_after_body'):
                         x = x + self.conv_after_body(x_features.transpose(1, 4)).transpose(1, 4)
                     with timer.timer('upsample'):
                         x = self.conv_last(self.upsample(self.conv_before_upsample(x))).transpose(1, 2)
                 else:
                     x = self.conv_first(x.transpose(1, 2))
-                    x = x + self.conv_after_body(self.forward_features(x, flows_backward, flows_forward).transpose(1, 4)).transpose(1, 4)
+                    x = x + self.conv_after_body(
+                        self.forward_features(
+                            x,
+                            flows_backward,
+                            flows_forward,
+                            fusion_hook=fusion_hook,
+                            spike_ctx=spike_ctx,
+                        ).transpose(1, 4)
+                    ).transpose(1, 4)
                     x = self.conv_last(self.upsample(self.conv_before_upsample(x))).transpose(1, 2)
                 _, _, C, H, W = x.shape
                 x_lq_rgb = torch.nn.functional.interpolate(
                     x_lq_rgb, size=(C, H, W), mode='trilinear', align_corners=False)
+                if self.output_mode == "restoration" and output_spike_bins > 1:
+                    if self.restoration_reducer is None:
+                        raise RuntimeError("restoration_reducer must be initialized for restoration mode.")
+                    reduced = self.restoration_reducer(x=x, spike_bins=output_spike_bins, base_rgb=x_lq_rgb)
+                    return reduced + x_lq_rgb
+                if self.output_mode == "interpolation" and output_spike_bins > 1:
+                    bsz, frames = x_lq_rgb.shape[:2]
+                    chans, height, width = x_lq_rgb.shape[2:]
+                    x_lq_rgb_exp = (
+                        x_lq_rgb.unsqueeze(2)
+                        .expand(bsz, frames, output_spike_bins, chans, height, width)
+                        .reshape(bsz, frames * output_spike_bins, chans, height, width)
+                    )
+                    return x + x_lq_rgb_exp
                 return x + x_lq_rgb
         else:
             x_mean = x.mean([1,3,4], keepdim=True)
@@ -353,41 +681,89 @@ class VRT(nn.Module):
                 with timer.timer('conv_first'):
                     x = self.conv_first(x.transpose(1, 2))
                 with timer.timer('forward_features'):
-                    x_features = self.forward_features(x, [], [])
+                    x_features = self.forward_features(
+                        x,
+                        [],
+                        [],
+                        fusion_hook=fusion_hook,
+                        spike_ctx=spike_ctx,
+                    )
                 with timer.timer('conv_after_body'):
                     x = x + self.conv_after_body(x_features.transpose(1, 4)).transpose(1, 4)
             else:
                 x = self.conv_first(x.transpose(1, 2))
-                x = x + self.conv_after_body(self.forward_features(x, [], []).transpose(1, 4)).transpose(1, 4)
+                x = x + self.conv_after_body(
+                    self.forward_features(
+                        x,
+                        [],
+                        [],
+                        fusion_hook=fusion_hook,
+                        spike_ctx=spike_ctx,
+                    ).transpose(1, 4)
+                ).transpose(1, 4)
 
             x = torch.cat(torch.unbind(x , 2) , 1)
             x = self.conv_last(self.reflection_pad2d(F.leaky_relu(self.linear_fuse(x), 0.2), pad=3))
             x = torch.stack(torch.split(x, dim=1, split_size_or_sections=3), 1)
             return x + self.extract_rgb(x_mean)
 
-    def get_flows(self, x):
+    def _align_flow_spike_to_fused_time_axis(self, flow_spike, fused_steps, spike_bins):
+        if flow_spike is None:
+            return None
+        if flow_spike.ndim != 5 or flow_spike.size(1) == fused_steps:
+            return flow_spike
+        if spike_bins <= 1 or flow_spike.size(1) != fused_steps * spike_bins:
+            return flow_spike
+
+        bsz, _, chans, height, width = flow_spike.shape
+        return flow_spike.reshape(
+            bsz,
+            fused_steps,
+            spike_bins,
+            chans,
+            height,
+            width,
+        ).mean(dim=2)
+
+    def get_flows(self, x, flow_spike=None):
         if self.pa_frames == 2:
-            flows_backward, flows_forward = self.get_flow_2frames(x)
+            flows_backward, flows_forward = self.get_flow_2frames(x, flow_spike=flow_spike)
         elif self.pa_frames == 4:
-            flows_backward_2frames, flows_forward_2frames = self.get_flow_2frames(x)
+            flows_backward_2frames, flows_forward_2frames = self.get_flow_2frames(x, flow_spike=flow_spike)
             flows_backward_4frames, flows_forward_4frames = self.get_flow_4frames(flows_forward_2frames, flows_backward_2frames)
             flows_backward = flows_backward_2frames + flows_backward_4frames
             flows_forward = flows_forward_2frames + flows_forward_4frames
         elif self.pa_frames == 6:
-            flows_backward_2frames, flows_forward_2frames = self.get_flow_2frames(x)
+            flows_backward_2frames, flows_forward_2frames = self.get_flow_2frames(x, flow_spike=flow_spike)
             flows_backward_4frames, flows_forward_4frames = self.get_flow_4frames(flows_forward_2frames, flows_backward_2frames)
             flows_backward_6frames, flows_forward_6frames = self.get_flow_6frames(flows_forward_2frames, flows_backward_2frames, flows_forward_4frames, flows_backward_4frames)
             flows_backward = flows_backward_2frames + flows_backward_4frames + flows_backward_6frames
             flows_forward = flows_forward_2frames + flows_forward_4frames + flows_forward_6frames
         return flows_backward, flows_forward
 
-    def get_flow_2frames(self, x):
+    def get_flow_2frames(self, x, flow_spike=None):
         b, n, c, h, w = x.size()
         
         # Check if we should use spike inputs for optical flow (e.g., SCFlow)
         if getattr(self.spynet, 'input_type', 'rgb') == 'spike':
-            # Assuming x contains spike sequences if SCFlow is used.
-            x_flow = x 
+            if flow_spike is None:
+                raise ValueError("SCFlow requires flow_spike input [B,T,25,H,W].")
+            if flow_spike.ndim != 5:
+                raise ValueError(f"SCFlow requires flow_spike ndim=5 [B,T,25,H,W], got {tuple(flow_spike.shape)}")
+            if flow_spike.size(0) != b or flow_spike.size(1) != n:
+                raise ValueError(
+                    f"SCFlow flow_spike temporal dim mismatch: "
+                    f"flow_spike.shape={tuple(flow_spike.shape)}, x.shape={tuple(x.shape)}. "
+                    f"After early fusion, x has {n} temporal steps. "
+                    f"Ensure spike_flow.subframes matches spike_channels."
+                )
+            if flow_spike.size(2) != 25:
+                raise ValueError(f"SCFlow requires flow_spike channels=25, got {flow_spike.size(2)}")
+            if flow_spike.size(3) != h or flow_spike.size(4) != w:
+                raise ValueError(
+                    f"SCFlow requires flow_spike spatial size {(h, w)}, got {(flow_spike.size(3), flow_spike.size(4))}"
+                )
+            x_flow = flow_spike
             c_flow = x_flow.size(2)
             x_1 = x_flow[:, :-1, ...].reshape(-1, c_flow, h, w)
             x_2 = x_flow[:, 1:, ...].reshape(-1, c_flow, h, w)
@@ -465,20 +841,74 @@ class VRT(nn.Module):
 
         x_backward = torch.stack(x_backward, 1)
         x_forward = torch.stack(x_forward, 1)
-        expected_channels = self.in_chans * 4
+        expected_channels = self.backbone_in_chans * 4
         if x_backward.size(2) != expected_channels or x_forward.size(2) != expected_channels:
-            raise ValueError("SGP alignment produced mismatched channels.")
+            raise ValueError(
+                "SGP alignment produced mismatched channels: "
+                f"expected 4 * backbone_in_chans = {expected_channels} "
+                f"(backbone_in_chans={self.backbone_in_chans}, raw in_chans={self.in_chans}), "
+                f"got backward={x_backward.size(2)}, forward={x_forward.size(2)}."
+            )
 
         return [x_backward, x_forward]
 
-    def forward_features(self, x, flows_backward, flows_forward):
-        x1 = self.stage1(x, flows_backward[0::4], flows_forward[0::4])
-        x2 = self.stage2(x1, flows_backward[1::4], flows_forward[1::4])
-        x3 = self.stage3(x2, flows_backward[2::4], flows_forward[2::4])
-        x4 = self.stage4(x3, flows_backward[3::4], flows_forward[3::4])
-        x = self.stage5(x4, flows_backward[2::4], flows_forward[2::4])
-        x = self.stage6(x + x3, flows_backward[1::4], flows_forward[1::4])
-        x = self.stage7(x + x2, flows_backward[0::4], flows_forward[0::4])
+    def forward_features(self, x, flows_backward, flows_forward, fusion_hook=None, spike_ctx=None):
+        x1 = self.stage1(
+            x,
+            flows_backward[0::4],
+            flows_forward[0::4],
+            fusion_hook=fusion_hook,
+            stage_idx=1,
+            spike_ctx=spike_ctx,
+        )
+        x2 = self.stage2(
+            x1,
+            flows_backward[1::4],
+            flows_forward[1::4],
+            fusion_hook=fusion_hook,
+            stage_idx=2,
+            spike_ctx=spike_ctx,
+        )
+        x3 = self.stage3(
+            x2,
+            flows_backward[2::4],
+            flows_forward[2::4],
+            fusion_hook=fusion_hook,
+            stage_idx=3,
+            spike_ctx=spike_ctx,
+        )
+        x4 = self.stage4(
+            x3,
+            flows_backward[3::4],
+            flows_forward[3::4],
+            fusion_hook=fusion_hook,
+            stage_idx=4,
+            spike_ctx=spike_ctx,
+        )
+        x = self.stage5(
+            x4,
+            flows_backward[2::4],
+            flows_forward[2::4],
+            fusion_hook=fusion_hook,
+            stage_idx=5,
+            spike_ctx=spike_ctx,
+        )
+        x = self.stage6(
+            x + x3,
+            flows_backward[1::4],
+            flows_forward[1::4],
+            fusion_hook=fusion_hook,
+            stage_idx=6,
+            spike_ctx=spike_ctx,
+        )
+        x = self.stage7(
+            x + x2,
+            flows_backward[0::4],
+            flows_forward[0::4],
+            fusion_hook=fusion_hook,
+            stage_idx=7,
+            spike_ctx=spike_ctx,
+        )
         x = x + x1
 
         for layer in self.stage8:

@@ -193,13 +193,20 @@ def check_output_consistency(model1: nn.Module, model2: nn.Module, input_tensor:
     return is_consistent, max_diff, relative_diff
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Flash attention benchmark requires CUDA")
 class TestVRTFlashAttentionBenchmark:
     """Test class for VRT Flash Attention benchmark"""
 
     @pytest.fixture
     def config_path(self):
         """Path to the test configuration file"""
-        return "/home/mallm/henry/S-VRT/options/gopro_rgbspike_local_debug.json"
+        import os
+        # Support running from any machine; fall back to project-relative path
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(project_root, "options", "gopro_rgbspike_local_debug.json")
+        if not os.path.exists(path):
+            pytest.skip(f"Config file not found: {path}")
+        return path
 
     @pytest.fixture
     def device(self):
@@ -217,7 +224,8 @@ class TestVRTFlashAttentionBenchmark:
             flash_available = False
             print("✗ Flash Attention library not available")
 
-        assert flash_available, "Flash Attention library must be available for this test"
+        if not flash_available:
+            pytest.skip("Flash Attention library not installed — skipping benchmark")
 
     @pytest.mark.slow
     def test_vrt_model_creation(self, config_path):

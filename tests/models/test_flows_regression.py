@@ -65,7 +65,7 @@ def test_flows_various_sizes():
 
     for b, n, c, h, w in sizes:
         x = torch.randn(b, n, c, h, w)
-        vrt_model = VRT(spynet_path=None, pa_frames=2)
+        vrt_model = VRT(pa_frames=2)
         compare_flows(vrt_model, x)
 
 

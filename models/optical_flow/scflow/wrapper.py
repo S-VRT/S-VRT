@@ -32,6 +32,18 @@ class SCFlowWrapper(OpticalFlowModule):
         self.model.to(self.device)
         self.model.eval()
 
+
+    def _validate_spike_pair(self, spk1: torch.Tensor, spk2: torch.Tensor) -> None:
+        for name, tensor in (("spk1", spk1), ("spk2", spk2)):
+            if tensor.ndim != 4:
+                raise ValueError(
+                    f"SCFlow expects {name} ndim=4 [B,25,H,W], got shape {tuple(tensor.shape)}"
+                )
+            if tensor.size(1) != 25:
+                raise ValueError(
+                    f"SCFlow expects {name} channels=25, got {tensor.size(1)} with shape {tuple(tensor.shape)}"
+                )
+
     def forward(self, spk1: torch.Tensor, spk2: torch.Tensor) -> List[torch.Tensor]:
         """
         Forward pass for SCFlow.
@@ -40,26 +52,22 @@ class SCFlowWrapper(OpticalFlowModule):
         Returns:
             List of 4 flows: [full_res, 1/2_res, 1/4_res, 1/8_res]
         """
-        # Determine runtime device
+        self._validate_spike_pair(spk1, spk2)
+
         try:
             device = next(self.model.parameters()).device
         except StopIteration:
             device = self.device
-            
-        spk1 = spk1.to(device)
-        spk2 = spk2.to(device)
-        
-        # SCFlow requires an initial flow input
+
+        spk1 = spk1.to(device=device, dtype=torch.float32)
+        spk2 = spk2.to(device=device, dtype=torch.float32)
+
         b, _, h, w = spk1.shape
-        flow_init = torch.zeros(b, 2, h, w, device=device)
-        
-        with torch.no_grad():
-            # SCFlow.forward returns (flows[::-1], res_dict)
-            # flows[::-1] is [fine -> coarse] which matches VRT expectations
+        flow_init = torch.zeros(b, 2, h, w, device=device, dtype=torch.float32)
+
+        with torch.autocast("cuda", enabled=False), torch.set_grad_enabled(self._should_track_gradients()):
             flows, _ = self.model(spk1, spk2, flow_init, dt=self.dt)
-            
-        # Post-process if necessary (SCFlow already returns list of 4 scales)
-        # Ensure we return exactly 4 scales as expected by VRT
+
         return flows[:4]
 
     def load_checkpoint(self, path: str) -> None:

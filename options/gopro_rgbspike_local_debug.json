@@ -51,8 +51,8 @@
   ,
   "scale": 1
   // 输出图像通道数：3 表示输出 RGB 三通道图像（GT 图像的通道数）
-  // 注意：实际输入通道数由 netG.in_chans 控制（这里是 4：RGB+Spike），输出通道数由 netG.out_chans 控制
-  // 代码会自动处理输入输出通道数不匹配的情况（残差连接时只使用前 out_chans 个通道）
+  // 注意：netG.input.raw_ingress_chans / netG.in_chans 表示原始入口宽度
+  // 在 fusion 策略下，实际 backbone 通道数会先由 fusion.out_chans 收缩，再进入后续主干
   ,
   "n_channels": 3
   // ========================================
@@ -113,9 +113,30 @@
           0
         ]
       }
-      // Spike 数据通道数：4 表示 TFP 体素 (RGB+Spike=7)
+      // Spike 重建 bin 数：legacy 字段名仍叫 spike_channels，但语义上仅表示 Spike 表征宽度
       ,
       "spike_channels": 8
+      // 输入打包模式：concat=仅输出 L；dual=输出 L_rgb/L_spike（可选保留 L）
+      ,
+      "input_pack_mode": "dual"
+      ,
+      "compat": {
+        "keep_legacy_L": true
+      }
+      ,
+      "keep_legacy_l": true
+      // 新分层 Spike 重建配置（推荐）
+      // 说明：以 spike.reconstruction 为主，legacy 字段仅作兼容镜像，修改时需保持一致
+      ,
+      "spike": {
+        "reconstruction": {
+          "type": "spikecv_tfp",
+          "num_bins": 8
+        }
+      }
+      // 旧字段保留兼容（过渡期）
+      ,
+      "spike_reconstruction": "spikecv_tfp"
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
@@ -167,7 +188,7 @@
       // 是否使用旋转数据增强：true 表示使用
       ,
       "use_rot": true
-      // 是否启用数据集的全内存缓存：true 会在 Dataset 初始化时把所有原始 RGB+Spike 帧载入内存
+      // 是否启用数据集的全内存缓存：true 会在 Dataset 初始化时把所有原始输入帧载入内存
       // 建议在显存/内存允许时配合较小的 dataloader_num_workers 使用
       ,
       "in_memory_cache": false
@@ -215,9 +236,27 @@
       // Spike 数据宽度：Spike 图像的宽度（像素）
       ,
       "spike_w": 400
-      // Spike 数据通道数：4 表示 TFP 体素 (RGB+Spike=7)
+      // Spike 重建 bin 数：legacy 字段名仍叫 spike_channels，但语义上仅表示 Spike 表征宽度
       ,
       "spike_channels": 8
+      ,
+      "input_pack_mode": "dual"
+      ,
+      "compat": {
+        "keep_legacy_L": true
+      }
+      ,
+      "keep_legacy_l": true
+      ,
+      "spike": {
+        // 说明：以 spike.reconstruction 为主，legacy 字段仅作兼容镜像，修改时需保持一致
+        "reconstruction": {
+          "type": "spikecv_tfp",
+          "num_bins": 8
+        }
+      }
+      ,
+      "spike_reconstruction": "spikecv_tfp"
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
       "spike_flipud": true
@@ -254,9 +293,17 @@
       "io_backend": {
         "type": "lmdb"
       }
-      // 输入帧数：-1 表示使用所有可用帧
+      // 输入帧数：与训练保持一致，便于 dual+fusion 调试
       ,
-      "num_frame": -1
+      "num_frame": 6
+      ,
+      "meta_info_file": "data/meta_info/meta_info_GoPro_train_GT.txt"
+      ,
+      "test_mode": false
+      ,
+      "use_hflip": false
+      ,
+      "use_rot": false
       // 数据加载器是否打乱：测试/验证通常不打乱
       ,
       "dataloader_shuffle": false
@@ -275,8 +322,19 @@
   "netG": {
     // 网络类型：指定为 "vrt" (Video Restoration Transformer)
     "net_type": "vrt"
-    // 输入通道数：7 表示 RGB (3) + Spike TFP (4) 通道拼接
-    // 当 pa_frames>0 且使用 nearest4 对齐时，conv_first 实际接收 in_chans * 9 = 63 通道
+    ,
+    "input": {
+      "strategy": "fusion",
+      "mode": "dual",
+      "raw_ingress_chans": 11
+    }
+    ,
+    // concat 与 fusion 是并列输入策略；当前配置选择 fusion，因此 concat 留空
+    "concat": {}
+    ,
+    "input_mode": "dual"
+    // 原始入口宽度：RGB 3 + Spike 重建 bins 8 = 11
+    // 若切回 concat 策略，这里仍表示原始入口宽度，而不是 fusion 后的 backbone 宽度
     ,
     "in_chans": 11
     // 上采样倍数：1 表示不进行上采样（保持原始分辨率）
@@ -369,10 +427,34 @@
     // 可变形卷积类型：选择使用的可变形卷积实现（DCNv2 或 DCNv4）
     //   - "DCNv2": 使用传统的 DCNv2 实现（默认）
     //   - "DCNv4": 使用新的 DCNv4 实现（速度更快，性能更好）
-    "dcn_type": "DCNv4"
+    "dcn_type": "DCNv2"
     ,
     // 当使用DCNv4时，启用DCNv4 + Softmax（更接近DCNv2行为）
     "dcn_apply_softmax": false
+    // Temporal fusion 配置（示例：middle placement）
+    ,
+    "fusion": {
+      "enable": true,
+      "placement": "middle",
+      "operator": "gated",
+      "mode": "replace",
+      "inject_stages": [1, 3, 5],
+      "out_chans": 96,
+      "operator_params": {},
+      "debug": {
+        "enable": true,
+        "save_images": true,
+        "trigger": "phase1_last",
+        "source": "val_full_frame",
+        "full_frame": true,
+        "subdir": "fusion_phase1_last_full",
+        "max_batches": 1,
+        "max_frames": 24,
+        "val_overrides": {
+          "size_patch_testing": 0
+        }
+      }
+    }
     // 可变形卷积组数：可变形对齐模块的组数
     ,
     "deformable_groups": 16
@@ -424,6 +506,10 @@
     // 初始化类型：网络参数的初始化方式，"default" 表示使用默认初始化
     ,
     "init_type": "default"
+    ,
+    "init_bn_type": "uniform"
+    ,
+    "init_gain": 0.2
   }
   // ========================================
   // 训练配置
@@ -592,5 +678,29 @@
     // SwanLab 运行模式：支持 \"cloud\"、\"offline\"、\"local\"，留空自动推断
     ,
     "swanlab_mode": null
+    // 是否启用 Logfire：true 表示启用 Logfire 日志上报
+    ,
+    "use_logfire": true
+    // Logfire Token：请替换为你的真实 token
+    ,
+    "logfire_token": "pylf_v1_us_bttdb00LZTkWTw8T2hW9ygmxph9cgvTX3GbpQZ9yGltZ"
+    // Logfire 项目名称：可用于区分项目
+    ,
+    "logfire_project_name": "Deblur"
+    // Logfire 服务名称：默认 s-vrt
+    ,
+    "logfire_service_name": "s-vrt"
+    // Logfire 环境名称：可用于区分 local/server
+    ,
+    "logfire_environment": "local-debug"
+    // 是否将文本日志发送到 Logfire
+    ,
+    "logfire_log_text": true
+    // 是否将训练/验证标量指标发送到 Logfire
+    ,
+    "logfire_log_metrics": true
+    // 是否将计时指标发送到 Logfire
+    ,
+    "logfire_log_timings": true
   }
 }

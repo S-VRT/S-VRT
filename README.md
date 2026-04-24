@@ -34,6 +34,7 @@ pip install -r requirement.txt
 - tensorboard
 - wandb
 - swanlab
+- logfire
 
 ## 数据集准备
 
@@ -309,11 +310,12 @@ Spike-VRT基于VRT架构，主要改进：
 
 ## 日志和监控
 
-训练过程支持TensorBoard、WANDB与SwanLab日志记录：
+训练过程支持 TensorBoard、WANDB、SwanLab 与 Logfire 日志记录：
 
 - **TensorBoard**：`tensorboard --logdir experiments/[experiment_name]/tb_logger`
 - **WANDB**：在配置文件中设置 `wandb_api_key` 与 `wandb_project`（或使用 `WANDB_API_KEY` 环境变量）
 - **SwanLab**：在配置文件中设置 `swanlab_project`/`swanlab_api_key` 或通过 `SWANLAB_API_KEY` + `swanlab login` 完成授权，使用 `swanlab_mode: "offline"` 可在无网络环境记录。默认会在 `experiments/<task_name>/swanlab_run.id` 中缓存云端 run id，便于在恢复训练（例如从 10k 步 checkpoint 继续）时自动续写同一次 run；如需开启新 run，可删除该文件或将 `swanlab_auto_resume` 置为 `false`。
+- **Logfire**：在配置文件的 `logging` 段设置 `use_logfire`、`logfire_token`、`logfire_project_name`、`logfire_service_name`、`logfire_environment`。启用后，训练文本日志以及 `train/*`、`test/*`、`time/*` 指标会并行发送到 Logfire；Logfire 异常不会中断训练。
 
 ## 常见问题
 

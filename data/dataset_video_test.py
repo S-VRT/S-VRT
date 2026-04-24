@@ -1,8 +1,10 @@
 import glob
 import os
+import time
 import numpy as np
 import torch
 from os import path as osp
+from pathlib import Path
 import torch.utils.data as data
 from torchvision import transforms
 from PIL import Image
@@ -12,6 +14,11 @@ import utils.utils_video as utils_video
 from data.spike_recc import SpikeStream, voxelize_spikes_tfp
 from data.spike_recc.middle_tfp.reconstructor import MiddleTFPReconstructor
 from data.spike_recc.snn.reconstructor import SNNReconstructor
+from data.spike_recc.encoding25 import (
+    load_encoding25_artifact_with_shape,
+    validate_encoding25_tensor,
+    validate_subframes_tensor,
+)
 
 
 class TestDataset(data.Dataset):
@@ -137,7 +144,7 @@ class TestDataset(data.Dataset):
 
 
 class TrainDatasetRGBSpike(data.Dataset):
-    """Video test dataset that concatenates RGB frames with Spike data channels."""
+    """Video test dataset for RGB + spike-bin inputs with concat as a first-class strategy."""
 
     def __init__(self, opt):
         super(TrainDatasetRGBSpike, self).__init__()
@@ -148,14 +155,40 @@ class TrainDatasetRGBSpike(data.Dataset):
 
         # Spike-specific configuration
         self.spike_root = opt['dataroot_spike']
+        self._parse_spike_flow_config(opt, optical_flow_module=self._flow_module_name_from_opt(opt))
         self.spike_h = opt.get('spike_h', 250)
         self.spike_w = opt.get('spike_w', 400)
-        self.spike_channels = opt.get('spike_channels', 4)  # Default updated to 4 for TFP
+        spike_cfg = opt.get('spike', {}) if isinstance(opt.get('spike', {}), dict) else {}
+        spike_precomputed_cfg = spike_cfg.get('precomputed', {}) if isinstance(spike_cfg.get('precomputed', {}), dict) else {}
+        recon_cfg = spike_cfg.get('reconstruction', {})
+        if not isinstance(recon_cfg, dict):
+            recon_cfg = {}
+        nested_num_bins = recon_cfg.get('num_bins', None)
+        self.spike_channels = int(opt.get('spike_channels', nested_num_bins if nested_num_bins is not None else 4))
+        if nested_num_bins is not None and 'spike_channels' in opt and int(opt['spike_channels']) != int(nested_num_bins):
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] Conflicting channel settings: spike_channels={int(opt['spike_channels'])} "
+                f"vs spike.reconstruction.num_bins={int(nested_num_bins)}."
+            )
+        if self.use_encoding25_flow and self.spike_flow_subframes > 1:
+            if self.spike_flow_subframes != self.spike_channels:
+                raise ValueError(
+                    f"spike_flow.subframes ({self.spike_flow_subframes}) must equal "
+                    f"spike_channels ({self.spike_channels}) for early-fusion temporal "
+                    f"axis alignment."
+                )
         self.spike_flipud = opt.get('spike_flipud', True)
         self.spike_folder = opt.get('spike_folder_name', 'spike')
         self.spike_ext = opt.get('spike_filename_ext', 'dat')
         self.tfp_half_win_length = opt.get('tfp_half_win_length', 20)
-        spike_reconstruction_cfg = opt.get('spike_reconstruction', 'spikecv_tfp')
+        self.use_precomputed_spike = bool(spike_precomputed_cfg.get('enable', False))
+        self.precomputed_spike_format = str(spike_precomputed_cfg.get('format', 'npy')).strip().lower()
+        precomputed_root_value = spike_precomputed_cfg.get('root', 'auto')
+        if str(precomputed_root_value).strip().lower() == 'auto':
+            self.precomputed_spike_root = Path(self.spike_root)
+        else:
+            self.precomputed_spike_root = Path(precomputed_root_value)
+        spike_reconstruction_cfg = recon_cfg or opt.get('spike_reconstruction', 'spikecv_tfp')
         if isinstance(spike_reconstruction_cfg, dict):
             self.spike_reconstruction = str(spike_reconstruction_cfg.get('type', 'spikecv_tfp')).strip().lower()
             self.middle_tfp_center = int(spike_reconstruction_cfg.get('middle_tfp_center', 44))
@@ -199,7 +232,8 @@ class TrainDatasetRGBSpike(data.Dataset):
 
         self.imgs_lq, self.imgs_gt = {}, {}
         self.spike_paths = {}
-        self.spike_cache = {}
+        self.frame_basenames = {}
+        self._precomputed_spike_warned = set()
 
         if 'meta_info_file' in opt:
             with open(opt['meta_info_file'], 'r') as fin:
@@ -229,6 +263,8 @@ class TrainDatasetRGBSpike(data.Dataset):
                 border_l[i] = 1
                 border_l[max_idx - i - 1] = 1
             self.data_info['border'].extend(border_l)
+
+            self.frame_basenames[subfolder_name] = [osp.splitext(osp.basename(p))[0] for p in img_paths_lq]
 
             spike_folder = osp.join(self.spike_root, subfolder_name, self.spike_folder)
             spike_paths = []
@@ -262,35 +298,68 @@ class TrainDatasetRGBSpike(data.Dataset):
 
     def __getitem__(self, index):
         folder = self.folders[index]
+        debug_first_folder = index == 0
+        if debug_first_folder:
+            print(f'[VAL_DATASET] __getitem__ start folder={folder} cache_data={self.cache_data}', flush=True)
+            item_start = time.perf_counter()
 
         if self.cache_data:
             imgs_lq = self.imgs_lq[folder]
             imgs_gt = self.imgs_gt[folder]
         else:
+            if debug_first_folder:
+                print(f'[VAL_DATASET] reading image sequences for folder={folder}', flush=True)
             imgs_lq = utils_video.read_img_seq(self.imgs_lq[folder])
             imgs_gt = utils_video.read_img_seq(self.imgs_gt[folder])
+            if debug_first_folder:
+                print(
+                    f'[VAL_DATASET] image sequences ready folder={folder} '
+                    f'lq={tuple(imgs_lq.shape)} gt={tuple(imgs_gt.shape)}'
+                , flush=True)
 
         t, _, h, w = imgs_lq.shape
+        if debug_first_folder:
+            print(f'[VAL_DATASET] building spike sequence folder={folder} t={t} h={h} w={w}', flush=True)
         spike_seq = self._get_spike_sequence(folder, h, w, t)
+        if debug_first_folder:
+            print(f'[VAL_DATASET] spike sequence ready folder={folder} spike={tuple(spike_seq.shape)}', flush=True)
         imgs_lq = torch.cat([imgs_lq, spike_seq], dim=1)
+        flow_meta = None
+        if self.use_encoding25_flow:
+            if debug_first_folder:
+                print(f'[VAL_DATASET] building lazy flow spike metadata folder={folder}', flush=True)
+            flow_meta = self._get_flow_spike_metadata(folder, h, w, t)
+            if debug_first_folder:
+                print(
+                    f'[VAL_DATASET] lazy flow spike metadata ready folder={folder} '
+                    f'frames={len(flow_meta["frame_names"])} source=({flow_meta["source_h"]},{flow_meta["source_w"]})',
+                    flush=True,
+                )
         if imgs_lq.size(1) != self.expected_lq_channels:
             raise ValueError(
                 f"[TrainDatasetRGBSpike] Expected {self.expected_lq_channels} channels "
                 f"but found {imgs_lq.size(1)} for folder {folder}."
             )
         imgs_lq = self._apply_channel_normalization(imgs_lq)
+        if debug_first_folder:
+            elapsed = time.perf_counter() - item_start
+            print(
+                f'[VAL_DATASET] __getitem__ ready folder={folder} '
+                f'L={tuple(imgs_lq.shape)} H={tuple(imgs_gt.shape)} '
+                f'elapsed={elapsed:.2f}s'
+            , flush=True)
 
-        return {
+        sample = {
             'L': imgs_lq,
             'H': imgs_gt,
             'folder': folder,
             'lq_path': self.imgs_lq[folder],
         }
+        if flow_meta is not None:
+            sample['L_flow_spike_meta'] = flow_meta
+        return sample
 
     def _get_spike_sequence(self, folder, target_h, target_w, expected_len):
-        if folder in self.spike_cache:
-            return self.spike_cache[folder]
-
         spike_tensors = []
         spike_paths = self.spike_paths.get(folder, [])
         if spike_paths and len(spike_paths) != expected_len:
@@ -302,11 +371,126 @@ class TrainDatasetRGBSpike(data.Dataset):
             spike_voxel = self._resize_spike_voxel(spike_voxel, target_h, target_w)
             spike_tensors.append(torch.from_numpy(spike_voxel).float())
 
-        spike_seq = torch.stack(spike_tensors, dim=0)
-        self.spike_cache[folder] = spike_seq
-        return spike_seq
+        return torch.stack(spike_tensors, dim=0)
+
+
+    def _flow_module_name_from_opt(self, opt):
+        netg = opt.get('netG', {}) if isinstance(opt, dict) else {}
+        if isinstance(netg, dict):
+            optical_flow = netg.get('optical_flow', {})
+            if isinstance(optical_flow, dict):
+                return str(optical_flow.get('module', '')).strip().lower()
+        return str(opt.get('optical_flow_module', '')).strip().lower() if isinstance(opt, dict) else ''
+
+    def _parse_spike_flow_config(self, opt, optical_flow_module=''):
+        spike_flow_cfg = opt.get('spike_flow', {}) if isinstance(opt.get('spike_flow', {}), dict) else {}
+        self.spike_flow_representation = str(spike_flow_cfg.get('representation', '')).strip().lower()
+        self.spike_flow_dt = int(spike_flow_cfg.get('dt', 10))
+        self.spike_flow_root = spike_flow_cfg.get('root', 'auto')
+        self.spike_flow_subframes = int(spike_flow_cfg.get('subframes', 1))
+        self.spike_flow_format = str(spike_flow_cfg.get('format', 'auto')).strip().lower()
+        self.use_encoding25_flow = self.spike_flow_representation == 'encoding25'
+
+        flow_module = str(optical_flow_module or '').strip().lower()
+        if flow_module == 'spike_flow':
+            flow_module = 'scflow'
+        if flow_module == 'scflow' and self.spike_flow_representation != 'encoding25':
+            raise ValueError(
+                "SCFlow strict mode requires spike_flow.representation='encoding25'. "
+                f"Got {self.spike_flow_representation!r}."
+            )
+
+    def _get_flow_spike_sequence(self, folder, target_h, target_w, expected_len):
+        flow_meta = self._get_flow_spike_metadata(folder, target_h, target_w, expected_len)
+        flow_clip_dir = flow_meta['flow_clip_dir']
+        frame_names = flow_meta['frame_names']
+
+        debug_folder = folder == self.folders[0] if self.folders else False
+        if debug_folder:
+            print(
+                f'[VAL_DATASET] flow load start folder={folder} frames={len(frame_names)} '
+                f'subframes={self.spike_flow_subframes} target=({target_h},{target_w}) dir={flow_clip_dir}'
+            , flush=True)
+            flow_start = time.perf_counter()
+        flow_tensors = []
+        for frame_idx, frame_name in enumerate(frame_names):
+            base_path = Path(flow_clip_dir) / frame_name
+            try:
+                arr = load_encoding25_artifact_with_shape(
+                    base_path,
+                    artifact_format=self.spike_flow_format,
+                    num_subframes=self.spike_flow_subframes,
+                    spike_h=self.spike_h,
+                    spike_w=self.spike_w,
+                )
+            except FileNotFoundError as exc:
+                raise ValueError(
+                    f"Missing encoding25 artifact: {base_path}.npy or .dat. "
+                    "Run scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py first."
+                ) from exc
+            if debug_folder and frame_idx < 3:
+                print(
+                    f'[VAL_DATASET] flow frame loaded folder={folder} idx={frame_idx} '
+                    f'name={frame_name} arr={tuple(arr.shape)}'
+                , flush=True)
+            if self.spike_flow_subframes > 1:
+                validate_subframes_tensor(arr, self.spike_flow_subframes)
+                resized_subframes = []
+                for sub_idx in range(self.spike_flow_subframes):
+                    resized = []
+                    for ch in range(arr.shape[1]):
+                        resized.append(cv2.resize(arr[sub_idx, ch], (target_w, target_h), interpolation=cv2.INTER_LINEAR))
+                    resized_subframes.append(np.stack(resized, axis=0).astype(np.float32))
+                flow_tensors.extend(torch.from_numpy(item) for item in resized_subframes)
+                continue
+            else:
+                validate_encoding25_tensor(arr)
+            resized = []
+            for ch in range(arr.shape[0]):
+                resized.append(cv2.resize(arr[ch], (target_w, target_h), interpolation=cv2.INTER_LINEAR))
+                flow_tensors.append(torch.from_numpy(np.stack(resized, axis=0).astype(np.float32)))
+
+        if not flow_tensors:
+            raise ValueError(f'No frame names available to build L_flow_spike for folder {folder}.')
+        flow_seq = torch.stack(flow_tensors, dim=0)
+        if debug_folder:
+            elapsed = time.perf_counter() - flow_start
+            print(
+                f'[VAL_DATASET] flow load complete folder={folder} flow={tuple(flow_seq.shape)} '
+                f'elapsed={elapsed:.2f}s'
+            , flush=True)
+        return flow_seq
+
+    def _get_flow_spike_metadata(self, folder, target_h, target_w, expected_len):
+        flow_root = self.spike_root if str(self.spike_flow_root).strip().lower() == 'auto' else self.spike_flow_root
+        if self.spike_flow_subframes > 1:
+            flow_dir_name = f'encoding25_dt{self.spike_flow_dt}_s{self.spike_flow_subframes}'
+        else:
+            flow_dir_name = f'encoding25_dt{self.spike_flow_dt}'
+        flow_clip_dir = os.path.join(flow_root, folder, flow_dir_name)
+
+        frame_names = self.frame_basenames.get(folder, [])
+        if frame_names and len(frame_names) != expected_len:
+            raise ValueError(f'Frame sequence length mismatch for {folder}: {len(frame_names)} vs {expected_len}')
+        if not frame_names:
+            raise ValueError(f'No frame names available to build L_flow_spike metadata for folder {folder}.')
+
+        return {
+            'flow_clip_dir': flow_clip_dir,
+            'frame_names': frame_names,
+            'format': self.spike_flow_format,
+            'subframes': self.spike_flow_subframes,
+            'source_h': self.spike_h,
+            'source_w': self.spike_w,
+            'target_h': target_h,
+            'target_w': target_w,
+        }
 
     def _load_spike_voxel(self, spike_path):
+        if self.use_precomputed_spike:
+            precomputed = self._load_precomputed_spike_voxel(spike_path)
+            if precomputed is not None:
+                return precomputed.astype(np.float32)
         if os.path.exists(spike_path):
             try:
                 spike_stream = SpikeStream(
@@ -339,6 +523,64 @@ class TrainDatasetRGBSpike(data.Dataset):
             # Use correct channel count based on reconstruction method
             spike_voxel = np.zeros((self.spike_channels, self.spike_h, self.spike_w), dtype=np.float32)
         return spike_voxel.astype(np.float32)
+
+    def _build_precomputed_spike_base_path(self, spike_path):
+        spike_path = Path(spike_path)
+        clip_name = spike_path.parent.parent.name
+        frame_name = spike_path.stem
+        dir_name = f'tfp_b{self.spike_channels}_hw{self.tfp_half_win_length}'
+        return self.precomputed_spike_root / clip_name / dir_name / frame_name
+
+    def _load_precomputed_spike_voxel(self, spike_path):
+        base_path = self._build_precomputed_spike_base_path(spike_path)
+        if self.precomputed_spike_format == 'npy':
+            path = base_path.with_suffix('.npy')
+            if not path.exists():
+                clip_name = Path(spike_path).parent.parent.name
+                warn_key = (clip_name, 'npy')
+                if warn_key not in self._precomputed_spike_warned:
+                    self._precomputed_spike_warned.add(warn_key)
+                    print(
+                        f"[VAL_DATASET] precomputed spike miss for clip={clip_name}: "
+                        f"expected {path}; falling back to raw .dat reconstruction.",
+                        flush=True,
+                    )
+                return None
+            spike_voxel = np.load(path)
+        elif self.precomputed_spike_format == 'npz':
+            path = base_path.with_suffix('.npz')
+            if not path.exists():
+                clip_name = Path(spike_path).parent.parent.name
+                warn_key = (clip_name, 'npz')
+                if warn_key not in self._precomputed_spike_warned:
+                    self._precomputed_spike_warned.add(warn_key)
+                    print(
+                        f"[VAL_DATASET] precomputed spike miss for clip={clip_name}: "
+                        f"expected {path}; falling back to raw .dat reconstruction.",
+                        flush=True,
+                    )
+                return None
+            with np.load(path) as data:
+                spike_voxel = data['spike_voxel']
+        else:
+            raise ValueError(f"Unsupported precomputed spike format: {self.precomputed_spike_format!r}")
+
+        spike_voxel_arr = np.asarray(spike_voxel)
+        if np.issubdtype(spike_voxel_arr.dtype, np.integer):
+            # Precomputed uint8 artifacts store the original 0..255 TFP output losslessly.
+            spike_voxel = spike_voxel_arr.astype(np.float32) / 255.0
+        else:
+            spike_voxel = spike_voxel_arr.astype(np.float32)
+        if spike_voxel.ndim != 3:
+            raise ValueError(
+                f"Precomputed spike voxel must be [C,H,W], got {spike_voxel.shape} from {path}"
+            )
+        if spike_voxel.shape[0] != self.spike_channels:
+            raise ValueError(
+                f"Precomputed spike voxel channels mismatch: expected {self.spike_channels}, "
+                f"got {spike_voxel.shape[0]} from {path}"
+            )
+        return spike_voxel
 
     def _resize_spike_voxel(self, spike_voxel, target_h, target_w):
         resized_channels = []

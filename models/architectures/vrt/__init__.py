@@ -7,28 +7,38 @@ from models.registry import register_model
 def build_vrt(**kwargs):
     return VRT(**kwargs)
 
-# Import SNN functionality
-from .snn import (
-    SNNResidualEnhancer,
-    GoProSpikeSNNDataset,
-    train as train_snn,
-    test as test_snn,
-    evaluate as evaluate_snn,
-    sobel_l1_loss,
-    edge_loss
-)
+# Optional SNN functionality (requires extra dependency: snntorch)
+try:
+    from .snn import (
+        SNNResidualEnhancer,
+        GoProSpikeSNNDataset,
+        train as train_snn,
+        test as test_snn,
+        evaluate as evaluate_snn,
+        sobel_l1_loss,
+        edge_loss,
+    )
+    _SNN_AVAILABLE = True
+except ModuleNotFoundError as exc:
+    if exc.name != 'snntorch':
+        raise
+    _SNN_AVAILABLE = False
 
 __all__ = [
-    'compute_flows_2frames', 
-    'VRT', 
+    'compute_flows_2frames',
+    'VRT',
     'build_vrt',
-    'SNNResidualEnhancer',
-    'GoProSpikeSNNDataset',
-    'train_snn',
-    'test_snn',
-    'evaluate_snn',
-    'sobel_l1_loss',
-    'edge_loss'
 ]
+
+if _SNN_AVAILABLE:
+    __all__.extend([
+        'SNNResidualEnhancer',
+        'GoProSpikeSNNDataset',
+        'train_snn',
+        'test_snn',
+        'evaluate_snn',
+        'sobel_l1_loss',
+        'edge_loss',
+    ])
 
 

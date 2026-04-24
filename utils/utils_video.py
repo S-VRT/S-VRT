@@ -11,6 +11,8 @@ from torchvision.utils import make_grid
 
 from utils.utils_image import modcrop as mod_crop
 
+_LMDB_ENV_CACHE = {}
+
 
 def scandir(dir_path, suffix=None, recursive=False, full_path=False):
     """Scan a directory to find the interested files.
@@ -206,24 +208,24 @@ def augment(imgs, hflip=True, rotation=True, flows=None, return_status=False):
 
     def _augment(img):
         if hflip:  # horizontal
-            cv2.flip(img, 1, img)
+            img = cv2.flip(img, 1)
         if vflip:  # vertical
-            cv2.flip(img, 0, img)
+            img = cv2.flip(img, 0)
         if rot90:
             img = img.transpose(1, 0, 2)
-        return img
+        return np.ascontiguousarray(img)
 
     def _augment_flow(flow):
         if hflip:  # horizontal
-            cv2.flip(flow, 1, flow)
+            flow = cv2.flip(flow, 1)
             flow[:, :, 0] *= -1
         if vflip:  # vertical
-            cv2.flip(flow, 0, flow)
+            flow = cv2.flip(flow, 0)
             flow[:, :, 1] *= -1
         if rot90:
             flow = flow.transpose(1, 0, 2)
             flow = flow[:, :, [1, 0]]
-        return flow
+        return np.ascontiguousarray(flow)
 
     if not isinstance(imgs, list):
         imgs = [imgs]
@@ -264,6 +266,8 @@ def paired_random_crop(img_gts, img_lqs, gt_patch_size, scale, gt_path=None):
     Returns:
         list[ndarray] | ndarray: GT images and LQ images. If returned results
             only have one element, just return ndarray.
+        dict: Crop parameters with keys 'top', 'left', 'lq_patch_size'
+            in LQ coordinate space.
     """
 
     if not isinstance(img_gts, list):
@@ -310,7 +314,8 @@ def paired_random_crop(img_gts, img_lqs, gt_patch_size, scale, gt_path=None):
         img_gts = img_gts[0]
     if len(img_lqs) == 1:
         img_lqs = img_lqs[0]
-    return img_gts, img_lqs
+    crop_params = {'top': top, 'left': left, 'lq_patch_size': lq_patch_size}
+    return img_gts, img_lqs, crop_params
 
 
 # Modified from https://github.com/open-mmlab/mmcv/blob/master/mmcv/fileio/file_client.py  # noqa: E501
@@ -420,8 +425,14 @@ class LmdbBackend(BaseStorageBackend):
                                                         f'but received {len(client_keys)} and {len(self.db_paths)}.')
 
         self._client = {}
+        cache_items = tuple(sorted(kwargs.items()))
         for client, path in zip(client_keys, self.db_paths):
-            self._client[client] = lmdb.open(path, readonly=readonly, lock=lock, readahead=readahead, **kwargs)
+            cache_key = (path, readonly, lock, readahead, cache_items)
+            env = _LMDB_ENV_CACHE.get(cache_key)
+            if env is None:
+                env = lmdb.open(path, readonly=readonly, lock=lock, readahead=readahead, **kwargs)
+                _LMDB_ENV_CACHE[cache_key] = env
+            self._client[client] = env
 
     def get(self, filepath, client_key):
         """Get values according to the filepath from one lmdb named client_key.
@@ -498,4 +509,3 @@ def imfrombytes(content, flag='color', float32=False):
     if float32:
         img = img.astype(np.float32) / 255.
     return img
-

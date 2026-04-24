@@ -30,5 +30,3 @@ class Mlp_GEGLU(nn.Module):
 
 
 __all__ = ['Mlp_GEGLU']
-
-

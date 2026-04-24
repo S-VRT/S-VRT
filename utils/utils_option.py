@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 import re
 import glob
+import torch
 
 
 '''
@@ -88,6 +89,22 @@ def parse(opt_path, is_train=True):
         opt['logging']['swanlab_run_id'] = None
     if 'swanlab_run_id_file' not in opt['logging']:
         opt['logging']['swanlab_run_id_file'] = None
+    if 'use_logfire' not in opt['logging']:
+        opt['logging']['use_logfire'] = False
+    if 'logfire_token' not in opt['logging']:
+        opt['logging']['logfire_token'] = None
+    if 'logfire_project_name' not in opt['logging']:
+        opt['logging']['logfire_project_name'] = None
+    if 'logfire_service_name' not in opt['logging']:
+        opt['logging']['logfire_service_name'] = 's-vrt'
+    if 'logfire_environment' not in opt['logging']:
+        opt['logging']['logfire_environment'] = None
+    if 'logfire_log_text' not in opt['logging']:
+        opt['logging']['logfire_log_text'] = True
+    if 'logfire_log_metrics' not in opt['logging']:
+        opt['logging']['logfire_log_metrics'] = True
+    if 'logfire_log_timings' not in opt['logging']:
+        opt['logging']['logfire_log_timings'] = True
 
     # ----------------------------------------
     # datasets
@@ -140,16 +157,25 @@ def parse(opt_path, is_train=True):
         print(f'Distributed training detected: {world_size} GPUs')
         print('Note: gpu_ids in config is ignored in distributed mode')
     else:
-        # Single process mode: can use gpu_ids from config
-        if 'gpu_ids' in opt and opt['gpu_ids']:
-            gpu_list = ','.join(str(x) for x in opt['gpu_ids'])
-            os.environ['CUDA_VISIBLE_DEVICES'] = gpu_list
-            print('export CUDA_VISIBLE_DEVICES=' + gpu_list)
-            opt['num_gpu'] = len(opt['gpu_ids'])
+        visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES')
+        if visible_devices is not None:
+            visible_list = [x.strip() for x in visible_devices.split(',') if x.strip()]
+            opt['num_gpu'] = len(visible_list)
+            opt['gpu_ids'] = list(range(opt['num_gpu']))
+            print('CUDA_VISIBLE_DEVICES already set: ' + (visible_devices if visible_devices else '<empty>'))
+            print('Using logical gpu_ids from visible devices: ' + str(opt['gpu_ids']))
         else:
-            # Default to GPU 0
-            opt['num_gpu'] = 1
-            opt['gpu_ids'] = [0]
+            detected_gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 0
+            if detected_gpu_count > 0:
+                opt['num_gpu'] = detected_gpu_count
+                opt['gpu_ids'] = list(range(detected_gpu_count))
+                print('CUDA_VISIBLE_DEVICES not set; using all visible GPUs detected by PyTorch: ' + str(opt['gpu_ids']))
+            elif 'gpu_ids' in opt and opt['gpu_ids']:
+                opt['num_gpu'] = len(opt['gpu_ids'])
+                print('CUDA_VISIBLE_DEVICES not set and no CUDA device detected; keeping config gpu_ids: ' + str(opt['gpu_ids']))
+            else:
+                opt['num_gpu'] = 0
+                opt['gpu_ids'] = []
         opt['dist'] = False
         print('number of GPUs is: ' + str(opt['num_gpu']))
 

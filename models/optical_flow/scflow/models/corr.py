@@ -1,17 +1,21 @@
-import torch.nn as nn
 import torch.nn.functional as F
 
 try:
     from spatial_correlation_sampler import spatial_correlation_sample
 except ImportError as e:
+    from models.op.spatial_correlation import spatial_correlation_sample
     import warnings
     with warnings.catch_warnings():
         warnings.filterwarnings("default", category=ImportWarning)
-        warnings.warn("failed to load custom correlation module"
-                      "which is needed for FlowNetC", ImportWarning)
+        warnings.warn(
+            "failed to load custom correlation module; using repo-local PyTorch fallback",
+            ImportWarning,
+        )
 
 
 def corr(input1, input2):
+    if input2.dtype != input1.dtype:
+        input2 = input2.to(dtype=input1.dtype)
     out_corr = spatial_correlation_sample(input1,
                                           input2,
                                           kernel_size=1,
