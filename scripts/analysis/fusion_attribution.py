@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 from pathlib import Path
 import sys
 
@@ -195,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
         outputs_dir = sample_dir / "outputs"
         maps_dir = sample_dir / "maps"
         save_rgb_tensor_png(inputs_dir / "blurry_rgb.png", select_center_frame_tensor(lq[:, :, :3]))
+        save_rgb_tensor_png(inputs_dir / "spike_cue.png", select_center_frame_tensor(lq[:, :, 3:]))
         save_rgb_tensor_png(inputs_dir / "gt.png", center_gt)
         save_rgb_tensor_png(outputs_dir / "restored.png", center_output)
         error_full = compute_error_map(center_output, center_gt)
@@ -237,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
 
         panel_images = {
             "Blurry RGB": cv2.imread(str(inputs_dir / "blurry_rgb.png"), cv2.IMREAD_COLOR),
-            "Spike cue": cv2.imread(str(inputs_dir / "blurry_rgb.png"), cv2.IMREAD_COLOR),
+            "Spike cue": cv2.imread(str(inputs_dir / "spike_cue.png"), cv2.IMREAD_COLOR),
             "Restored": cv2.imread(str(outputs_dir / "restored.png"), cv2.IMREAD_COLOR),
             "Error reduction": cv2.imread(str(maps_dir / "error_full.png"), cv2.IMREAD_COLOR),
             "Attribution heatmap": cv2.imread(str(maps_dir / "cam.png"), cv2.IMREAD_COLOR),
