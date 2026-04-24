@@ -111,10 +111,14 @@ def _load_checkpoint_if_available(model, checkpoint: str) -> None:
     if not ckpt.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
     bare = model.get_bare_model(model.netG) if hasattr(model, "get_bare_model") else model.netG
-    state = torch.load(str(ckpt), map_location="cpu")
+    state = torch.load(str(ckpt), map_location="cpu", weights_only=True)
     if isinstance(state, dict) and "params" in state:
         state = state["params"]
-    bare.load_state_dict(state, strict=False)
+    result = bare.load_state_dict(state, strict=False)
+    if result.missing_keys:
+        print(f"[checkpoint] missing keys: {result.missing_keys[:5]}{'...' if len(result.missing_keys) > 5 else ''}")
+    if result.unexpected_keys:
+        print(f"[checkpoint] unexpected keys: {result.unexpected_keys[:5]}{'...' if len(result.unexpected_keys) > 5 else ''}")
 
 
 def _build_test_loader(opt: dict) -> DataLoader:
@@ -181,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
         center_gt = select_center_frame_tensor(gt)
         mask = build_box_mask(sample, center_output.shape[-2], center_output.shape[-1], center_output.device)
         activation = probe.record.output
+        if activation.requires_grad:
+            activation.retain_grad()
         target = masked_charbonnier_target(center_output, center_gt, mask)
         cam = gradient_activation_cam(activation, target)
 
