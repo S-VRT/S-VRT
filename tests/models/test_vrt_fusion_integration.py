@@ -52,7 +52,9 @@ def test_vrt_builds_with_fusion_config():
     rgb = torch.randn(1, 2, 3, 8, 8)
     spike = torch.randn(1, 2, 1, 8, 8)
     fused = model.fusion_adapter(rgb=rgb, spike=spike)
-    assert fused.shape == (1, 2, 4, 8, 8)
+    assert fused["fused_main"].shape == (1, 2, 4, 8, 8)
+    assert fused["backbone_view"].shape == (1, 2, 4, 8, 8)
+    assert fused["meta"]["frame_contract"] == "expanded"
 
 
 def test_vrt_forward_triggers_early_fusion(monkeypatch):
@@ -603,8 +605,7 @@ def test_full_t_rejects_non_spikecv_tfp():
         )
 
 
-def test_vrt_stores_fusion_hook_after_forward():
-    """VRT must store _last_fusion_out and _last_spike_bins after early fusion forward."""
+def test_vrt_stores_explicit_fusion_main_exec_aux_and_meta_after_forward():
     opt = {
         "netG": {
             "input": {
@@ -643,11 +644,59 @@ def test_vrt_stores_fusion_hook_after_forward():
     with torch.no_grad():
         _ = model(x)
 
-    assert hasattr(model, '_last_fusion_out'), "_last_fusion_out not set after forward"
+    assert hasattr(model, '_last_fusion_main'), "_last_fusion_main not set after forward"
+    assert hasattr(model, '_last_fusion_exec'), "_last_fusion_exec not set after forward"
+    assert hasattr(model, '_last_fusion_aux'), "_last_fusion_aux not set after forward"
+    assert hasattr(model, '_last_fusion_meta'), "_last_fusion_meta not set after forward"
     assert hasattr(model, '_last_spike_bins'), "_last_spike_bins not set after forward"
     assert model._last_spike_bins == 4
-    # fusion output: [B, N*S, 3, H, W] = [1, 24, 3, 16, 16]
-    assert model._last_fusion_out.shape == (1, 24, 3, 16, 16)
+    assert model._last_fusion_main.shape == (1, 6, 3, 16, 16)
+    assert model._last_fusion_exec.shape == (1, 24, 3, 16, 16)
+    assert model._last_fusion_aux.shape == (1, 24, 3, 16, 16)
+    assert model._last_fusion_meta["frame_contract"] == "expanded"
+
+
+def test_vrt_expanded_operator_keeps_main_n_and_exec_ns():
+    opt = {
+        "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "gated",
+                "out_chans": 3,
+                "operator_params": {},
+            },
+            "output_mode": "restoration",
+            "restoration_reducer": {"type": "index", "index": 2},
+        }
+    }
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        img_size=[6, 16, 16],
+        window_size=[6, 8, 8],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    ).eval()
+
+    x = torch.randn(1, 6, 7, 16, 16)
+    with torch.no_grad():
+        _ = model(x)
+
+    assert model._last_fusion_main.shape == (1, 6, 3, 16, 16)
+    assert model._last_fusion_exec.shape == (1, 24, 3, 16, 16)
+    assert model._last_fusion_meta["frame_contract"] == "expanded"
 
 
 def test_vrt_builds_with_structured_early_mamba_config():
@@ -679,6 +728,69 @@ def test_vrt_builds_with_structured_early_mamba_config():
     )
     assert model.fusion_operator is not None
     assert getattr(model.fusion_operator, "expects_structured_early", False) is True
+    assert getattr(model.fusion_operator, "frame_contract", None) == "collapsed"
+
+
+def test_vrt_collapsed_operator_keeps_main_and_exec_equal(monkeypatch):
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[6, 8, 8],
+        window_size=[6, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt={
+            "netG": {
+                "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 7},
+                "fusion": {
+                    "placement": "early",
+                    "operator": "mamba",
+                    "out_chans": 3,
+                    "operator_params": {"model_dim": 8, "num_layers": 1},
+                    "early": {"expand_to_full_t": False},
+                },
+                "output_mode": "restoration",
+            }
+        },
+    )
+
+    monkeypatch.setattr(model.fusion_adapter.operator, "forward", lambda rgb, spike: rgb)
+
+    dummy_flows = [
+        torch.zeros(1, 5, 2, 8, 8),
+        torch.zeros(1, 5, 2, 4, 4),
+        torch.zeros(1, 5, 2, 2, 2),
+        torch.zeros(1, 5, 2, 1, 1),
+    ]
+
+    def _fake_get_flows(_x, flow_spike=None):
+        return dummy_flows, dummy_flows
+
+    def _fake_aligned(_x, _fb, _ff):
+        bsz, steps, _, height, width = _x.shape
+        chans = model.backbone_in_chans * 4
+        return [
+            torch.zeros(bsz, steps, chans, height, width),
+            torch.zeros(bsz, steps, chans, height, width),
+        ]
+
+    monkeypatch.setattr(model, "get_flows", _fake_get_flows)
+    monkeypatch.setattr(model, "get_aligned_image_2frames", _fake_aligned)
+    monkeypatch.setattr(model, "forward_features", lambda _x, *_args, **_kwargs: torch.zeros_like(_x))
+
+    x = torch.randn(1, 6, 7, 8, 8)
+    with torch.no_grad():
+        _ = model(x)
+
+    assert model._last_fusion_main.shape == (1, 6, 3, 8, 8)
+    assert model._last_fusion_exec.shape == (1, 6, 3, 8, 8)
+    assert model._last_fusion_meta["frame_contract"] == "collapsed"
 
 
 def test_vrt_structured_early_mamba_collapses_subframe_flow_spike(monkeypatch):
@@ -710,7 +822,7 @@ def test_vrt_structured_early_mamba_collapses_subframe_flow_spike(monkeypatch):
         },
     )
 
-    monkeypatch.setattr(model.fusion_adapter, "forward", lambda rgb, spike: rgb)
+    monkeypatch.setattr(model.fusion_adapter.operator, "forward", lambda rgb, spike: rgb)
 
     captured = {}
     dummy_flows = [
@@ -747,7 +859,74 @@ def test_vrt_structured_early_mamba_collapses_subframe_flow_spike(monkeypatch):
     assert captured["x_shape"] == (1, 6, 3, 8, 8)
     assert tuple(captured["flow_spike"].shape) == (1, 6, 25, 8, 8)
     assert torch.equal(captured["flow_spike"], expected_flow)
+    assert model._last_fusion_main.shape == (1, 6, 3, 8, 8)
+    assert model._last_fusion_exec.shape == (1, 6, 3, 8, 8)
+    assert model._last_fusion_meta["frame_contract"] == "collapsed"
     assert out.shape == (1, 6, 3, 8, 8)
+
+
+def test_vrt_flow_alignment_uses_execution_steps_not_main_steps(monkeypatch):
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[6, 8, 8],
+        window_size=[6, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "scflow", "checkpoint": None, "params": {}},
+        opt={
+            "netG": {
+                "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 7},
+                "fusion": {
+                    "placement": "early",
+                    "operator": "gated",
+                    "out_chans": 3,
+                    "operator_params": {},
+                },
+                "output_mode": "restoration",
+                "restoration_reducer": {"type": "index", "index": 2},
+            }
+        },
+    )
+
+    captured = {}
+    dummy_flows = [
+        torch.zeros(1, 23, 2, 8, 8),
+        torch.zeros(1, 23, 2, 4, 4),
+        torch.zeros(1, 23, 2, 2, 2),
+        torch.zeros(1, 23, 2, 1, 1),
+    ]
+
+    def _fake_get_flows(_x, flow_spike=None):
+        captured["x_shape"] = tuple(_x.shape)
+        captured["flow_shape"] = None if flow_spike is None else tuple(flow_spike.shape)
+        return dummy_flows, dummy_flows
+
+    def _fake_aligned(_x, _fb, _ff):
+        bsz, steps, _, height, width = _x.shape
+        chans = model.backbone_in_chans * 4
+        return [
+            torch.zeros(bsz, steps, chans, height, width),
+            torch.zeros(bsz, steps, chans, height, width),
+        ]
+
+    monkeypatch.setattr(model, "get_flows", _fake_get_flows)
+    monkeypatch.setattr(model, "get_aligned_image_2frames", _fake_aligned)
+    monkeypatch.setattr(model, "forward_features", lambda _x, *_args, **_kwargs: torch.zeros_like(_x))
+
+    x = torch.randn(1, 6, 7, 8, 8)
+    flow_spike = torch.randn(1, 24, 25, 8, 8)
+
+    with torch.no_grad():
+        _ = model(x, flow_spike=flow_spike)
+
+    assert captured["x_shape"][1] == 24
+    assert captured["flow_shape"][1] == 24
 
 
 def test_vrt_rejects_mamba_with_full_t_early_expansion():

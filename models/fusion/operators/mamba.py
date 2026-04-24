@@ -18,11 +18,16 @@ class _MambaBlock(nn.Module):
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         if self.mamba is None:
             raise RuntimeError("mamba_ssm is required for mamba fusion operator.")
+        if not tokens.is_cuda:
+            raise RuntimeError(
+                "mamba_ssm is required for mamba fusion operator with CUDA tensors."
+            )
         return tokens + self.mamba(self.norm(tokens))
 
 
 class MambaFusionOperator(nn.Module):
     expects_structured_early = True
+    frame_contract = "collapsed"
 
     def __init__(self, rgb_chans: int, spike_chans: int, out_chans: int, operator_params: Dict):
         super().__init__()

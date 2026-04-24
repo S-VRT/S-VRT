@@ -185,7 +185,10 @@ class VRT(nn.Module):
         self.fusion_cfg = fusion_cfg
         self.fusion_operator = None
         self.fusion_adapter = None
-        self._last_fusion_out = None
+        self._last_fusion_main = None
+        self._last_fusion_exec = None
+        self._last_fusion_aux = None
+        self._last_fusion_meta = None
         self._last_spike_bins = None
         if self.fusion_enabled:
             fusion_placement = str(fusion_cfg.get('placement', 'early'))
@@ -513,6 +516,10 @@ class VRT(nn.Module):
         fusion_placement = self.fusion_cfg.get('placement', 'early')
         fusion_hook = None
         spike_ctx = None
+        self._last_fusion_main = None
+        self._last_fusion_exec = None
+        self._last_fusion_aux = None
+        self._last_fusion_meta = None
         if self.fusion_enabled and fusion_placement in {'middle', 'hybrid'}:
             spike_ctx = self.build_spike_context(
                 x,
@@ -527,21 +534,29 @@ class VRT(nn.Module):
             x_lq = x.clone()
             x_lq_rgb = self.extract_rgb(x_lq)
             spike_bins = 1
+            output_spike_bins = 1
 
             if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
                 rgb = x[:, :, :3, :, :]
                 spike = x[:, :, 3:, :, :]
                 spike_bins = spike.shape[2]
-                x = self.fusion_adapter(rgb=rgb, spike=spike)
-                self._last_fusion_out = x
+                fusion_result = self.fusion_adapter(rgb=rgb, spike=spike)
+                fused_main = fusion_result["fused_main"]
+                backbone_view = fusion_result["backbone_view"]
+                aux_view = fusion_result["aux_view"]
+                meta = fusion_result["meta"]
+                self._last_fusion_main = fused_main
+                self._last_fusion_exec = backbone_view
+                self._last_fusion_aux = aux_view
+                self._last_fusion_meta = meta
                 self._last_spike_bins = spike_bins
+                x = backbone_view
                 flow_spike = self._align_flow_spike_to_fused_time_axis(
                     flow_spike=flow_spike,
-                    fused_steps=x.size(1),
+                    fused_steps=backbone_view.size(1),
                     spike_bins=spike_bins,
                 )
-                if getattr(self.fusion_adapter, "expects_structured_early", False):
-                    spike_bins = 1
+                output_spike_bins = spike_bins if backbone_view.size(1) != fused_main.size(1) else 1
 
             if timer is not None:
                 with timer.timer('flow_estimation'):
@@ -598,18 +613,18 @@ class VRT(nn.Module):
                         ).transpose(1, 4)
                     ).transpose(1, 4)
                     x = self.conv_last(x).transpose(1, 2)
-                if self.output_mode == "restoration" and spike_bins > 1:
+                if self.output_mode == "restoration" and output_spike_bins > 1:
                     if self.restoration_reducer is None:
                         raise RuntimeError("restoration_reducer must be initialized for restoration mode.")
-                    reduced = self.restoration_reducer(x=x, spike_bins=spike_bins, base_rgb=x_lq_rgb)
+                    reduced = self.restoration_reducer(x=x, spike_bins=output_spike_bins, base_rgb=x_lq_rgb)
                     return reduced + x_lq_rgb
-                if self.output_mode == "interpolation" and spike_bins > 1:
+                if self.output_mode == "interpolation" and output_spike_bins > 1:
                     bsz, frames = x_lq_rgb.shape[:2]
                     chans, height, width = x_lq_rgb.shape[2:]
                     x_lq_rgb_exp = (
                         x_lq_rgb.unsqueeze(2)
-                        .expand(bsz, frames, spike_bins, chans, height, width)
-                        .reshape(bsz, frames * spike_bins, chans, height, width)
+                        .expand(bsz, frames, output_spike_bins, chans, height, width)
+                        .reshape(bsz, frames * output_spike_bins, chans, height, width)
                     )
                     return x + x_lq_rgb_exp
                 return x + x_lq_rgb
@@ -644,18 +659,18 @@ class VRT(nn.Module):
                 _, _, C, H, W = x.shape
                 x_lq_rgb = torch.nn.functional.interpolate(
                     x_lq_rgb, size=(C, H, W), mode='trilinear', align_corners=False)
-                if self.output_mode == "restoration" and spike_bins > 1:
+                if self.output_mode == "restoration" and output_spike_bins > 1:
                     if self.restoration_reducer is None:
                         raise RuntimeError("restoration_reducer must be initialized for restoration mode.")
-                    reduced = self.restoration_reducer(x=x, spike_bins=spike_bins, base_rgb=x_lq_rgb)
+                    reduced = self.restoration_reducer(x=x, spike_bins=output_spike_bins, base_rgb=x_lq_rgb)
                     return reduced + x_lq_rgb
-                if self.output_mode == "interpolation" and spike_bins > 1:
+                if self.output_mode == "interpolation" and output_spike_bins > 1:
                     bsz, frames = x_lq_rgb.shape[:2]
                     chans, height, width = x_lq_rgb.shape[2:]
                     x_lq_rgb_exp = (
                         x_lq_rgb.unsqueeze(2)
-                        .expand(bsz, frames, spike_bins, chans, height, width)
-                        .reshape(bsz, frames * spike_bins, chans, height, width)
+                        .expand(bsz, frames, output_spike_bins, chans, height, width)
+                        .reshape(bsz, frames * output_spike_bins, chans, height, width)
                     )
                     return x + x_lq_rgb_exp
                 return x + x_lq_rgb
@@ -695,8 +710,6 @@ class VRT(nn.Module):
     def _align_flow_spike_to_fused_time_axis(self, flow_spike, fused_steps, spike_bins):
         if flow_spike is None:
             return None
-        if not getattr(self.fusion_adapter, "expects_structured_early", False):
-            return flow_spike
         if flow_spike.ndim != 5 or flow_spike.size(1) == fused_steps:
             return flow_spike
         if spike_bins <= 1 or flow_spike.size(1) != fused_steps * spike_bins:

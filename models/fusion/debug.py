@@ -21,6 +21,7 @@ class FusionDebugDumper:
         self.save_images = bool(raw_cfg.get('save_images', self.enabled))
         self.trigger = str(raw_cfg.get('trigger', 'phase1_last')).strip().lower()
         self.source = str(raw_cfg.get('source', 'train_batch')).strip().lower()
+        self.source_view = str(raw_cfg.get('source_view', 'main')).strip().lower()
         self.subdir = str(raw_cfg.get('subdir', 'fusion_phase1_last'))
         self.max_batches = max(1, int(raw_cfg.get('max_batches', 1)))
         self.max_frames = raw_cfg.get('max_frames', None)
@@ -57,7 +58,16 @@ class FusionDebugDumper:
     def _capture_hook(self, module, inputs, output):
         if not self._armed:
             return
-        tensor = output[0] if isinstance(output, (tuple, list)) else output
+        tensor = None
+        if isinstance(output, dict):
+            if self.source_view == "exec":
+                tensor = output.get("backbone_view", None)
+            if tensor is None:
+                tensor = output.get("fused_main", None)
+        elif isinstance(output, (tuple, list)):
+            tensor = output[0]
+        else:
+            tensor = output
         if isinstance(tensor, torch.Tensor):
             self.capture_tensor(tensor)
 
@@ -87,14 +97,11 @@ class FusionDebugDumper:
             return False
         return True
 
-    def dump_last(self, current_step, folder, lq_paths, gt=None, spike_bins=None, rank=0):
+    def _dump_selected_tensor(self, fusion, current_step, folder, lq_paths, gt=None, spike_bins=None, rank=0):
         if rank != 0 or not (self.enabled and self.save_images):
             return False
-        fusion = self._last_output
-        self._last_output = None
         if fusion is None or fusion.ndim != 5 or fusion.size(2) < 3:
             return False
-
         folder_name = self._resolve_folder_name(folder)
         save_root = Path(self.opt['path']['images']) / folder_name / self.subdir
         save_root.mkdir(parents=True, exist_ok=True)
@@ -124,7 +131,12 @@ class FusionDebugDumper:
             for t in range(frames):
                 img = clip[t, :3, :, :]
                 img = self._chw_rgb_float_to_bgr_uint(img)
-                if clip_spike_bins is not None and clip_spike_bins > 0:
+                if (
+                    clip_spike_bins is not None
+                    and clip_spike_bins > 0
+                    and rgb_frames > 0
+                    and clip.shape[0] == rgb_frames * clip_spike_bins
+                ):
                     rgb_idx = t // clip_spike_bins
                     spike_idx = t % clip_spike_bins
                     filename = (
@@ -137,12 +149,61 @@ class FusionDebugDumper:
             self._write_metric_rows(save_root / f'fusion_metrics_{current_step:d}.csv', metric_rows)
         return True
 
+    def dump_tensor(
+        self,
+        fusion_main,
+        current_step,
+        folder,
+        gt=None,
+        rank=0,
+        lq_paths=None,
+        fusion_exec=None,
+        fusion_meta=None,
+        source_view=None,
+    ):
+        selected_source = str(source_view or self.source_view or "main").strip().lower()
+        if selected_source not in {"main", "exec"}:
+            raise ValueError(f"Unsupported fusion debug source_view={selected_source!r}.")
+
+        fusion = fusion_exec if selected_source == "exec" else fusion_main
+        if not isinstance(fusion, torch.Tensor):
+            return False
+
+        spike_bins = None
+        if selected_source == "exec" and isinstance(fusion_meta, dict):
+            raw_spike_bins = fusion_meta.get("spike_bins", None)
+            if raw_spike_bins is not None:
+                spike_bins = int(raw_spike_bins)
+
+        return self._dump_selected_tensor(
+            fusion=fusion.detach().cpu(),
+            current_step=current_step,
+            folder=folder,
+            lq_paths=lq_paths,
+            gt=gt,
+            spike_bins=spike_bins,
+            rank=rank,
+        )
+
+    def dump_last(self, current_step, folder, lq_paths, gt=None, spike_bins=None, rank=0):
+        fusion = self._last_output
+        self._last_output = None
+        return self._dump_selected_tensor(
+            fusion=fusion,
+            current_step=current_step,
+            folder=folder,
+            lq_paths=lq_paths,
+            gt=gt,
+            spike_bins=spike_bins,
+            rank=rank,
+        )
+
     def _calculate_metric_rows(self, clip_name, clip, gt_clip, spike_bins=None):
         if gt_clip.ndim != 4 or gt_clip.shape[1] < 3:
             return []
         rows = []
         gt_frames = gt_clip.shape[0]
-        if spike_bins is not None and spike_bins > 0:
+        if spike_bins is not None and spike_bins > 0 and clip.shape[0] == gt_frames * spike_bins:
             frame_indices = range(gt_frames)
             time_indices = [idx * spike_bins + spike_bins // 2 for idx in frame_indices]
         elif clip.shape[0] == gt_frames:

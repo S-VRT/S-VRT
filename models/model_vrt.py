@@ -186,14 +186,26 @@ class ModelVRT(ModelPlain):
         super(ModelVRT, self).optimize_parameters(current_step)
         if dump_train_batch:
             self.fusion_debug.disarm()
-            self.fusion_debug.dump_last(
+            bare = self.get_bare_model(self.netG)
+            dumped = self.fusion_debug.dump_tensor(
+                fusion_main=getattr(bare, "_last_fusion_main", None),
+                fusion_exec=getattr(bare, "_last_fusion_exec", None),
+                fusion_meta=getattr(bare, "_last_fusion_meta", {}) or {},
                 current_step=current_step,
                 folder=self.batch_folder,
-                lq_paths=self.batch_lq_paths,
                 gt=getattr(self, 'H', None),
-                spike_bins=getattr(self.get_bare_model(self.netG), '_last_spike_bins', None),
                 rank=self.opt.get('rank', 0),
+                lq_paths=self.batch_lq_paths,
             )
+            if not dumped:
+                self.fusion_debug.dump_last(
+                    current_step=current_step,
+                    folder=self.batch_folder,
+                    lq_paths=self.batch_lq_paths,
+                    gt=getattr(self, 'H', None),
+                    spike_bins=getattr(bare, '_last_spike_bins', None),
+                    rank=self.opt.get('rank', 0),
+                )
 
     def dump_full_frame_fusion_only_from_batch(self, batch, current_step):
         dumper = self.fusion_debug
@@ -215,6 +227,8 @@ class ModelVRT(ModelPlain):
         else:
             lq_rgb = lq[:, :, :3, :, :]
             lq_spike = lq[:, :, 3:, :, :]
+        gt = batch.get('H')
+        lq_paths = batch.get('lq_path')
 
         # Full-frame debug should preserve spatial resolution, but it does not need
         # to re-run the fusion adapter on an entire long validation clip when the
@@ -224,11 +238,9 @@ class ModelVRT(ModelPlain):
             lq_rgb = lq_rgb[:, :max_frames, ...]
             lq_spike = lq_spike[:, :max_frames, ...]
 
-            gt = batch.get('H')
             if isinstance(gt, torch.Tensor) and gt.ndim == 5 and gt.size(1) > 0:
-                batch['H'] = gt[:, :min(gt.size(1), max_frames), ...]
+                gt = gt[:, :min(gt.size(1), max_frames), ...]
 
-            lq_paths = batch.get('lq_path')
             if isinstance(lq_paths, list):
                 trimmed_paths = []
                 for clip_paths in lq_paths:
@@ -236,22 +248,23 @@ class ModelVRT(ModelPlain):
                         trimmed_paths.append(clip_paths[:max_frames])
                     else:
                         trimmed_paths.append(clip_paths)
-                batch['lq_path'] = trimmed_paths
+                lq_paths = trimmed_paths
 
         cpu_adapter = copy.deepcopy(fusion_adapter).cpu().eval()
         with torch.no_grad():
-            fused = cpu_adapter(
+            fusion_result = cpu_adapter(
                 rgb=lq_rgb.float().cpu(),
                 spike=lq_spike.float().cpu(),
             )
-        dumper.capture_tensor(fused)
-        return dumper.dump_last(
+        return dumper.dump_tensor(
+            fusion_main=fusion_result["fused_main"],
+            fusion_exec=fusion_result["backbone_view"],
+            fusion_meta=fusion_result["meta"],
             current_step=current_step,
             folder=batch.get('folder'),
-            lq_paths=batch.get('lq_path'),
-            gt=batch.get('H'),
-            spike_bins=lq_spike.shape[2],
+            gt=gt,
             rank=self.opt.get('rank', 0),
+            lq_paths=lq_paths,
         )
 
     # ----------------------------------------

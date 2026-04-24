@@ -439,11 +439,15 @@ class ModelPlain(ModelBase):
         if aux_weight == 0.0 and pass_weight == 0.0:
             return torch.tensor(0.0, device=self.device)
         vrt = self.get_bare_model(self.netG)
-        if not hasattr(vrt, '_last_fusion_out') or vrt._last_fusion_out is None:
+        fusion_main = getattr(vrt, "_last_fusion_main", None)
+        if fusion_main is None:
             return torch.tensor(0.0, device=self.device)
-        fusion_out = vrt._last_fusion_out
-        S = vrt._last_spike_bins
-        fusion_center = fusion_out[:, S // 2 :: S, :, :, :]  # [B, N, 3, H, W]
+        if fusion_main.size(1) != self.H.size(1):
+            raise ValueError(
+                "Fusion aux loss expected canonical main timeline "
+                f"N={self.H.size(1)}, got {fusion_main.size(1)}."
+            )
+        fusion_center = fusion_main
         loss = torch.tensor(0.0, device=self.device)
         if aux_weight > 0.0:
             loss = loss + aux_weight * self.G_lossfn(fusion_center, self.H)
@@ -465,8 +469,11 @@ class ModelPlain(ModelBase):
             with self._autocast_context(enabled=self.amp_train_enabled, dtype=self.amp_train_dtype):
                 rgb = self.L[:, :, :3, :, :]
                 spike = self.L[:, :, 3:, :, :]
-                fusion_out = vrt.fusion_adapter(rgb=rgb, spike=spike)
-                vrt._last_fusion_out = fusion_out
+                fusion_result = vrt.fusion_adapter(rgb=rgb, spike=spike)
+                vrt._last_fusion_main = fusion_result["fused_main"]
+                vrt._last_fusion_exec = fusion_result["backbone_view"]
+                vrt._last_fusion_aux = fusion_result["aux_view"]
+                vrt._last_fusion_meta = fusion_result["meta"]
                 vrt._last_spike_bins = spike.shape[2]
 
     # ----------------------------------------
