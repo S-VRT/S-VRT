@@ -342,15 +342,17 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     def define_optimizer(self):
         G_optim_params = []
-        for k, v in self.netG.named_parameters():
-            if v.requires_grad:
-                G_optim_params.append(v)
-            else:
-                print('Params [{:s}] will not optimize.'.format(k))
+        for name, param in self.netG.named_parameters():
+            G_optim_params.append(param)
+            if not param.requires_grad:
+                print(f'Params [{name}] are frozen at optimizer build time but kept for later unfreeze.')
         if self.opt_train['G_optimizer_type'] == 'adam':
-            self.G_optimizer = Adam(G_optim_params, lr=self.opt_train['G_optimizer_lr'],
-                                    betas=self.opt_train['G_optimizer_betas'],
-                                    weight_decay=self.opt_train['G_optimizer_wd'])
+            self.G_optimizer = Adam(
+                G_optim_params,
+                lr=self.opt_train['G_optimizer_lr'],
+                betas=self.opt_train['G_optimizer_betas'],
+                weight_decay=self.opt_train['G_optimizer_wd'],
+            )
         else:
             raise NotImplementedError
 
@@ -389,6 +391,37 @@ class ModelPlain(ModelBase):
             and self.fix_iter > 0
             and current_step < self.fix_iter
         )
+
+    def _fusion_warmup_cfg(self) -> dict:
+        return self.opt_train.get("fusion_warmup", {}) or {}
+
+    def _resolve_fusion_warmup_stage(self, current_step):
+        if not self._is_phase1_step(current_step):
+            return "full"
+        head_only_iters = int(self._fusion_warmup_cfg().get("head_only_iters", 0))
+        if current_step < head_only_iters:
+            return "writeback_only"
+        return "token_mixer"
+
+    def _configure_fusion_warmup_trainability(self, current_step):
+        vrt = self.get_bare_model(self.netG)
+        if not getattr(vrt, "fusion_enabled", False):
+            return "full"
+        operator = getattr(getattr(vrt, "fusion_adapter", None), "operator", None)
+        if operator is None or not hasattr(operator, "set_warmup_stage"):
+            return "full"
+        stage = self._resolve_fusion_warmup_stage(current_step)
+        operator.set_warmup_stage(stage)
+        return stage
+
+    def _record_fusion_diagnostics_to_log(self, fusion_meta) -> None:
+        if not isinstance(fusion_meta, dict):
+            return
+        for key in ("token_norm", "mamba_norm", "delta_norm", "gate_mean", "effective_update_norm"):
+            if key in fusion_meta:
+                self.log_dict[f"fusion_{key}"] = float(fusion_meta[key])
+        if "warmup_stage" in fusion_meta:
+            self.log_dict["fusion_warmup_stage"] = str(fusion_meta["warmup_stage"])
 
     def feed_data(self, data, need_H=True, current_step=None):
         with self.timer.timer('data_load'):
@@ -429,14 +462,26 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     # compute fusion auxiliary loss
     # ----------------------------------------
-    def _compute_fusion_aux_loss(self, is_phase1: bool) -> torch.Tensor:
+    def _resolve_phase1_passthrough_weight(self, current_step) -> float:
+        warmup_cfg = self._fusion_warmup_cfg()
+        start = float(warmup_cfg.get("passthrough_weight_start", self.opt_train.get("fusion_passthrough_loss_weight", 0.0)))
+        end = float(warmup_cfg.get("passthrough_weight_end", self.opt_train.get("fusion_passthrough_loss_weight", 0.0)))
+        if not hasattr(self, "fix_iter") or self.fix_iter <= 1:
+            return end
+        clamped = min(max(int(current_step or 0), 0), self.fix_iter - 1)
+        progress = clamped / float(self.fix_iter - 1)
+        return start + (end - start) * progress
+
+    def _compute_fusion_aux_loss(self, is_phase1: bool, current_step=None) -> torch.Tensor:
         if is_phase1:
             aux_weight = self.opt_train.get('phase1_fusion_aux_loss_weight', 0.0)
-            pass_weight = self.opt_train.get('fusion_passthrough_loss_weight', 0.0)
+            pass_weight = self._resolve_phase1_passthrough_weight(current_step)
+            update_penalty_weight = float(self._fusion_warmup_cfg().get("update_penalty_weight", 0.0))
         else:
             aux_weight = self.opt_train.get('phase2_fusion_aux_loss_weight', 0.0)
             pass_weight = 0.0
-        if aux_weight == 0.0 and pass_weight == 0.0:
+            update_penalty_weight = 0.0
+        if aux_weight == 0.0 and pass_weight == 0.0 and update_penalty_weight == 0.0:
             return torch.tensor(0.0, device=self.device)
         vrt = self.get_bare_model(self.netG)
         fusion_main = getattr(vrt, "_last_fusion_main", None)
@@ -454,6 +499,9 @@ class ModelPlain(ModelBase):
         if pass_weight > 0.0:
             blur_rgb = self.L[:, :, :3, :, :]
             loss = loss + pass_weight * self.G_lossfn(fusion_center, blur_rgb)
+        if update_penalty_weight > 0.0:
+            effective_update = fusion_center - self.L[:, :, :3, :, :]
+            loss = loss + update_penalty_weight * effective_update.abs().mean()
         return loss
 
     # ----------------------------------------
@@ -483,6 +531,9 @@ class ModelPlain(ModelBase):
         # 重置当前迭代的计时
         self.timer.current_timings.clear()
 
+        fusion_warmup_stage = self._configure_fusion_warmup_trainability(current_step)
+        self.log_dict['fusion_warmup_stage'] = fusion_warmup_stage
+
         is_phase1 = (
             hasattr(self, 'fix_iter')
             and self.fix_iter > 0
@@ -499,10 +550,10 @@ class ModelPlain(ModelBase):
 
         with self.timer.timer('loss_compute'):
             if is_phase1:
-                G_loss = self._compute_fusion_aux_loss(is_phase1=True)
+                G_loss = self._compute_fusion_aux_loss(is_phase1=True, current_step=current_step)
             else:
                 G_loss = self.G_lossfn_weight * self.G_lossfn(self.E, self.H)
-                G_loss = G_loss + self._compute_fusion_aux_loss(is_phase1=False)
+                G_loss = G_loss + self._compute_fusion_aux_loss(is_phase1=False, current_step=current_step)
 
         with self.timer.timer('backward'):
             if self.grad_scaler.is_enabled():
@@ -542,6 +593,9 @@ class ModelPlain(ModelBase):
 
         # self.log_dict['G_loss'] = G_loss.item()/self.E.size()[0]  # if `reduction='sum'`
         self.log_dict['G_loss'] = G_loss.item()
+
+        vrt = self.get_bare_model(self.netG)
+        self._record_fusion_diagnostics_to_log(getattr(vrt, "_last_fusion_meta", None))
 
         if self.opt_train['E_decay'] > 0:
             with self.timer.timer('update_E'):

@@ -72,6 +72,12 @@ class EarlyFusionAdapter(nn.Module):
             "main_from_exec_rule": main_from_exec_rule,
         }
 
+    def _attach_operator_diagnostics(self, meta: dict[str, Any]) -> dict[str, Any]:
+        diagnostics_getter = getattr(self.operator, "diagnostics", None)
+        if not callable(diagnostics_getter):
+            return meta
+        return {**meta, **diagnostics_getter()}
+
     @staticmethod
     def _reduce_expanded_exec_to_main(exec_view: torch.Tensor, spike_bins: int) -> torch.Tensor:
         return exec_view[:, spike_bins // 2 :: spike_bins, :, :, :]
@@ -109,13 +115,15 @@ class EarlyFusionAdapter(nn.Module):
                 "fused_main": backbone_view,
                 "backbone_view": backbone_view,
                 "aux_view": None,
-                "meta": self._build_meta(
-                    frame_contract=frame_contract,
-                    spike_bins=spike_steps_per_frame,
-                    main_steps=steps,
-                    exec_steps=backbone_view.size(1),
-                    aux_steps=None,
-                    main_from_exec_rule=None,
+                "meta": self._attach_operator_diagnostics(
+                    self._build_meta(
+                        frame_contract=frame_contract,
+                        spike_bins=spike_steps_per_frame,
+                        main_steps=steps,
+                        exec_steps=backbone_view.size(1),
+                        aux_steps=None,
+                        main_from_exec_rule=None,
+                    )
                 ),
             }
         if frame_contract != "expanded":
@@ -138,13 +146,15 @@ class EarlyFusionAdapter(nn.Module):
             "fused_main": fused_main,
             "backbone_view": backbone_view,
             "aux_view": backbone_view,
-            "meta": self._build_meta(
-                frame_contract=frame_contract,
-                spike_bins=spike_steps_per_frame,
-                main_steps=steps,
-                exec_steps=backbone_view.size(1),
-                aux_steps=backbone_view.size(1),
-                main_from_exec_rule="center_subframe",
+            "meta": self._attach_operator_diagnostics(
+                self._build_meta(
+                    frame_contract=frame_contract,
+                    spike_bins=spike_steps_per_frame,
+                    main_steps=steps,
+                    exec_steps=backbone_view.size(1),
+                    aux_steps=backbone_view.size(1),
+                    main_from_exec_rule="center_subframe",
+                )
             ),
         }
 

@@ -1,5 +1,21 @@
 import torch
 import torch.nn as nn
+from types import SimpleNamespace
+
+
+class _WarmupAwareOperator:
+    def __init__(self):
+        self.last_stage = None
+
+    def set_warmup_stage(self, stage):
+        self.last_stage = stage
+
+
+class _WarmupAwareNet:
+    def __init__(self):
+        self.fusion_enabled = True
+        self.fusion_cfg = {"placement": "early"}
+        self.fusion_adapter = SimpleNamespace(operator=_WarmupAwareOperator())
 
 
 class _MiniModel(nn.Module):
@@ -122,3 +138,84 @@ def test_phase2_unfreezes_fix_keys_and_lora_only():
     assert model.backbone_qkv.base.weight.requires_grad is False
     # fusion 仍可训练
     assert model.fusion_operator_gate.weight.requires_grad is True
+
+
+# These tests validate the helper logic on ModelPlain directly.
+# A separate ModelVRT regression test covers the real optimize_parameters path.
+def test_model_plain_configures_writeback_only_stage_during_head_only_iters():
+    from models.model_plain import ModelPlain
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt_train = {"fusion_warmup": {"head_only_iters": 2}}
+    model.fix_iter = 10
+    model.netG = _WarmupAwareNet()
+
+    stage = model._configure_fusion_warmup_trainability(current_step=0)
+
+    assert stage == "writeback_only"
+    assert model.netG.fusion_adapter.operator.last_stage == "writeback_only"
+
+
+def test_model_plain_switches_to_token_mixer_stage_after_head_only_iters():
+    from models.model_plain import ModelPlain
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt_train = {"fusion_warmup": {"head_only_iters": 2}}
+    model.fix_iter = 10
+    model.netG = _WarmupAwareNet()
+
+    stage = model._configure_fusion_warmup_trainability(current_step=3)
+
+    assert stage == "token_mixer"
+    assert model.netG.fusion_adapter.operator.last_stage == "token_mixer"
+
+
+def test_model_plain_optimizer_keeps_frozen_mamba_params_for_later_unfreeze():
+    from models.model_plain import ModelPlain
+    from models.fusion.factory import create_fusion_operator
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt_train = {
+        "G_optimizer_type": "adam",
+        "G_optimizer_lr": 1e-4,
+        "G_optimizer_betas": [0.9, 0.99],
+        "G_optimizer_wd": 0.0,
+    }
+    model.netG = nn.Module()
+    model.netG.fusion_operator = create_fusion_operator("mamba", 3, 1, 3, {"token_dim": 8, "token_stride": 2, "num_layers": 1})
+    model.netG.fusion_operator.set_warmup_stage("writeback_only")
+
+    model.define_optimizer()
+
+    optimizer_param_ids = {
+        id(param)
+        for group in model.G_optimizer.param_groups
+        for param in group["params"]
+    }
+    frozen_param_ids = {id(param) for param in model.netG.fusion_operator.rgb_context_encoder.parameters()}
+    assert frozen_param_ids <= optimizer_param_ids
+
+
+def test_model_plain_current_log_includes_selected_fusion_diagnostics():
+    from collections import OrderedDict
+    from models.model_plain import ModelPlain
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.log_dict = OrderedDict([("G_loss", 1.0)])
+    model.timer = type("TimerStub", (), {"get_current_timings": staticmethod(lambda: {})})()
+
+    model._record_fusion_diagnostics_to_log(
+        {
+            "gate_mean": 0.25,
+            "effective_update_norm": 0.01,
+            "delta_norm": 0.02,
+            "warmup_stage": "token_mixer",
+            "token_norm": 1.5,
+        }
+    )
+
+    log = model.current_log()
+    assert log["fusion_gate_mean"] == 0.25
+    assert log["fusion_effective_update_norm"] == 0.01
+    assert log["fusion_delta_norm"] == 0.02
+    assert log["fusion_warmup_stage"] == "token_mixer"
