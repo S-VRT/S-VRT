@@ -18,6 +18,10 @@ class _MambaBlock(nn.Module):
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
         if self.mamba is None:
             raise RuntimeError("mamba_ssm is required for mamba fusion operator.")
+        if not tokens.is_cuda:
+            raise RuntimeError(
+                "mamba_ssm is required for mamba fusion operator with CUDA tensors."
+            )
         return tokens + self.mamba(self.norm(tokens))
 
 
