@@ -1,3 +1,6 @@
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import cv2
@@ -40,11 +43,6 @@ def test_make_six_column_panel_writes_panel(tmp_path: Path):
     assert panel is not None
     assert panel.shape[0] > 12
     assert panel.shape[1] > 16 * 5
-
-
-import json
-import subprocess
-import sys
 
 
 def test_fusion_attribution_cli_help():
