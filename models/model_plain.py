@@ -453,14 +453,26 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     # compute fusion auxiliary loss
     # ----------------------------------------
-    def _compute_fusion_aux_loss(self, is_phase1: bool) -> torch.Tensor:
+    def _resolve_phase1_passthrough_weight(self, current_step) -> float:
+        warmup_cfg = self._fusion_warmup_cfg()
+        start = float(warmup_cfg.get("passthrough_weight_start", self.opt_train.get("fusion_passthrough_loss_weight", 0.0)))
+        end = float(warmup_cfg.get("passthrough_weight_end", self.opt_train.get("fusion_passthrough_loss_weight", 0.0)))
+        if not hasattr(self, "fix_iter") or self.fix_iter <= 1:
+            return end
+        clamped = min(max(int(current_step or 0), 0), self.fix_iter - 1)
+        progress = clamped / float(self.fix_iter - 1)
+        return start + (end - start) * progress
+
+    def _compute_fusion_aux_loss(self, is_phase1: bool, current_step=None) -> torch.Tensor:
         if is_phase1:
             aux_weight = self.opt_train.get('phase1_fusion_aux_loss_weight', 0.0)
-            pass_weight = self.opt_train.get('fusion_passthrough_loss_weight', 0.0)
+            pass_weight = self._resolve_phase1_passthrough_weight(current_step)
+            update_penalty_weight = float(self._fusion_warmup_cfg().get("update_penalty_weight", 0.0))
         else:
             aux_weight = self.opt_train.get('phase2_fusion_aux_loss_weight', 0.0)
             pass_weight = 0.0
-        if aux_weight == 0.0 and pass_weight == 0.0:
+            update_penalty_weight = 0.0
+        if aux_weight == 0.0 and pass_weight == 0.0 and update_penalty_weight == 0.0:
             return torch.tensor(0.0, device=self.device)
         vrt = self.get_bare_model(self.netG)
         fusion_main = getattr(vrt, "_last_fusion_main", None)
@@ -478,6 +490,9 @@ class ModelPlain(ModelBase):
         if pass_weight > 0.0:
             blur_rgb = self.L[:, :, :3, :, :]
             loss = loss + pass_weight * self.G_lossfn(fusion_center, blur_rgb)
+        if update_penalty_weight > 0.0:
+            effective_update = fusion_center - self.L[:, :, :3, :, :]
+            loss = loss + update_penalty_weight * effective_update.abs().mean()
         return loss
 
     # ----------------------------------------
@@ -526,10 +541,10 @@ class ModelPlain(ModelBase):
 
         with self.timer.timer('loss_compute'):
             if is_phase1:
-                G_loss = self._compute_fusion_aux_loss(is_phase1=True)
+                G_loss = self._compute_fusion_aux_loss(is_phase1=True, current_step=current_step)
             else:
                 G_loss = self.G_lossfn_weight * self.G_lossfn(self.E, self.H)
-                G_loss = G_loss + self._compute_fusion_aux_loss(is_phase1=False)
+                G_loss = G_loss + self._compute_fusion_aux_loss(is_phase1=False, current_step=current_step)
 
         with self.timer.timer('backward'):
             if self.grad_scaler.is_enabled():
