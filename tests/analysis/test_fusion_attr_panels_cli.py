@@ -40,3 +40,53 @@ def test_make_six_column_panel_writes_panel(tmp_path: Path):
     assert panel is not None
     assert panel.shape[0] > 12
     assert panel.shape[1] > 16 * 5
+
+
+import json
+import subprocess
+import sys
+
+
+def test_fusion_attribution_cli_help():
+    result = subprocess.run(
+        [sys.executable, "scripts/analysis/fusion_attribution.py", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "--opt" in result.stdout
+    assert "--checkpoint" in result.stdout
+    assert "--samples" in result.stdout
+
+
+def test_fusion_attribution_cli_dry_run_writes_manifest(tmp_path: Path):
+    opt = tmp_path / "opt.json"
+    samples = tmp_path / "samples.json"
+    out = tmp_path / "out"
+    opt.write_text('{"model":"vrt","netG":{"fusion":{"operator":"gated","placement":"early","mode":"replace"}}}', encoding="utf-8")
+    samples.write_text(
+        '{"samples":[{"clip":"clip","frame":"000001","frame_index":0,"mask":{"type":"box","xyxy":[0,0,2,2]},"reason":"unit"}]}',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/analysis/fusion_attribution.py",
+            "--opt",
+            str(opt),
+            "--checkpoint",
+            "missing.pth",
+            "--samples",
+            str(samples),
+            "--out",
+            str(out),
+            "--dry-run",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "dry run complete" in result.stdout.lower()
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["checkpoint"] == "missing.pth"
+    assert manifest["num_samples"] == 1
