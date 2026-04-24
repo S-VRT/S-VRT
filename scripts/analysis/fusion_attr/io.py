@@ -140,7 +140,8 @@ def save_rgb_tensor_png(path: str | Path, tensor: torch.Tensor) -> None:
     data = _ensure_chw_rgb(tensor)
     rgb = (data.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
     bgr = rgb[:, :, ::-1]
-    cv2.imwrite(str(target), bgr)
+    if not cv2.imwrite(str(target), bgr):
+        raise RuntimeError(f"cv2.imwrite failed for {target}")
 
 
 def save_gray_map_png(path: str | Path, tensor: torch.Tensor) -> None:
@@ -154,4 +155,5 @@ def save_gray_map_png(path: str | Path, tensor: torch.Tensor) -> None:
     else:
         data = np.zeros_like(data)
     img = (data * 255.0).round().astype(np.uint8)
-    cv2.imwrite(str(target), img)
+    if not cv2.imwrite(str(target), img):
+        raise RuntimeError(f"cv2.imwrite failed for {target}")

@@ -41,4 +41,5 @@ def make_six_column_panel(path: str | Path, images: dict[str, np.ndarray]) -> No
     panel = np.concatenate(rendered, axis=1)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(target), panel)
+    if not cv2.imwrite(str(target), panel):
+        raise RuntimeError(f"cv2.imwrite failed for {target}")
