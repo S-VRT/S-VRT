@@ -342,15 +342,17 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     def define_optimizer(self):
         G_optim_params = []
-        for k, v in self.netG.named_parameters():
-            if v.requires_grad:
-                G_optim_params.append(v)
-            else:
-                print('Params [{:s}] will not optimize.'.format(k))
+        for name, param in self.netG.named_parameters():
+            G_optim_params.append(param)
+            if not param.requires_grad:
+                print(f'Params [{name}] are frozen at optimizer build time but kept for later unfreeze.')
         if self.opt_train['G_optimizer_type'] == 'adam':
-            self.G_optimizer = Adam(G_optim_params, lr=self.opt_train['G_optimizer_lr'],
-                                    betas=self.opt_train['G_optimizer_betas'],
-                                    weight_decay=self.opt_train['G_optimizer_wd'])
+            self.G_optimizer = Adam(
+                G_optim_params,
+                lr=self.opt_train['G_optimizer_lr'],
+                betas=self.opt_train['G_optimizer_betas'],
+                weight_decay=self.opt_train['G_optimizer_wd'],
+            )
         else:
             raise NotImplementedError
 
@@ -389,6 +391,28 @@ class ModelPlain(ModelBase):
             and self.fix_iter > 0
             and current_step < self.fix_iter
         )
+
+    def _fusion_warmup_cfg(self) -> dict:
+        return self.opt_train.get("fusion_warmup", {}) or {}
+
+    def _resolve_fusion_warmup_stage(self, current_step):
+        if not self._is_phase1_step(current_step):
+            return "full"
+        head_only_iters = int(self._fusion_warmup_cfg().get("head_only_iters", 0))
+        if current_step < head_only_iters:
+            return "writeback_only"
+        return "token_mixer"
+
+    def _configure_fusion_warmup_trainability(self, current_step):
+        vrt = self.get_bare_model(self.netG)
+        if not getattr(vrt, "fusion_enabled", False):
+            return "full"
+        operator = getattr(getattr(vrt, "fusion_adapter", None), "operator", None)
+        if operator is None or not hasattr(operator, "set_warmup_stage"):
+            return "full"
+        stage = self._resolve_fusion_warmup_stage(current_step)
+        operator.set_warmup_stage(stage)
+        return stage
 
     def feed_data(self, data, need_H=True, current_step=None):
         with self.timer.timer('data_load'):
@@ -482,6 +506,9 @@ class ModelPlain(ModelBase):
     def optimize_parameters(self, current_step):
         # 重置当前迭代的计时
         self.timer.current_timings.clear()
+
+        fusion_warmup_stage = self._configure_fusion_warmup_trainability(current_step)
+        self.log_dict['fusion_warmup_stage'] = fusion_warmup_stage
 
         is_phase1 = (
             hasattr(self, 'fix_iter')
