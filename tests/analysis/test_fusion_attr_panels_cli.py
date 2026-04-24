@@ -88,3 +88,14 @@ def test_fusion_attribution_cli_dry_run_writes_manifest(tmp_path: Path):
     manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["checkpoint"] == "missing.pth"
     assert manifest["num_samples"] == 1
+
+
+from scripts.analysis.fusion_attribution import select_center_frame_tensor
+
+
+def test_select_center_frame_tensor_handles_5d_and_4d():
+    video = torch.zeros(1, 5, 3, 4, 4)
+    video[:, 2] = 7
+    image = torch.ones(1, 3, 4, 4)
+    assert select_center_frame_tensor(video).max().item() == 7
+    assert select_center_frame_tensor(image).max().item() == 1

@@ -46,3 +46,23 @@ def compute_error_map(output: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
     if data.ndim != 3:
         raise ValueError(f"Expected image tensor with channels, got {tuple(output.shape)}")
     return data.mean(dim=0)
+
+
+def gradient_activation_cam(activation: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    if activation.grad is not None:
+        activation.grad.zero_()
+    target.backward(retain_graph=True)
+    if activation.grad is None:
+        raise RuntimeError("Activation gradient was not retained")
+    grad = activation.grad.detach()
+    act = activation.detach()
+    if act.ndim == 5:
+        weights = grad.mean(dim=(-1, -2), keepdim=True)
+        cam = (weights * act).sum(dim=2)
+        cam = cam[0, cam.shape[1] // 2]
+    elif act.ndim == 4:
+        weights = grad.mean(dim=(-1, -2), keepdim=True)
+        cam = (weights * act).sum(dim=1)[0]
+    else:
+        raise ValueError(f"Expected 4D or 5D activation, got {tuple(act.shape)}")
+    return torch.relu(cam.detach())
