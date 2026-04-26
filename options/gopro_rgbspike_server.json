@@ -368,7 +368,8 @@
         "num_layers": 3,
         "alpha_init": 0.05,
         "gate_bias_init": -2.0,
-        "enable_diagnostics": true
+        "enable_diagnostics": true,
+        "mamba_amp_policy": "fp32"
       },
       "debug": {
         "enable": true,

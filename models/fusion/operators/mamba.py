@@ -48,6 +48,13 @@ class MambaFusionOperator(nn.Module):
         alpha_init = float(operator_params.get("alpha_init", 0.05))
         gate_bias_init = float(operator_params.get("gate_bias_init", operator_params.get("init_gate_bias", -2.0)))
         enable_diagnostics = bool(operator_params.get("enable_diagnostics", True))
+        mamba_amp_policy = str(operator_params.get("mamba_amp_policy", "fp32")).strip().lower()
+        if mamba_amp_policy not in {"fp32", "autocast", "fp16", "bf16"}:
+            raise ValueError(
+                f"Unsupported mamba_amp_policy={mamba_amp_policy!r}; "
+                "expected one of ['fp32', 'autocast', 'fp16', 'bf16']."
+            )
+        self.mamba_amp_policy = mamba_amp_policy
 
         self.enable_diagnostics = enable_diagnostics
         self.token_chunk_size = token_chunk_size
@@ -136,6 +143,15 @@ class MambaFusionOperator(nn.Module):
         }
         return summary
 
+    def _prepare_mixer_input(self, seq: torch.Tensor) -> torch.Tensor:
+        if self.mamba_amp_policy == "fp32":
+            return seq.float().contiguous()
+        if self.mamba_amp_policy == "fp16":
+            return seq.to(dtype=torch.float16).contiguous()
+        if self.mamba_amp_policy == "bf16":
+            return seq.to(dtype=torch.bfloat16).contiguous()
+        return seq.contiguous()
+
     def _run_mamba_token_mixer(self, seq: torch.Tensor) -> torch.Tensor:
         chunk_size = self.token_chunk_size
         if chunk_size <= 0 or seq.size(0) <= chunk_size:
@@ -196,10 +212,13 @@ class MambaFusionOperator(nn.Module):
             mixer_input_dtype = seq.dtype
 
         with self._profiled_timer("mamba_mixer"):
-            with self._device_autocast_disabled_context(seq):
-                seq = seq.float()
-                seq = seq.contiguous()
+            if self.mamba_amp_policy == "autocast":
+                seq = self._prepare_mixer_input(seq)
                 seq = self._run_mamba_token_mixer(seq)
+            else:
+                with self._device_autocast_disabled_context(seq):
+                    seq = self._prepare_mixer_input(seq)
+                    seq = self._run_mamba_token_mixer(seq)
             seq = seq.to(dtype=mixer_input_dtype)
 
         with self._profiled_timer("mamba_writeback"):

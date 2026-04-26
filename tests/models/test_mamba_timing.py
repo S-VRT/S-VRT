@@ -98,3 +98,31 @@ def test_mamba_operator_uses_record_function_labels(monkeypatch):
     assert "mamba_mixer" in labels
     assert "mamba_writeback" in labels
     assert "mamba_upsample" in labels
+
+
+def test_mamba_operator_defaults_to_fp32_mixer_policy(monkeypatch):
+    from models.fusion.operators import mamba as mamba_module
+    from models.fusion.operators.mamba import MambaFusionOperator
+
+    class _FakeBlock(torch.nn.Module):
+        def __init__(self, model_dim, d_state, d_conv, expand):
+            super().__init__()
+
+        def forward(self, tokens):
+            assert tokens.dtype == torch.float32
+            return tokens
+
+    monkeypatch.setattr(mamba_module, "_MambaBlock", _FakeBlock)
+    operator = MambaFusionOperator(3, 1, 3, {"token_dim": 4, "token_stride": 2, "num_layers": 1})
+    assert operator.mamba_amp_policy == "fp32"
+
+
+def test_mamba_operator_rejects_unknown_amp_policy():
+    from models.fusion.operators.mamba import MambaFusionOperator
+
+    try:
+        MambaFusionOperator(3, 1, 3, {"mamba_amp_policy": "bad"})
+    except ValueError as exc:
+        assert "mamba_amp_policy" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for bad mamba_amp_policy")
