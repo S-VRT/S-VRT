@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import torch
 from torch.profiler import ProfilerActivity, schedule
@@ -18,12 +18,13 @@ class TrainProfilerConfig:
     warmup: int = 1
     active: int = 2
     repeat: int = 1
-    ranks: Optional[List[int]] = None  # None / "all" means all ranks
+    ranks: tuple[int, ...] | None = None  # None / "all" means all ranks
     record_shapes: bool = False
     with_stack: bool = False
     profile_memory: bool = False
     rank: int = 0
     experiment_dir: Path = field(default_factory=lambda: Path("."))
+    trace_dir: Path = field(default_factory=lambda: Path("."))
 
     @classmethod
     def from_opt(
@@ -39,8 +40,9 @@ class TrainProfilerConfig:
         if ranks_raw is None or ranks_raw == "all":
             ranks = None  # all ranks
         else:
-            ranks = list(ranks_raw)
+            ranks = tuple(ranks_raw)
 
+        experiment_dir_path = Path(experiment_dir)
         return cls(
             enable=enable,
             start_iter=int(pcfg.get("start_iter", 0)),
@@ -53,7 +55,8 @@ class TrainProfilerConfig:
             with_stack=bool(pcfg.get("with_stack", False)),
             profile_memory=bool(pcfg.get("profile_memory", False)),
             rank=rank,
-            experiment_dir=Path(experiment_dir),
+            experiment_dir=experiment_dir_path,
+            trace_dir=experiment_dir_path / "profiles" / f"rank{rank}",
         )
 
     @property
@@ -63,10 +66,6 @@ class TrainProfilerConfig:
         if self.ranks is None:
             return True
         return self.rank in self.ranks
-
-    @property
-    def trace_dir(self) -> Path:
-        return self.experiment_dir / "profiles" / f"rank{self.rank}"
 
 
 class TrainProfiler:
