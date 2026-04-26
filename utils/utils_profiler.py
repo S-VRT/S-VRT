@@ -10,7 +10,7 @@ import torch
 from torch.profiler import ProfilerActivity, schedule
 
 
-@dataclass
+@dataclass(frozen=True)
 class TrainProfilerConfig:
     enable: bool = False
     start_iter: int = 0
