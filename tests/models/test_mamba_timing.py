@@ -114,6 +114,11 @@ def test_mamba_operator_defaults_to_fp32_mixer_policy(monkeypatch):
 
     monkeypatch.setattr(mamba_module, "_MambaBlock", _FakeBlock)
     operator = MambaFusionOperator(3, 1, 3, {"token_dim": 4, "token_stride": 2, "num_layers": 1})
+
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+    operator(rgb, spike)
+
     assert operator.mamba_amp_policy == "fp32"
 
 
