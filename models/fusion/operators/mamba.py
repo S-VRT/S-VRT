@@ -122,7 +122,6 @@ class MambaFusionOperator(nn.Module):
             return torch.autocast(device_type="cuda", enabled=False)
         if tensor.device.type == "cpu":
             return torch.autocast(device_type="cpu", enabled=False)
-        from contextlib import nullcontext
         return nullcontext()
 
     @staticmethod
