@@ -19,9 +19,9 @@ def test_window_attention_forward():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_window_attention_flash_vs_sdpa_parity():
-    """互注意力路径：flash-attn 与 SDPA 数值接近（atol=1e-2，fp16 精度）"""
+    """互注意力路径：flash-attn 与 SDPA 数值接近（atol=5e-2，fp16 精度）"""
     try:
-        from flash_attn import flash_attn_func as _fa
+        from flash_attn import flash_attn_func as _
     except ImportError:
         pytest.skip("flash-attn not installed")
 
@@ -33,6 +33,7 @@ def test_window_attention_flash_vs_sdpa_parity():
     device = "cuda"
     dtype = torch.float16
 
+    torch.manual_seed(42)
     x = torch.randn(Bn, N, dim, dtype=dtype, device=device)
 
     # mut_attn=False → 只走 self-attention 路径（relative_position_encoding=True）
@@ -59,5 +60,6 @@ def test_window_attention_flash_vs_sdpa_parity():
 
     # flash-attn vs SDPA for mutual-attention path: relaxed tolerance for fp16
     assert out_flash_raw.shape == (Bn, N, dim)
+    assert out_sdpa.shape == (Bn, N, dim)
     assert torch.allclose(out_flash_raw.float(), out_sdpa.float(), atol=5e-2, rtol=1e-2), \
         f"max diff: {(out_flash_raw.float() - out_sdpa.float()).abs().max().item():.4f}"
