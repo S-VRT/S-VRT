@@ -23,7 +23,6 @@ class TrainProfilerConfig:
     with_stack: bool = False
     profile_memory: bool = False
     rank: int = 0
-    experiment_dir: Path = field(default_factory=lambda: Path("."))
     trace_dir: Path = field(default_factory=lambda: Path("."))
 
     @classmethod
@@ -51,11 +50,10 @@ class TrainProfilerConfig:
             active=max(1, int(pcfg.get("active", 2))),
             repeat=max(1, int(pcfg.get("repeat", 1))),
             ranks=ranks,
-            record_shapes=bool(pcfg.get("record_shapes", False)),
+            record_shapes=bool(pcfg.get("record_shapes", True)),
             with_stack=bool(pcfg.get("with_stack", False)),
             profile_memory=bool(pcfg.get("profile_memory", False)),
             rank=rank,
-            experiment_dir=experiment_dir_path,
             trace_dir=experiment_dir_path / "profiles" / f"rank{rank}",
         )
 
@@ -82,7 +80,7 @@ class TrainProfiler:
         self._active = False
 
     def maybe_start(self) -> None:
-        if not self.cfg.enable or not self.cfg.should_profile_rank:
+        if not self.cfg.should_profile_rank:
             return
 
         self.cfg.trace_dir.mkdir(parents=True, exist_ok=True)
@@ -104,7 +102,7 @@ class TrainProfiler:
             with_stack=self.cfg.with_stack,
             profile_memory=self.cfg.profile_memory,
         )
-        self._profiler.__enter__()
+        self._profiler.start()
         self._active = True
 
         if self.logger is not None:
@@ -125,7 +123,7 @@ class TrainProfiler:
     def close(self) -> None:
         if not self._active or self._profiler is None:
             return
-        self._profiler.__exit__(None, None, None)
+        self._profiler.stop()
         self._active = False
         if self.logger is not None:
             self.logger.info(

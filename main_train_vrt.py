@@ -554,439 +554,441 @@ def main():
     train_profiler = TrainProfiler(profiler_cfg, logger=logger if opt["rank"] == 0 else None)
     train_profiler.maybe_start()
 
-    fix_iter = opt["train"].get("fix_iter", 0)
-    last_is_phase1 = is_phase1
+    try:
+        fix_iter = opt["train"].get("fix_iter", 0)
+        last_is_phase1 = is_phase1
 
-    # 开始训练循环（最多运行 1000000 个 epoch，实际由 total_iter 控制）
-    for epoch in range(1000000):  # 持续运行直到达到总迭代次数
-        # 为 DistributedSampler 设置 epoch，确保每个 epoch 数据打乱顺序不同
-        if opt['dist']:
-            train_sampler.set_epoch(epoch)
+        # 开始训练循环（最多运行 1000000 个 epoch，实际由 total_iter 控制）
+        for epoch in range(1000000):  # 持续运行直到达到总迭代次数
+            # 为 DistributedSampler 设置 epoch，确保每个 epoch 数据打乱顺序不同
+            if opt['dist']:
+                train_sampler.set_epoch(epoch)
         
-        # 遍历训练数据
-        train_loader_iter = iter(train_loader)
-        while True:
-            next_step = current_step + 1
-            is_phase1_now = compute_is_phase1(next_step, fix_iter)
-            if is_phase1_now != last_is_phase1:
-                bundle = build_train_loader_bundle(opt, train_dataset_opt_base, is_phase1_now, seed, logger)
-                train_set = bundle["train_set"]
-                train_sampler = bundle["train_sampler"]
-                train_loader = bundle["train_loader"]
-                active_train_dataset_opt = bundle["dataset_opt"]
-                if opt['dist']:
-                    train_sampler.set_epoch(epoch)
-                train_loader_iter = iter(train_loader)
+            # 遍历训练数据
+            train_loader_iter = iter(train_loader)
+            while True:
+                next_step = current_step + 1
+                is_phase1_now = compute_is_phase1(next_step, fix_iter)
+                if is_phase1_now != last_is_phase1:
+                    bundle = build_train_loader_bundle(opt, train_dataset_opt_base, is_phase1_now, seed, logger)
+                    train_set = bundle["train_set"]
+                    train_sampler = bundle["train_sampler"]
+                    train_loader = bundle["train_loader"]
+                    active_train_dataset_opt = bundle["dataset_opt"]
+                    if opt['dist']:
+                        train_sampler.set_epoch(epoch)
+                    train_loader_iter = iter(train_loader)
 
-                if opt["rank"] == 0:
-                    logger.info(
-                        "[TRAIN_PHASE] switch=%s batch_size=%d gt_size=%d (rebuild train loader)",
-                        "phase1" if is_phase1_now else "phase2",
-                        active_train_dataset_opt["dataloader_batch_size"],
-                        active_train_dataset_opt["gt_size"],
-                    )
-                last_is_phase1 = is_phase1_now
+                    if opt["rank"] == 0:
+                        logger.info(
+                            "[TRAIN_PHASE] switch=%s batch_size=%d gt_size=%d (rebuild train loader)",
+                            "phase1" if is_phase1_now else "phase2",
+                            active_train_dataset_opt["dataloader_batch_size"],
+                            active_train_dataset_opt["gt_size"],
+                        )
+                    last_is_phase1 = is_phase1_now
 
-            model.timer.current_timings.clear()
-            try:
-                with model.timer.timer('batch_wait'):
-                    train_data = next(train_loader_iter)
-            except StopIteration:
-                break
+                model.timer.current_timings.clear()
+                try:
+                    with model.timer.timer('batch_wait'):
+                        train_data = next(train_loader_iter)
+                except StopIteration:
+                    break
 
-            current_step = next_step  # 更新当前训练步数
+                current_step = next_step  # 更新当前训练步数
 
-            # -------------------------------
-            # 1) 更新学习率
-            # -------------------------------
-            # 根据当前步数调整学习率（可能使用学习率调度器）
-            model.update_learning_rate(current_step)
-
-            # -------------------------------
-            # 2) 输入数据对（低质量图像和高质量图像）
-            # -------------------------------
-            # 将训练数据（低质量输入和高质量标签）送入模型
-            model.feed_data(train_data, current_step=current_step)
-
-            # -------------------------------
-            # 3) 优化模型参数
-            # -------------------------------
-            # 执行前向传播、计算损失、反向传播和参数更新
-            model.optimize_parameters(current_step)
-            train_profiler.step(current_step)
-
-            # -------------------------------
-            # 4) 记录训练信息
-            # -------------------------------
-            # 每隔一定步数打印训练信息（损失值、学习率等）
-            if current_step % opt['train']['checkpoint_print'] == 0:
-                logs = build_timing_summary(
-                    model.current_log(),
-                    dist_enabled=opt.get('dist', False),
-                    device=model.device,
-                )
-            if current_step % opt['train']['checkpoint_print'] == 0 and opt['rank'] == 0:
-                # 构建日志消息：包含 epoch、迭代次数、学习率
-                message = '<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> '.format(epoch, current_step,
-                                                                          model.current_learning_rate())
-                # 将损失信息合并到消息中
-                for k, v in logs.items():  # 合并日志信息到消息
-                    if k.startswith('time_'):
-                        # 耗时信息使用不同的格式
-                        message += '{:s}: {:.4f}s '.format(k.replace('time_', ''), v)
-                    elif isinstance(v, numbers.Real):
-                        message += '{:s}: {:.3e} '.format(k, float(v))
-                    else:
-                        message += '{:s}: {} '.format(k, v)
-                logger.info(message)  # 写入日志文件
-                
-                # 记录到 TensorBoard 和 WANDB（用于可视化）
-                if tb_logger is not None:
-                    # 分离训练指标和耗时指标，分别记录到不同命名空间
-                    train_logs = {
-                        k: float(v)
-                        for k, v in logs.items()
-                        if not k.startswith('time_') and isinstance(v, numbers.Real)
-                    }
-                    train_logs['learning_rate'] = model.current_learning_rate()
-                    # 耗时指标去掉time_前缀，记录到time命名空间
-                    time_logs = {k.replace('time_', ''): v for k, v in logs.items() if k.startswith('time_')}
-                    
-                    if train_logs:
-                        tb_logger.log_scalars(current_step, train_logs, tag_prefix='train')
-                    if time_logs:
-                        tb_logger.log_scalars(current_step, time_logs, tag_prefix='time')
-
-            # -------------------------------
-            # 5) 保存模型检查点
-            # -------------------------------
-            # 每隔一定步数保存模型（包括网络权重和优化器状态）
-            if current_step % opt['train']['checkpoint_save'] == 0 and opt['rank'] == 0:
-                logger.info('Saving the model.')
-                model.save(current_step)  # 保存当前步数的模型
-            # 在分布式训练中，等待 rank 0 完成保存，避免进程间状态不一致
-            if current_step % opt['train']['checkpoint_save'] == 0 and opt['dist']:
-                barrier_safe()  # 同步所有进程
-
-
-            # 特殊处理：当使用静态计算图时，在改变计算图之前提前保存模型
-            # 这是因为在分布式训练中使用 use_checkpoint=True 时存在 bug
-            if opt['use_static_graph'] and (current_step == opt['train']['fix_iter'] - 1):
-                current_step += 1
+                # -------------------------------
+                # 1) 更新学习率
+                # -------------------------------
+                # 根据当前步数调整学习率（可能使用学习率调度器）
                 model.update_learning_rate(current_step)
-                if opt['rank'] == 0:
-                    model.save(current_step)  # 提前保存模型
-                # 等待 rank 0 完成保存
-                if opt['dist']:
-                    barrier_safe()
-                current_step -= 1  # 恢复步数
-                if opt['rank'] == 0:
-                    logger.info('Saving models ahead of time when changing the computation graph with use_static_graph=True'
-                                ' (we need it due to a bug with use_checkpoint=True in distributed training). The training '
-                                'will be terminated by PyTorch in the next iteration. Just resume training with the same '
-                                '.json config file.')
 
-            # -------------------------------
-            # 6) 模型测试和评估
-            # -------------------------------
-            # 每隔一定步数在测试集上评估模型性能
-            _ckpt_test = opt['train']['checkpoint_test']
-            if isinstance(_ckpt_test, list):
-                _do_test = current_step in _ckpt_test
-            else:
-                _do_test = current_step % _ckpt_test == 0
-            if _do_test:
+                # -------------------------------
+                # 2) 输入数据对（低质量图像和高质量图像）
+                # -------------------------------
+                # 将训练数据（低质量输入和高质量标签）送入模型
+                model.feed_data(train_data, current_step=current_step)
 
-                if opt['rank'] == 0:
-                    logger.info('[VALIDATION] Starting model validation/test phase...')
-                mem_before_validation = log_memory_stage(logger, 'Before validation memory cleanup', opt['rank'])
+                # -------------------------------
+                # 3) 优化模型参数
+                # -------------------------------
+                # 执行前向传播、计算损失、反向传播和参数更新
+                model.optimize_parameters(current_step)
+                train_profiler.step(current_step)
 
-
-                is_master_process = opt['rank'] == 0
-                if opt['dist']:
-                    barrier_safe()
-
-                # 初始化测试结果字典，用于存储所有文件夹的指标
-                test_results = OrderedDict()
-                test_results['psnr'] = []  # 峰值信噪比（RGB 通道）
-                test_results['ssim'] = []  # 结构相似性指数（RGB 通道）
-                test_results['psnr_y'] = []  # 峰值信噪比（Y 通道，亮度）
-                test_results['ssim_y'] = []  # 结构相似性指数（Y 通道，亮度）
-
-                # 初始化 gt 变量，避免在循环外部引用时出现 UnboundLocalError
-                gt = None
-
-                # 遍历测试数据
-                for idx, test_data in enumerate(test_loader):
-                    if opt['rank'] == 0:
-                        maybe_dump_full_frame_fusion_debug_from_batch(model, test_data, current_step, idx)
-                    if idx < 2:
-                        log_validation_probe(logger, f'before feed_data batch={idx}', opt['rank'])
-                        if opt['rank'] == 0:
-                            batch_summary = []
-                            for key, value in test_data.items():
-                                if hasattr(value, 'shape'):
-                                    batch_summary.append(f'{key}:{tuple(value.shape)}')
-                                elif isinstance(value, (list, tuple)):
-                                    batch_summary.append(f'{key}:len={len(value)}')
-                                else:
-                                    batch_summary.append(f'{key}:{type(value).__name__}')
-                            logger.info(f'[VAL_BATCH] idx={idx} contents: {", ".join(batch_summary)}')
-                    # 将测试数据送入模型
-                    model.feed_data(test_data)
-                    if idx < 2:
-                        log_validation_probe(logger, f'after feed_data batch={idx}', opt['rank'])
-                    # 执行测试（前向传播，不更新梯度）
-                    if idx < 2 and opt['rank'] == 0:
-                        logger.info(f'[VAL_BATCH] idx={idx} entering model.test()')
-                    model.test()
-                    if idx < 2:
-                        log_validation_probe(logger, f'after model.test batch={idx}', opt['rank'])
-                        if opt['rank'] == 0:
-                            logger.info(f'[VAL_BATCH] idx={idx} model.test() completed')
-
-                    if not should_score_validation_batch(opt):
-                        continue
-
-                    # 获取模型输出和真实标签
-                    visuals = model.current_visuals()
-                    output = visuals['E']  # E: 估计/输出图像 (Estimated)
-                    gt = visuals['H'] if 'H' in visuals else None  # H: 高质量真实图像 (High-quality)
-                    folder = test_data['folder']  # 测试序列的文件夹名称
-                    folder_name = folder[0] if isinstance(folder, (list, tuple)) else folder
-                    total_test_batches = len(test_loader)
-
-                    # 初始化当前测试序列的结果字典
-                    test_results_folder = OrderedDict()
-                    test_results_folder['psnr'] = []
-                    test_results_folder['ssim'] = []
-                    test_results_folder['psnr_y'] = []
-                    test_results_folder['ssim_y'] = []
-
-                    # 处理批次中的每一张图像
-                    lq_paths = test_data.get('lq_path')
-                    batch_clip_count = output.shape[0]
-                    for i in range(batch_clip_count):
-                        clip_name = f'clip_{i:03d}'
-                        if lq_paths is not None:
-                            clip_source = None
-                            try:
-                                clip_source = lq_paths[i]
-                            except Exception:
-                                clip_source = None
-                            if isinstance(clip_source, (list, tuple)) and clip_source:
-                                clip_source = clip_source[0]
-                            if isinstance(clip_source, str):
-                                clip_name = os.path.splitext(os.path.basename(clip_source))[0]
-                        # -----------------------
-                        # 保存估计的图像 E
-                        # -----------------------
-                        # 将输出张量转换为 numpy 数组，并限制在 [0, 1] 范围内
-                        img = output[i, ...].clamp_(0, 1).numpy()
-                        if img.ndim == 3:
-                            # 从 CHW-RGB 格式转换为 HWC-BGR 格式（OpenCV 使用 BGR）
-                            img = np.transpose(img[[2, 1, 0], :, :], (1, 2, 0))  # CHW-RGB to HWC-BGR
-                        # 将浮点数 [0, 1] 转换为 uint8 [0, 255]
-                        img = (img * 255.0).round().astype(np.uint8)  # float32 to uint8
-
-                        # 如果配置要求保存图像，则保存到磁盘
-                        if opt['val']['save_img']:
-                            save_dir = opt['path']['images']
-                            util.mkdir(save_dir)
-                            # 创建文件夹并保存图像
-                            os.makedirs(f'{save_dir}/{folder_name}', exist_ok=True)
-                            cv2.imwrite(f'{save_dir}/{folder_name}/{clip_name}_{current_step:d}.png', img)
-
-                        # -----------------------
-                        # 计算 PSNR 和 SSIM
-                        # -----------------------
-                        # 只有在有真实标签时才计算指标
-                        if gt is not None:
-                            # 处理真实标签图像
-                            img_gt = gt[i, ...].clamp_(0, 1).numpy()
-                            if img_gt.ndim == 3:
-                                # 从 CHW-RGB 格式转换为 HWC-BGR 格式
-                                img_gt = np.transpose(img_gt[[2, 1, 0], :, :], (1, 2, 0))  # CHW-RGB to HWC-BGR
-                            img_gt = (img_gt * 255.0).round().astype(np.uint8)  # float32 to uint8
-                            img_gt = np.squeeze(img_gt)  # 移除单维度
-
-                            # 计算 RGB 通道的 PSNR 和 SSIM
-                            clip_psnr = util.calculate_psnr(img, img_gt, border=0)
-                            clip_ssim = util.calculate_ssim(img, img_gt, border=0)
-                            test_results_folder['psnr'].append(clip_psnr)
-                            test_results_folder['ssim'].append(clip_ssim)
-
-                            # 如果是 RGB 图像，计算 Y 通道（亮度）的指标
-                            if img_gt.ndim == 3:  # RGB image
-                                # 转换为 YCbCr 颜色空间，只取 Y 通道（亮度）
-                                img_y = util.bgr2ycbcr(img.astype(np.float32) / 255.) * 255.
-                                img_gt_y = util.bgr2ycbcr(img_gt.astype(np.float32) / 255.) * 255.
-                                # 计算 Y 通道的 PSNR 和 SSIM
-                                clip_psnr_y = util.calculate_psnr(img_y, img_gt_y, border=0)
-                                clip_ssim_y = util.calculate_ssim(img_y, img_gt_y, border=0)
-                            else:
-                                # 灰度图像，Y 通道指标等于 RGB 指标
-                                clip_psnr_y = clip_psnr
-                                clip_ssim_y = clip_ssim
-                            test_results_folder['psnr_y'].append(clip_psnr_y)
-                            test_results_folder['ssim_y'].append(clip_ssim_y)
-
-                    # 如果有计算的指标，记录并保存结果
-                    if len(test_results_folder['psnr']) > 0:
-                        # 计算当前测试序列的平均指标
-                        psnr = sum(test_results_folder['psnr']) / len(test_results_folder['psnr'])
-                        ssim = sum(test_results_folder['ssim']) / len(test_results_folder['ssim'])
-                        psnr_y = sum(test_results_folder['psnr_y']) / len(test_results_folder['psnr_y'])
-                        ssim_y = sum(test_results_folder['ssim_y']) / len(test_results_folder['ssim_y'])
-
-                        test_results['psnr'].append(psnr)
-                        test_results['ssim'].append(ssim)
-                        test_results['psnr_y'].append(psnr_y)
-                        test_results['ssim_y'].append(ssim_y)
-
-                        # 打印每个文件夹的结果（保持原有的打印行为）
-                        print('[Rank {}] Testing {:20s} ({:2d}/{}) - PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
-                              format(opt['rank'], folder_name, len(test_results['psnr']), len(test_loader), psnr, ssim, psnr_y, ssim_y))
-                    else:
-                        # 没有真实标签时，只记录测试序列名称
-                        pass
-
-
-                # 计算全局平均值和最大值
-                local_psnr_sum = sum(test_results['psnr'])
-                local_ssim_sum = sum(test_results['ssim'])
-                local_psnr_y_sum = sum(test_results['psnr_y'])
-                local_ssim_y_sum = sum(test_results['ssim_y'])
-
-                local_psnr_count = len(test_results['psnr'])
-                local_ssim_count = len(test_results['ssim'])
-                local_psnr_y_count = len(test_results['psnr_y'])
-                local_ssim_y_count = len(test_results['ssim_y'])
-
-                device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-                metrics_tensor = torch.tensor(
-                    [local_psnr_sum, local_ssim_sum, local_psnr_y_sum, local_ssim_y_sum,
-                     local_psnr_count, local_ssim_count, local_psnr_y_count, local_ssim_y_count],
-                    dtype=torch.float64, device=device)
-
-                world_size = opt.get('world_size', 1)
-
-                if opt['dist'] and dist.is_initialized():
-                    # Gather per-rank folder metrics so rank 0 can print each rank's results and compute global stats
-                    gathered = [torch.zeros_like(metrics_tensor) for _ in range(world_size)]
-                    dist.all_gather(gathered, metrics_tensor)
-
-                    if is_master_process:
-                        # Print per-rank average results and collect all folder metrics for global max
-                        all_folder_psnr = []
-                        all_folder_ssim = []
-                        all_folder_psnr_y = []
-                        all_folder_ssim_y = []
-
-                        for r, t in enumerate(gathered):
-                            (psnr_sum, ssim_sum, psnr_y_sum, ssim_y_sum,
-                             psnr_cnt, ssim_cnt, psnr_y_cnt, ssim_y_cnt) = t.tolist()
-                            psnr_cnt = int(round(psnr_cnt))
-                            ssim_cnt = int(round(ssim_cnt))
-                            psnr_y_cnt = int(round(psnr_y_cnt))
-                            ssim_y_cnt = int(round(ssim_y_cnt))
-                            if psnr_cnt > 0:
-                                ave_psnr_r = psnr_sum / psnr_cnt
-                                ave_ssim_r = ssim_sum / max(ssim_cnt, 1)
-                                ave_psnr_y_r = psnr_y_sum / max(psnr_y_cnt, 1)
-                                ave_ssim_y_r = ssim_y_sum / max(ssim_y_cnt, 1)
-                                logger.info('[Rank {}] Average PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
-                                            format(r, ave_psnr_r, ave_ssim_r, ave_psnr_y_r, ave_ssim_y_r))
-
-                                # Collect all folder metrics for global max calculation
-                                all_folder_psnr.extend([ave_psnr_r] * psnr_cnt)
-                                all_folder_ssim.extend([ave_ssim_r] * ssim_cnt)
-                                all_folder_psnr_y.extend([ave_psnr_y_r] * psnr_y_cnt)
-                                all_folder_ssim_y.extend([ave_ssim_y_r] * ssim_y_cnt)
-
-                        # Compute global maximums and averages
-                        if all_folder_psnr:
-                            # Find the clip with maximum PSNR and use its complete metrics
-                            max_psnr_idx = all_folder_psnr.index(max(all_folder_psnr))
-                            max_psnr = all_folder_psnr[max_psnr_idx]
-                            max_ssim = all_folder_ssim[max_psnr_idx]
-                            max_psnr_y = all_folder_psnr_y[max_psnr_idx]
-                            max_ssim_y = all_folder_ssim_y[max_psnr_idx]
-
-                            avg_psnr = sum(all_folder_psnr) / len(all_folder_psnr)
-                            avg_ssim = sum(all_folder_ssim) / len(all_folder_ssim)
-                            avg_psnr_y = sum(all_folder_psnr_y) / len(all_folder_psnr_y)
-                            avg_ssim_y = sum(all_folder_ssim_y) / len(all_folder_ssim_y)
-
-                            logger.info('<epoch:{:3d}, iter:{:8,d} Max PSNR: {:.2f} dB; SSIM: {:.4f}; '
-                                        'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
-                                epoch, current_step, max_psnr, max_ssim, max_psnr_y, max_ssim_y))
-
-                            logger.info('<epoch:{:3d}, iter:{:8,d} Average PSNR: {:.2f} dB; SSIM: {:.4f}; '
-                                        'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
-                                epoch, current_step, avg_psnr, avg_ssim, avg_psnr_y, avg_ssim_y))
-
-                            # 将测试指标记录到 TensorBoard 和 WANDB (使用PSNR最大的clip的完整指标)
-                            if tb_logger is not None:
-                                test_metrics = {
-                                    'psnr': max_psnr,
-                                    'ssim': max_ssim,
-                                    'psnr_y': max_psnr_y,
-                                    'ssim_y': max_ssim_y
-                                }
-                                tb_logger.log_scalars(current_step, test_metrics, tag_prefix='test')
-                else:
-                    # Non-distributed: just compute local max and average
-                    if is_master_process:
-                        if test_results['psnr']:
-                            # Find the clip with maximum PSNR and use its complete metrics
-                            max_psnr_idx = test_results['psnr'].index(max(test_results['psnr']))
-                            max_psnr = test_results['psnr'][max_psnr_idx]
-                            max_ssim = test_results['ssim'][max_psnr_idx]
-                            max_psnr_y = test_results['psnr_y'][max_psnr_idx]
-                            max_ssim_y = test_results['ssim_y'][max_psnr_idx]
-
-                            avg_psnr = sum(test_results['psnr']) / len(test_results['psnr'])
-                            avg_ssim = sum(test_results['ssim']) / len(test_results['ssim'])
-                            avg_psnr_y = sum(test_results['psnr_y']) / len(test_results['psnr_y'])
-                            avg_ssim_y = sum(test_results['ssim_y']) / len(test_results['ssim_y'])
-
-                            logger.info('<epoch:{:3d}, iter:{:8,d} Max PSNR: {:.2f} dB; SSIM: {:.4f}; '
-                                        'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
-                                epoch, current_step, max_psnr, max_ssim, max_psnr_y, max_ssim_y))
-
-                            logger.info('<epoch:{:3d}, iter:{:8,d} Average PSNR: {:.2f} dB; SSIM: {:.4f}; '
-                                        'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
-                                epoch, current_step, avg_psnr, avg_ssim, avg_psnr_y, avg_ssim_y))
-
-                            # 将测试指标记录到 TensorBoard 和 WANDB (使用PSNR最大的clip的完整指标)
-                            if tb_logger is not None:
-                                test_metrics = {
-                                    'psnr': max_psnr,
-                                    'ssim': max_ssim,
-                                    'psnr_y': max_psnr_y,
-                                    'ssim_y': max_ssim_y
-                                }
-                                tb_logger.log_scalars(current_step, test_metrics, tag_prefix='test')
-
-                mem_after_validation = log_memory_stage(logger, 'After validation completion', opt['rank'])
-                if opt['rank'] == 0:
-                    logger.info('[VALIDATION] Validation phase completed. Memory usage: {:.2f} GB'.format(mem_after_validation))
-
-                if opt['dist']:
-                    barrier_safe()
-
-            # 检查是否达到总迭代次数，如果达到则结束训练
-            if current_step > opt['train']['total_iter']:
-                if opt['rank'] == 0:
-                    logger.info('Finish training.')
-                    model.save(current_step)  # 保存最终模型
-                    if hasattr(model, 'save_merged'):
-                        model.save_merged(current_step)
+                # -------------------------------
+                # 4) 记录训练信息
+                # -------------------------------
+                # 每隔一定步数打印训练信息（损失值、学习率等）
+                if current_step % opt['train']['checkpoint_print'] == 0:
+                    logs = build_timing_summary(
+                        model.current_log(),
+                        dist_enabled=opt.get('dist', False),
+                        device=model.device,
+                    )
+                if current_step % opt['train']['checkpoint_print'] == 0 and opt['rank'] == 0:
+                    # 构建日志消息：包含 epoch、迭代次数、学习率
+                    message = '<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> '.format(epoch, current_step,
+                                                                              model.current_learning_rate())
+                    # 将损失信息合并到消息中
+                    for k, v in logs.items():  # 合并日志信息到消息
+                        if k.startswith('time_'):
+                            # 耗时信息使用不同的格式
+                            message += '{:s}: {:.4f}s '.format(k.replace('time_', ''), v)
+                        elif isinstance(v, numbers.Real):
+                            message += '{:s}: {:.3e} '.format(k, float(v))
+                        else:
+                            message += '{:s}: {} '.format(k, v)
+                    logger.info(message)  # 写入日志文件
+                
+                    # 记录到 TensorBoard 和 WANDB（用于可视化）
                     if tb_logger is not None:
-                        tb_logger.close()  # 关闭日志记录器
-                train_profiler.close()
-                sys.exit()  # 退出程序
+                        # 分离训练指标和耗时指标，分别记录到不同命名空间
+                        train_logs = {
+                            k: float(v)
+                            for k, v in logs.items()
+                            if not k.startswith('time_') and isinstance(v, numbers.Real)
+                        }
+                        train_logs['learning_rate'] = model.current_learning_rate()
+                        # 耗时指标去掉time_前缀，记录到time命名空间
+                        time_logs = {k.replace('time_', ''): v for k, v in logs.items() if k.startswith('time_')}
+                    
+                        if train_logs:
+                            tb_logger.log_scalars(current_step, train_logs, tag_prefix='train')
+                        if time_logs:
+                            tb_logger.log_scalars(current_step, time_logs, tag_prefix='time')
+
+                # -------------------------------
+                # 5) 保存模型检查点
+                # -------------------------------
+                # 每隔一定步数保存模型（包括网络权重和优化器状态）
+                if current_step % opt['train']['checkpoint_save'] == 0 and opt['rank'] == 0:
+                    logger.info('Saving the model.')
+                    model.save(current_step)  # 保存当前步数的模型
+                # 在分布式训练中，等待 rank 0 完成保存，避免进程间状态不一致
+                if current_step % opt['train']['checkpoint_save'] == 0 and opt['dist']:
+                    barrier_safe()  # 同步所有进程
+
+
+                # 特殊处理：当使用静态计算图时，在改变计算图之前提前保存模型
+                # 这是因为在分布式训练中使用 use_checkpoint=True 时存在 bug
+                if opt['use_static_graph'] and (current_step == opt['train']['fix_iter'] - 1):
+                    current_step += 1
+                    model.update_learning_rate(current_step)
+                    if opt['rank'] == 0:
+                        model.save(current_step)  # 提前保存模型
+                    # 等待 rank 0 完成保存
+                    if opt['dist']:
+                        barrier_safe()
+                    current_step -= 1  # 恢复步数
+                    if opt['rank'] == 0:
+                        logger.info('Saving models ahead of time when changing the computation graph with use_static_graph=True'
+                                    ' (we need it due to a bug with use_checkpoint=True in distributed training). The training '
+                                    'will be terminated by PyTorch in the next iteration. Just resume training with the same '
+                                    '.json config file.')
+
+                # -------------------------------
+                # 6) 模型测试和评估
+                # -------------------------------
+                # 每隔一定步数在测试集上评估模型性能
+                _ckpt_test = opt['train']['checkpoint_test']
+                if isinstance(_ckpt_test, list):
+                    _do_test = current_step in _ckpt_test
+                else:
+                    _do_test = current_step % _ckpt_test == 0
+                if _do_test:
+
+                    if opt['rank'] == 0:
+                        logger.info('[VALIDATION] Starting model validation/test phase...')
+                    mem_before_validation = log_memory_stage(logger, 'Before validation memory cleanup', opt['rank'])
+
+
+                    is_master_process = opt['rank'] == 0
+                    if opt['dist']:
+                        barrier_safe()
+
+                    # 初始化测试结果字典，用于存储所有文件夹的指标
+                    test_results = OrderedDict()
+                    test_results['psnr'] = []  # 峰值信噪比（RGB 通道）
+                    test_results['ssim'] = []  # 结构相似性指数（RGB 通道）
+                    test_results['psnr_y'] = []  # 峰值信噪比（Y 通道，亮度）
+                    test_results['ssim_y'] = []  # 结构相似性指数（Y 通道，亮度）
+
+                    # 初始化 gt 变量，避免在循环外部引用时出现 UnboundLocalError
+                    gt = None
+
+                    # 遍历测试数据
+                    for idx, test_data in enumerate(test_loader):
+                        if opt['rank'] == 0:
+                            maybe_dump_full_frame_fusion_debug_from_batch(model, test_data, current_step, idx)
+                        if idx < 2:
+                            log_validation_probe(logger, f'before feed_data batch={idx}', opt['rank'])
+                            if opt['rank'] == 0:
+                                batch_summary = []
+                                for key, value in test_data.items():
+                                    if hasattr(value, 'shape'):
+                                        batch_summary.append(f'{key}:{tuple(value.shape)}')
+                                    elif isinstance(value, (list, tuple)):
+                                        batch_summary.append(f'{key}:len={len(value)}')
+                                    else:
+                                        batch_summary.append(f'{key}:{type(value).__name__}')
+                                logger.info(f'[VAL_BATCH] idx={idx} contents: {", ".join(batch_summary)}')
+                        # 将测试数据送入模型
+                        model.feed_data(test_data)
+                        if idx < 2:
+                            log_validation_probe(logger, f'after feed_data batch={idx}', opt['rank'])
+                        # 执行测试（前向传播，不更新梯度）
+                        if idx < 2 and opt['rank'] == 0:
+                            logger.info(f'[VAL_BATCH] idx={idx} entering model.test()')
+                        model.test()
+                        if idx < 2:
+                            log_validation_probe(logger, f'after model.test batch={idx}', opt['rank'])
+                            if opt['rank'] == 0:
+                                logger.info(f'[VAL_BATCH] idx={idx} model.test() completed')
+
+                        if not should_score_validation_batch(opt):
+                            continue
+
+                        # 获取模型输出和真实标签
+                        visuals = model.current_visuals()
+                        output = visuals['E']  # E: 估计/输出图像 (Estimated)
+                        gt = visuals['H'] if 'H' in visuals else None  # H: 高质量真实图像 (High-quality)
+                        folder = test_data['folder']  # 测试序列的文件夹名称
+                        folder_name = folder[0] if isinstance(folder, (list, tuple)) else folder
+                        total_test_batches = len(test_loader)
+
+                        # 初始化当前测试序列的结果字典
+                        test_results_folder = OrderedDict()
+                        test_results_folder['psnr'] = []
+                        test_results_folder['ssim'] = []
+                        test_results_folder['psnr_y'] = []
+                        test_results_folder['ssim_y'] = []
+
+                        # 处理批次中的每一张图像
+                        lq_paths = test_data.get('lq_path')
+                        batch_clip_count = output.shape[0]
+                        for i in range(batch_clip_count):
+                            clip_name = f'clip_{i:03d}'
+                            if lq_paths is not None:
+                                clip_source = None
+                                try:
+                                    clip_source = lq_paths[i]
+                                except Exception:
+                                    clip_source = None
+                                if isinstance(clip_source, (list, tuple)) and clip_source:
+                                    clip_source = clip_source[0]
+                                if isinstance(clip_source, str):
+                                    clip_name = os.path.splitext(os.path.basename(clip_source))[0]
+                            # -----------------------
+                            # 保存估计的图像 E
+                            # -----------------------
+                            # 将输出张量转换为 numpy 数组，并限制在 [0, 1] 范围内
+                            img = output[i, ...].clamp_(0, 1).numpy()
+                            if img.ndim == 3:
+                                # 从 CHW-RGB 格式转换为 HWC-BGR 格式（OpenCV 使用 BGR）
+                                img = np.transpose(img[[2, 1, 0], :, :], (1, 2, 0))  # CHW-RGB to HWC-BGR
+                            # 将浮点数 [0, 1] 转换为 uint8 [0, 255]
+                            img = (img * 255.0).round().astype(np.uint8)  # float32 to uint8
+
+                            # 如果配置要求保存图像，则保存到磁盘
+                            if opt['val']['save_img']:
+                                save_dir = opt['path']['images']
+                                util.mkdir(save_dir)
+                                # 创建文件夹并保存图像
+                                os.makedirs(f'{save_dir}/{folder_name}', exist_ok=True)
+                                cv2.imwrite(f'{save_dir}/{folder_name}/{clip_name}_{current_step:d}.png', img)
+
+                            # -----------------------
+                            # 计算 PSNR 和 SSIM
+                            # -----------------------
+                            # 只有在有真实标签时才计算指标
+                            if gt is not None:
+                                # 处理真实标签图像
+                                img_gt = gt[i, ...].clamp_(0, 1).numpy()
+                                if img_gt.ndim == 3:
+                                    # 从 CHW-RGB 格式转换为 HWC-BGR 格式
+                                    img_gt = np.transpose(img_gt[[2, 1, 0], :, :], (1, 2, 0))  # CHW-RGB to HWC-BGR
+                                img_gt = (img_gt * 255.0).round().astype(np.uint8)  # float32 to uint8
+                                img_gt = np.squeeze(img_gt)  # 移除单维度
+
+                                # 计算 RGB 通道的 PSNR 和 SSIM
+                                clip_psnr = util.calculate_psnr(img, img_gt, border=0)
+                                clip_ssim = util.calculate_ssim(img, img_gt, border=0)
+                                test_results_folder['psnr'].append(clip_psnr)
+                                test_results_folder['ssim'].append(clip_ssim)
+
+                                # 如果是 RGB 图像，计算 Y 通道（亮度）的指标
+                                if img_gt.ndim == 3:  # RGB image
+                                    # 转换为 YCbCr 颜色空间，只取 Y 通道（亮度）
+                                    img_y = util.bgr2ycbcr(img.astype(np.float32) / 255.) * 255.
+                                    img_gt_y = util.bgr2ycbcr(img_gt.astype(np.float32) / 255.) * 255.
+                                    # 计算 Y 通道的 PSNR 和 SSIM
+                                    clip_psnr_y = util.calculate_psnr(img_y, img_gt_y, border=0)
+                                    clip_ssim_y = util.calculate_ssim(img_y, img_gt_y, border=0)
+                                else:
+                                    # 灰度图像，Y 通道指标等于 RGB 指标
+                                    clip_psnr_y = clip_psnr
+                                    clip_ssim_y = clip_ssim
+                                test_results_folder['psnr_y'].append(clip_psnr_y)
+                                test_results_folder['ssim_y'].append(clip_ssim_y)
+
+                        # 如果有计算的指标，记录并保存结果
+                        if len(test_results_folder['psnr']) > 0:
+                            # 计算当前测试序列的平均指标
+                            psnr = sum(test_results_folder['psnr']) / len(test_results_folder['psnr'])
+                            ssim = sum(test_results_folder['ssim']) / len(test_results_folder['ssim'])
+                            psnr_y = sum(test_results_folder['psnr_y']) / len(test_results_folder['psnr_y'])
+                            ssim_y = sum(test_results_folder['ssim_y']) / len(test_results_folder['ssim_y'])
+
+                            test_results['psnr'].append(psnr)
+                            test_results['ssim'].append(ssim)
+                            test_results['psnr_y'].append(psnr_y)
+                            test_results['ssim_y'].append(ssim_y)
+
+                            # 打印每个文件夹的结果（保持原有的打印行为）
+                            print('[Rank {}] Testing {:20s} ({:2d}/{}) - PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                                  format(opt['rank'], folder_name, len(test_results['psnr']), len(test_loader), psnr, ssim, psnr_y, ssim_y))
+                        else:
+                            # 没有真实标签时，只记录测试序列名称
+                            pass
+
+
+                    # 计算全局平均值和最大值
+                    local_psnr_sum = sum(test_results['psnr'])
+                    local_ssim_sum = sum(test_results['ssim'])
+                    local_psnr_y_sum = sum(test_results['psnr_y'])
+                    local_ssim_y_sum = sum(test_results['ssim_y'])
+
+                    local_psnr_count = len(test_results['psnr'])
+                    local_ssim_count = len(test_results['ssim'])
+                    local_psnr_y_count = len(test_results['psnr_y'])
+                    local_ssim_y_count = len(test_results['ssim_y'])
+
+                    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                    metrics_tensor = torch.tensor(
+                        [local_psnr_sum, local_ssim_sum, local_psnr_y_sum, local_ssim_y_sum,
+                         local_psnr_count, local_ssim_count, local_psnr_y_count, local_ssim_y_count],
+                        dtype=torch.float64, device=device)
+
+                    world_size = opt.get('world_size', 1)
+
+                    if opt['dist'] and dist.is_initialized():
+                        # Gather per-rank folder metrics so rank 0 can print each rank's results and compute global stats
+                        gathered = [torch.zeros_like(metrics_tensor) for _ in range(world_size)]
+                        dist.all_gather(gathered, metrics_tensor)
+
+                        if is_master_process:
+                            # Print per-rank average results and collect all folder metrics for global max
+                            all_folder_psnr = []
+                            all_folder_ssim = []
+                            all_folder_psnr_y = []
+                            all_folder_ssim_y = []
+
+                            for r, t in enumerate(gathered):
+                                (psnr_sum, ssim_sum, psnr_y_sum, ssim_y_sum,
+                                 psnr_cnt, ssim_cnt, psnr_y_cnt, ssim_y_cnt) = t.tolist()
+                                psnr_cnt = int(round(psnr_cnt))
+                                ssim_cnt = int(round(ssim_cnt))
+                                psnr_y_cnt = int(round(psnr_y_cnt))
+                                ssim_y_cnt = int(round(ssim_y_cnt))
+                                if psnr_cnt > 0:
+                                    ave_psnr_r = psnr_sum / psnr_cnt
+                                    ave_ssim_r = ssim_sum / max(ssim_cnt, 1)
+                                    ave_psnr_y_r = psnr_y_sum / max(psnr_y_cnt, 1)
+                                    ave_ssim_y_r = ssim_y_sum / max(ssim_y_cnt, 1)
+                                    logger.info('[Rank {}] Average PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                                                format(r, ave_psnr_r, ave_ssim_r, ave_psnr_y_r, ave_ssim_y_r))
+
+                                    # Collect all folder metrics for global max calculation
+                                    all_folder_psnr.extend([ave_psnr_r] * psnr_cnt)
+                                    all_folder_ssim.extend([ave_ssim_r] * ssim_cnt)
+                                    all_folder_psnr_y.extend([ave_psnr_y_r] * psnr_y_cnt)
+                                    all_folder_ssim_y.extend([ave_ssim_y_r] * ssim_y_cnt)
+
+                            # Compute global maximums and averages
+                            if all_folder_psnr:
+                                # Find the clip with maximum PSNR and use its complete metrics
+                                max_psnr_idx = all_folder_psnr.index(max(all_folder_psnr))
+                                max_psnr = all_folder_psnr[max_psnr_idx]
+                                max_ssim = all_folder_ssim[max_psnr_idx]
+                                max_psnr_y = all_folder_psnr_y[max_psnr_idx]
+                                max_ssim_y = all_folder_ssim_y[max_psnr_idx]
+
+                                avg_psnr = sum(all_folder_psnr) / len(all_folder_psnr)
+                                avg_ssim = sum(all_folder_ssim) / len(all_folder_ssim)
+                                avg_psnr_y = sum(all_folder_psnr_y) / len(all_folder_psnr_y)
+                                avg_ssim_y = sum(all_folder_ssim_y) / len(all_folder_ssim_y)
+
+                                logger.info('<epoch:{:3d}, iter:{:8,d} Max PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                                            'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                                    epoch, current_step, max_psnr, max_ssim, max_psnr_y, max_ssim_y))
+
+                                logger.info('<epoch:{:3d}, iter:{:8,d} Average PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                                            'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                                    epoch, current_step, avg_psnr, avg_ssim, avg_psnr_y, avg_ssim_y))
+
+                                # 将测试指标记录到 TensorBoard 和 WANDB (使用PSNR最大的clip的完整指标)
+                                if tb_logger is not None:
+                                    test_metrics = {
+                                        'psnr': max_psnr,
+                                        'ssim': max_ssim,
+                                        'psnr_y': max_psnr_y,
+                                        'ssim_y': max_ssim_y
+                                    }
+                                    tb_logger.log_scalars(current_step, test_metrics, tag_prefix='test')
+                    else:
+                        # Non-distributed: just compute local max and average
+                        if is_master_process:
+                            if test_results['psnr']:
+                                # Find the clip with maximum PSNR and use its complete metrics
+                                max_psnr_idx = test_results['psnr'].index(max(test_results['psnr']))
+                                max_psnr = test_results['psnr'][max_psnr_idx]
+                                max_ssim = test_results['ssim'][max_psnr_idx]
+                                max_psnr_y = test_results['psnr_y'][max_psnr_idx]
+                                max_ssim_y = test_results['ssim_y'][max_psnr_idx]
+
+                                avg_psnr = sum(test_results['psnr']) / len(test_results['psnr'])
+                                avg_ssim = sum(test_results['ssim']) / len(test_results['ssim'])
+                                avg_psnr_y = sum(test_results['psnr_y']) / len(test_results['psnr_y'])
+                                avg_ssim_y = sum(test_results['ssim_y']) / len(test_results['ssim_y'])
+
+                                logger.info('<epoch:{:3d}, iter:{:8,d} Max PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                                            'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                                    epoch, current_step, max_psnr, max_ssim, max_psnr_y, max_ssim_y))
+
+                                logger.info('<epoch:{:3d}, iter:{:8,d} Average PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                                            'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                                    epoch, current_step, avg_psnr, avg_ssim, avg_psnr_y, avg_ssim_y))
+
+                                # 将测试指标记录到 TensorBoard 和 WANDB (使用PSNR最大的clip的完整指标)
+                                if tb_logger is not None:
+                                    test_metrics = {
+                                        'psnr': max_psnr,
+                                        'ssim': max_ssim,
+                                        'psnr_y': max_psnr_y,
+                                        'ssim_y': max_ssim_y
+                                    }
+                                    tb_logger.log_scalars(current_step, test_metrics, tag_prefix='test')
+
+                    mem_after_validation = log_memory_stage(logger, 'After validation completion', opt['rank'])
+                    if opt['rank'] == 0:
+                        logger.info('[VALIDATION] Validation phase completed. Memory usage: {:.2f} GB'.format(mem_after_validation))
+
+                    if opt['dist']:
+                        barrier_safe()
+
+                # 检查是否达到总迭代次数，如果达到则结束训练
+                if current_step > opt['train']['total_iter']:
+                    if opt['rank'] == 0:
+                        logger.info('Finish training.')
+                        model.save(current_step)  # 保存最终模型
+                        if hasattr(model, 'save_merged'):
+                            model.save_merged(current_step)
+                        if tb_logger is not None:
+                            tb_logger.close()  # 关闭日志记录器
+                    sys.exit()  # 退出程序
+    finally:
+        train_profiler.close()
 
 # 主程序入口
 if __name__ == '__main__':
