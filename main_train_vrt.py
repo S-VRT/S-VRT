@@ -27,6 +27,7 @@ from utils import utils_logger  # 日志工具，包括 TensorBoard 和 WANDB �
 from utils import utils_image as util  # 图像处理工具函数
 from utils import utils_option as option  # 配置文件解析工具
 from utils.utils_dist import get_dist_info, init_dist, barrier_safe, setup_distributed, get_rank, is_main_process  # 分布式训练工具
+from utils.utils_profiler import TrainProfiler, TrainProfilerConfig
 
 # 数据集和模型定义
 from data.select_dataset import define_Dataset  # 数据集工厂函数
@@ -545,6 +546,14 @@ def main():
     # ----------------------------------------
     '''
 
+    profiler_cfg = TrainProfilerConfig.from_opt(
+        opt.get("train", {}),
+        experiment_dir=opt["path"]["task"],
+        rank=opt["rank"],
+    )
+    train_profiler = TrainProfiler(profiler_cfg, logger=logger if opt["rank"] == 0 else None)
+    train_profiler.maybe_start()
+
     fix_iter = opt["train"].get("fix_iter", 0)
     last_is_phase1 = is_phase1
 
@@ -604,6 +613,7 @@ def main():
             # -------------------------------
             # 执行前向传播、计算损失、反向传播和参数更新
             model.optimize_parameters(current_step)
+            train_profiler.step(current_step)
 
             # -------------------------------
             # 4) 记录训练信息
@@ -975,6 +985,7 @@ def main():
                         model.save_merged(current_step)
                     if tb_logger is not None:
                         tb_logger.close()  # 关闭日志记录器
+                train_profiler.close()
                 sys.exit()  # 退出程序
 
 # 主程序入口

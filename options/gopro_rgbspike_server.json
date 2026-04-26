@@ -680,6 +680,19 @@
     // 打印检查点间隔：每训练多少迭代打印一次训练信息
     ,
     "checkpoint_print": 100
+    ,
+    "profiler": {
+      "enable": false,
+      "start_iter": 100,
+      "wait": 1,
+      "warmup": 1,
+      "active": 2,
+      "repeat": 1,
+      "ranks": [0],
+      "record_shapes": true,
+      "with_stack": false,
+      "profile_memory": true
+    }
   }
   // ========================================
   // 验证（测试）配置
