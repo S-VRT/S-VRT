@@ -417,11 +417,11 @@ class ModelPlain(ModelBase):
     def _record_fusion_diagnostics_to_log(self, fusion_meta) -> None:
         if not isinstance(fusion_meta, dict):
             return
+        if "warmup_stage" in fusion_meta:
+            self.log_dict["fusion_warmup_stage"] = fusion_meta["warmup_stage"]
         for key in ("token_norm", "mamba_norm", "delta_norm", "gate_mean", "effective_update_norm"):
             if key in fusion_meta:
                 self.log_dict[f"fusion_{key}"] = float(fusion_meta[key])
-        if "warmup_stage" in fusion_meta:
-            self.log_dict["fusion_warmup_stage"] = str(fusion_meta["warmup_stage"])
 
     def feed_data(self, data, need_H=True, current_step=None):
         with self.timer.timer('data_load'):
@@ -528,11 +528,9 @@ class ModelPlain(ModelBase):
     # update parameters and get loss
     # ----------------------------------------
     def optimize_parameters(self, current_step):
-        # 重置当前迭代的计时
-        self.timer.current_timings.clear()
+        self._trace_current_step = current_step
 
-        fusion_warmup_stage = self._configure_fusion_warmup_trainability(current_step)
-        self.log_dict['fusion_warmup_stage'] = fusion_warmup_stage
+        self._configure_fusion_warmup_trainability(current_step)
 
         is_phase1 = (
             hasattr(self, 'fix_iter')

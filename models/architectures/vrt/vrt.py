@@ -492,6 +492,13 @@ class VRT(nn.Module):
     def set_timer(self, timer):
         """Inject a Timer instance for optional timing measurement."""
         self.timer = timer
+        for target in (
+            getattr(self, 'fusion_operator', None),
+            getattr(getattr(self, 'fusion_adapter', None), 'operator', None),
+        ):
+            set_timer = getattr(target, 'set_timer', None)
+            if callable(set_timer):
+                set_timer(timer)
 
     def set_input_path_marker(self, marker):
         valid = {INPUT_PATH_CONCAT, INPUT_PATH_DUAL, INPUT_PATH_DUAL_FALLBACK}

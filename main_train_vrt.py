@@ -14,6 +14,7 @@ import cv2  # OpenCV，用于图像读写
 import numpy as np  # 数值计算库
 from collections import OrderedDict  # 有序字典，用于保持测试结果的顺序
 import logging  # 日志记录
+import numbers
 import torch  # PyTorch 深度学习框架
 import torch.distributed as dist
 from torch.utils.data import DataLoader  # 数据加载器
@@ -87,11 +88,29 @@ def init_dataloader_worker(_worker_id):
         pass
 
 
-def record_data_wait(model, elapsed):
-    timer = getattr(model, "timer", None)
-    timings = getattr(timer, "current_timings", None)
-    if isinstance(timings, dict):
-        timings["data_wait"] = elapsed
+def build_timing_summary(logs, dist_enabled=False, device=None):
+    """Add per-iteration timing max/mean fields across DDP ranks."""
+    summarized = dict(logs)
+    time_keys = [key for key in logs if key.startswith("time_")]
+    if not time_keys:
+        return summarized
+
+    if dist_enabled and dist.is_available() and dist.is_initialized():
+        values = torch.tensor([float(logs[key]) for key in time_keys], device=device or "cpu", dtype=torch.float64)
+        max_values = values.clone()
+        sum_values = values.clone()
+        dist.all_reduce(max_values, op=dist.ReduceOp.MAX)
+        dist.all_reduce(sum_values, op=dist.ReduceOp.SUM)
+        mean_values = sum_values / float(dist.get_world_size())
+        for key, max_value, mean_value in zip(time_keys, max_values.tolist(), mean_values.tolist()):
+            summarized[f"{key}_max"] = max_value
+            summarized[f"{key}_mean"] = mean_value
+        return summarized
+
+    for key in time_keys:
+        summarized[f"{key}_max"] = float(logs[key])
+        summarized[f"{key}_mean"] = float(logs[key])
+    return summarized
 
 
 def build_train_loader_bundle(opt, train_dataset_opt, is_phase1, seed, logger):
@@ -511,6 +530,7 @@ def main():
 
     # 根据配置创建模型（VRT 或 RVRT）
     model = define_Model(opt)
+    model.logger = logger
     # 初始化训练相关组件（优化器、损失函数、学习率调度器等）
     model.init_train()
     if opt['rank'] == 0:
@@ -559,10 +579,10 @@ def main():
                     )
                 last_is_phase1 = is_phase1_now
 
+            model.timer.current_timings.clear()
             try:
-                data_wait_start = time.time()
-                train_data = next(train_loader_iter)
-                data_wait_elapsed = time.time() - data_wait_start
+                with model.timer.timer('batch_wait'):
+                    train_data = next(train_loader_iter)
             except StopIteration:
                 break
 
@@ -585,14 +605,18 @@ def main():
             # -------------------------------
             # 执行前向传播、计算损失、反向传播和参数更新
             model.optimize_parameters(current_step)
-            record_data_wait(model, data_wait_elapsed)
 
             # -------------------------------
             # 4) 记录训练信息
             # -------------------------------
             # 每隔一定步数打印训练信息（损失值、学习率等）
+            if current_step % opt['train']['checkpoint_print'] == 0:
+                logs = build_timing_summary(
+                    model.current_log(),
+                    dist_enabled=opt.get('dist', False),
+                    device=model.device,
+                )
             if current_step % opt['train']['checkpoint_print'] == 0 and opt['rank'] == 0:
-                logs = model.current_log()  # 获取当前损失等信息（如 loss）
                 # 构建日志消息：包含 epoch、迭代次数、学习率
                 message = '<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> '.format(epoch, current_step,
                                                                           model.current_learning_rate())
@@ -601,14 +625,20 @@ def main():
                     if k.startswith('time_'):
                         # 耗时信息使用不同的格式
                         message += '{:s}: {:.4f}s '.format(k.replace('time_', ''), v)
+                    elif isinstance(v, numbers.Real):
+                        message += '{:s}: {:.3e} '.format(k, float(v))
                     else:
-                        message += '{:s}: {:.3e} '.format(k, v)
+                        message += '{:s}: {} '.format(k, v)
                 logger.info(message)  # 写入日志文件
                 
                 # 记录到 TensorBoard 和 WANDB（用于可视化）
                 if tb_logger is not None:
                     # 分离训练指标和耗时指标，分别记录到不同命名空间
-                    train_logs = {k: v for k, v in logs.items() if not k.startswith('time_')}
+                    train_logs = {
+                        k: float(v)
+                        for k, v in logs.items()
+                        if not k.startswith('time_') and isinstance(v, numbers.Real)
+                    }
                     train_logs['learning_rate'] = model.current_learning_rate()
                     # 耗时指标去掉time_前缀，记录到time命名空间
                     time_logs = {k.replace('time_', ''): v for k, v in logs.items() if k.startswith('time_')}

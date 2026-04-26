@@ -3,6 +3,7 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 from torch import nn
+from contextlib import nullcontext
 
 
 class _MambaBlock(nn.Module):
@@ -43,11 +44,13 @@ class MambaFusionOperator(nn.Module):
         d_conv = int(operator_params.get("d_conv", 4))
         expand = int(operator_params.get("expand", 2))
         num_layers = int(operator_params.get("num_layers", 3))
+        token_chunk_size = int(operator_params.get("token_chunk_size", 0))
         alpha_init = float(operator_params.get("alpha_init", 0.05))
         gate_bias_init = float(operator_params.get("gate_bias_init", operator_params.get("init_gate_bias", -2.0)))
         enable_diagnostics = bool(operator_params.get("enable_diagnostics", True))
 
         self.enable_diagnostics = enable_diagnostics
+        self.token_chunk_size = token_chunk_size
         self.rgb_context_encoder = nn.Sequential(
             nn.Conv2d(3, token_dim, kernel_size=3, stride=token_stride, padding=1),
             nn.ReLU(inplace=True),
@@ -80,6 +83,16 @@ class MambaFusionOperator(nn.Module):
         nn.init.zeros_(self.fusion_writeback_head["delta"].bias)
         nn.init.normal_(self.fusion_writeback_head["gate"].weight, std=1e-3)
         nn.init.constant_(self.fusion_writeback_head["gate"].bias, gate_bias_init)
+        self.timer = None
+
+    def set_timer(self, timer) -> None:
+        self.timer = timer
+
+    def _timer(self, name: str):
+        timer = getattr(self, "timer", None)
+        if timer is None:
+            return nullcontext()
+        return timer.timer(name)
 
     def set_warmup_stage(self, stage) -> None:
         normalized = "full" if stage in {None, "", "full"} else str(stage).strip().lower()
@@ -97,6 +110,53 @@ class MambaFusionOperator(nn.Module):
     def diagnostics(self) -> dict:
         return dict(self._last_diagnostics)
 
+    @staticmethod
+    def _device_autocast_disabled_context(tensor: torch.Tensor):
+        if tensor.device.type == "cuda":
+            return torch.autocast(device_type="cuda", enabled=False)
+        if tensor.device.type == "cpu":
+            return torch.autocast(device_type="cpu", enabled=False)
+        from contextlib import nullcontext
+        return nullcontext()
+
+    @staticmethod
+    def _summarize_tensor(tensor: torch.Tensor) -> dict:
+        detached = tensor.detach()
+        summary = {
+            "shape": tuple(detached.shape),
+            "dtype": str(detached.dtype),
+            "is_contiguous": bool(detached.is_contiguous()),
+            "stride": tuple(detached.stride()),
+            "device": str(detached.device),
+        }
+        return summary
+
+    def _run_mamba_token_mixer(self, seq: torch.Tensor) -> torch.Tensor:
+        chunk_size = self.token_chunk_size
+        if chunk_size <= 0 or seq.size(0) <= chunk_size:
+            chunks = [seq]
+        else:
+            chunks = list(torch.split(seq, chunk_size, dim=0))
+
+        mixed_chunks = []
+        for chunk_idx, chunk in enumerate(chunks):
+            chunk = chunk.contiguous()
+            for block_idx, block in enumerate(self.mamba_token_mixer):
+                try:
+                    chunk = block(chunk)
+                except RuntimeError as exc:
+                    if "mamba_ssm is required" in str(exc):
+                        raise
+                    tensor_summary = self._summarize_tensor(chunk)
+                    raise RuntimeError(
+                        "Mamba token mixer failed at block "
+                        f"{block_idx} chunk {chunk_idx} with seq={tensor_summary}"
+                    ) from exc
+            mixed_chunks.append(chunk)
+        if len(mixed_chunks) == 1:
+            return mixed_chunks[0]
+        return torch.cat(mixed_chunks, dim=0)
+
     def forward(self, rgb_feat: torch.Tensor, spike_feat: torch.Tensor) -> torch.Tensor:
         if rgb_feat.dim() != 5:
             raise ValueError("mamba early fusion expects rgb with shape [B, T, 3, H, W].")
@@ -110,28 +170,43 @@ class MambaFusionOperator(nn.Module):
         if rgb_chans != 3:
             raise ValueError(f"Expected rgb channels=3, got {rgb_chans}")
 
-        rgb_flat = rgb_feat.reshape(bsz * steps, 3, height, width)
-        rgb_low = self.rgb_context_encoder(rgb_flat)
-        _, token_dim, token_h, token_w = rgb_low.shape
-        rgb_low = rgb_low.reshape(bsz, steps, token_dim, token_h, token_w)
+        with self._timer("mamba_rgb_encoder"):
+            rgb_flat = rgb_feat.reshape(bsz * steps, 3, height, width)
+            rgb_low = self.rgb_context_encoder(rgb_flat)
+            _, token_dim, token_h, token_w = rgb_low.shape
+            rgb_low = rgb_low.reshape(bsz, steps, token_dim, token_h, token_w)
 
-        spike_flat = spike_feat.reshape(bsz * steps * spike_bins, 1, height, width)
-        spike_low = self.spike_token_encoder(spike_flat).reshape(bsz, steps, spike_bins, token_dim, token_h, token_w)
+        with self._timer("mamba_spike_encoder"):
+            spike_flat = spike_feat.reshape(bsz * steps * spike_bins, 1, height, width)
+            spike_low = self.spike_token_encoder(spike_flat).reshape(bsz, steps, spike_bins, token_dim, token_h, token_w)
 
-        spike_tokens = spike_low.permute(0, 1, 4, 5, 2, 3).reshape(bsz * steps * token_h * token_w, spike_bins, token_dim)
-        rgb_tokens = rgb_low.permute(0, 1, 3, 4, 2).reshape(bsz * steps * token_h * token_w, 1, token_dim)
-        seq = spike_tokens + rgb_tokens
-        for block in self.mamba_token_mixer:
-            seq = block(seq)
+        with self._timer("mamba_token_pack"):
+            spike_tokens = spike_low.permute(0, 1, 4, 5, 2, 3).reshape(
+                bsz * steps * token_h * token_w, spike_bins, token_dim
+            ).contiguous()
+            rgb_tokens = rgb_low.permute(0, 1, 3, 4, 2).reshape(
+                bsz * steps * token_h * token_w, 1, token_dim
+            ).contiguous()
+            seq = (spike_tokens + rgb_tokens).contiguous()
+            mixer_input_dtype = seq.dtype
 
-        pooled = seq.mean(dim=1).reshape(bsz, steps, token_h, token_w, token_dim).permute(0, 1, 4, 2, 3)
-        fused_low = pooled + rgb_low
+        with self._timer("mamba_mixer"):
+            with self._device_autocast_disabled_context(seq):
+                seq = seq.float()
+                seq = seq.contiguous()
+                seq = self._run_mamba_token_mixer(seq)
+            seq = seq.to(dtype=mixer_input_dtype)
 
-        writeback = self.fusion_writeback_head["body"](fused_low.reshape(bsz * steps, token_dim, token_h, token_w))
-        delta_low = self.fusion_writeback_head["delta"](writeback)
-        gate_logits_low = self.fusion_writeback_head["gate"](writeback)
-        delta = F.interpolate(delta_low, size=(height, width), mode="bilinear", align_corners=False).reshape(bsz, steps, 3, height, width)
-        gate_logits = F.interpolate(gate_logits_low, size=(height, width), mode="bilinear", align_corners=False).reshape(bsz, steps, 3, height, width)
+        with self._timer("mamba_writeback"):
+            pooled = seq.mean(dim=1).reshape(bsz, steps, token_h, token_w, token_dim).permute(0, 1, 4, 2, 3)
+            fused_low = pooled + rgb_low
+            writeback = self.fusion_writeback_head["body"](fused_low.reshape(bsz * steps, token_dim, token_h, token_w))
+            delta_low = self.fusion_writeback_head["delta"](writeback)
+            gate_logits_low = self.fusion_writeback_head["gate"](writeback)
+
+        with self._timer("mamba_upsample"):
+            delta = F.interpolate(delta_low, size=(height, width), mode="bilinear", align_corners=False).reshape(bsz, steps, 3, height, width)
+            gate_logits = F.interpolate(gate_logits_low, size=(height, width), mode="bilinear", align_corners=False).reshape(bsz, steps, 3, height, width)
         gate = torch.sigmoid(gate_logits)
         effective_update = self.alpha.view(1, 1, 3, 1, 1) * gate * delta
         out = rgb_feat + effective_update

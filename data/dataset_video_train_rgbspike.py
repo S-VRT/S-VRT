@@ -17,6 +17,15 @@ from data.spike_recc.encoding25 import (
 )
 
 
+def resize_chw_image(arr_chw, size):
+    """Resize a CHW tensor-like image through OpenCV's HWC multi-channel path."""
+    arr_hwc = np.transpose(arr_chw, (1, 2, 0))
+    resized_hwc = cv2.resize(arr_hwc, size, interpolation=cv2.INTER_LINEAR)
+    if resized_hwc.ndim == 2:
+        resized_hwc = resized_hwc[:, :, np.newaxis]
+    return np.transpose(resized_hwc, (2, 0, 1)).astype(np.float32)
+
+
 class TrainDatasetRGBSpike(data.Dataset):
     """Video dataset for training recurrent networks with RGB + Spike data.
 
@@ -349,11 +358,7 @@ class TrainDatasetRGBSpike(data.Dataset):
             src_left = max(min(src_left, src_w - src_crop_w), 0)
             arr_cropped = arr_chw[:, src_top:src_top + src_crop_h, src_left:src_left + src_crop_w]
 
-            resized = []
-            for ch in range(arr_cropped.shape[0]):
-                ch_resized = cv2.resize(arr_cropped[ch], (cropped_w, cropped_h), interpolation=cv2.INTER_LINEAR)
-                resized.append(ch_resized)
-            return np.stack(resized, axis=0).astype(np.float32)
+            return resize_chw_image(arr_cropped, (cropped_w, cropped_h))
 
         # Crop spike voxels to the RGB-corresponding region, then resize to the RGB crop size.
         spike_voxels_resized = []
