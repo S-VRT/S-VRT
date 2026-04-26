@@ -51,7 +51,6 @@ class WindowAttention(nn.Module):
             self.qkv_mut = nn.Linear(dim, dim * 3, bias=qkv_bias)
             self.proj = nn.Linear(2 * dim, dim)
 
-        self.softmax = nn.Softmax(dim=-1)
         trunc_normal_(self.relative_position_bias_table, std=.02)
 
     def forward(self, x, mask=None):
