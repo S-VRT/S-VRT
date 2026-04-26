@@ -63,3 +63,22 @@ def test_ddp_timing_summary_adds_max_and_mean_for_time_keys():
     assert summarized["time_forward_max"] == 0.8
     assert summarized["time_forward_mean"] == 0.8
     assert summarized["G_loss"] == 1.0
+
+
+def test_timing_summary_keeps_non_time_keys_unchanged():
+    from main_train_vrt import build_timing_summary
+
+    logs = {
+        "time_forward": 0.5,
+        "fusion_warmup_stage": "writeback_only",
+        "G_loss": 0.1,
+    }
+
+    summarized = build_timing_summary(logs, dist_enabled=False, device=None)
+
+    assert summarized["fusion_warmup_stage"] == "writeback_only"
+    assert summarized["G_loss"] == 0.1
+    assert summarized["time_forward"] == 0.5
+    assert summarized["time_forward_max"] == 0.5
+    assert summarized["time_forward_mean"] == 0.5
+    assert "fusion_warmup_stage_max" not in summarized

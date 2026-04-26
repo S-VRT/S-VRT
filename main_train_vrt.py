@@ -530,7 +530,6 @@ def main():
 
     # 根据配置创建模型（VRT 或 RVRT）
     model = define_Model(opt)
-    model.logger = logger
     # 初始化训练相关组件（优化器、损失函数、学习率调度器等）
     model.init_train()
     if opt['rank'] == 0:
