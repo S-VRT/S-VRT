@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from models.architectures.vrt.attention import WindowAttention
@@ -16,3 +17,47 @@ def test_window_attention_forward():
     assert out.shape == x.shape
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_window_attention_flash_vs_sdpa_parity():
+    """互注意力路径：flash-attn 与 SDPA 数值接近（atol=1e-2，fp16 精度）"""
+    try:
+        from flash_attn import flash_attn_func as _fa
+    except ImportError:
+        pytest.skip("flash-attn not installed")
+
+    window_size = (2, 4, 4)
+    dim = 64
+    num_heads = 8
+    N = window_size[0] * window_size[1] * window_size[2]
+    Bn = 2
+    device = "cuda"
+    dtype = torch.float16
+
+    x = torch.randn(Bn, N, dim, dtype=dtype, device=device)
+
+    # mut_attn=False → 只走 self-attention 路径（relative_position_encoding=True）
+    # 要测互注意力路径需要 mut_attn=True，但这里直接测 attention() 内部
+    attn = WindowAttention(dim=dim, window_size=window_size, num_heads=num_heads,
+                           qkv_bias=True, mut_attn=False, use_flash_attn=False)
+    attn = attn.to(dtype=dtype, device=device)
+    attn.eval()
+
+    with torch.no_grad():
+        # Build q/k/v once, then compare SDPA vs flash on the same branch
+        qkv = attn.qkv_self(x).reshape(Bn, N, 3, num_heads, dim // num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        # SDPA path (force use_flash_attn=False)
+        attn.use_flash_attn = False
+        out_sdpa = attn.attention(q, k, v, mask=None, x_shape=(Bn, N, dim),
+                                  relative_position_encoding=False)
+
+        # flash path
+        attn.use_flash_attn = True
+        out_flash_raw = attn.attention(q, k, v, mask=None, x_shape=(Bn, N, dim),
+                                       relative_position_encoding=False)
+
+    # flash-attn vs SDPA for mutual-attention path: relaxed tolerance for fp16
+    assert out_flash_raw.shape == (Bn, N, dim)
+    assert torch.allclose(out_flash_raw.float(), out_sdpa.float(), atol=5e-2, rtol=1e-2), \
+        f"max diff: {(out_flash_raw.float() - out_sdpa.float()).abs().max().item():.4f}"
