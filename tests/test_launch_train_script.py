@@ -105,3 +105,24 @@ def test_outer_wrapper_replays_original_arguments_after_parser_shifts():
 
     assert 'ORIGINAL_ARGS=("$@")' in launch_script
     assert 'start_terminal_transcript_wrapper "$TRAIN_LOG_DIR_FOR_TRANSCRIPT" "${ORIGINAL_ARGS[@]}"' in launch_script
+
+
+def test_launch_script_can_prepare_autodl_tensorboard_before_training():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert "--autodl-tensorboard" in launch_script
+    assert "resolve_tensorboard_logdir()" in launch_script
+    assert "ensure_autodl_tensorboard()" in launch_script
+    assert 'AUTODL_TENSORBOARD=${AUTODL_TENSORBOARD:-true}' in launch_script
+    assert 'ensure_autodl_tensorboard "$TENSORBOARD_LOGDIR"' in launch_script
+
+
+def test_launch_script_auto_detects_available_gpus_by_default():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert 'DEFAULT_GPU_COUNT="auto"' in launch_script
+    assert "detect_available_gpus()" in launch_script
+    assert "resolve_gpu_selection()" in launch_script
+    assert "SVRT_GPU_FREE_MEMORY_MAX_MB" in launch_script
+    assert 'GPU List Source: $GPU_LIST_SOURCE' in launch_script
+    assert 'resolve_gpu_selection "$GPU_COUNT" "$GPU_LIST"' in launch_script

@@ -202,6 +202,21 @@ class VRT(nn.Module):
             early_out_chans = int(early_cfg.get('out_chans', fusion_out_chans))
             middle_out_chans = int(middle_cfg.get('out_chans', fusion_out_chans))
             spike_input_chans = self.in_chans - 3
+            operator_name = fusion_cfg.get('operator', 'concat')
+            normalized_operator_name = str(operator_name).strip().lower()
+            requested_frame_contract = str(early_cfg.get('frame_contract', 'operator_default')).strip().lower()
+            allowed_frame_contracts = {'operator_default', 'collapsed', 'expanded'}
+            if requested_frame_contract not in allowed_frame_contracts:
+                raise ValueError(
+                    f"Unsupported fusion.early.frame_contract={requested_frame_contract!r}; "
+                    "expected one of: operator_default, collapsed, expanded"
+                )
+            operator_default_contract = 'collapsed' if normalized_operator_name == 'mamba' else 'expanded'
+            effective_frame_contract = (
+                operator_default_contract
+                if requested_frame_contract == 'operator_default'
+                else requested_frame_contract
+            )
 
             middle_rgb_chans = None
             middle_spike_chans = None
@@ -272,14 +287,13 @@ class VRT(nn.Module):
                 if str(recon_type).strip().lower() != 'spikecv_tfp':
                     raise ValueError("full-T early fusion requires spikecv_tfp")
 
-            operator_name = fusion_cfg.get('operator', 'concat')
             operator_params = fusion_cfg.get('operator_params', {})
-            if operator_name == 'mamba':
+            if normalized_operator_name == 'mamba':
                 if fusion_placement != 'early':
                     raise ValueError("fusion.operator='mamba' requires fusion.placement='early'.")
                 if early_out_chans != 3:
                     raise ValueError("fusion.operator='mamba' requires fusion.out_chans=3 for early fusion.")
-                if bool(early_cfg.get('expand_to_full_t', False)):
+                if bool(early_cfg.get('expand_to_full_t', False)) and effective_frame_contract == 'collapsed':
                     raise ValueError("fusion.operator='mamba' does not support fusion.early.expand_to_full_t=true.")
             if fusion_placement == 'early':
                 self.fusion_operator = create_fusion_operator(
@@ -295,6 +309,7 @@ class VRT(nn.Module):
                     mode=fusion_mode,
                     inject_stages=inject_stages,
                     spike_chans=spike_input_chans,
+                    frame_contract=requested_frame_contract,
                 )
             elif fusion_placement == 'middle':
                 self.fusion_operator = create_fusion_operator(
@@ -334,6 +349,7 @@ class VRT(nn.Module):
                     mode=fusion_mode,
                     inject_stages=inject_stages,
                     spike_chans=spike_input_chans,
+                    frame_contract=requested_frame_contract,
                 )
 
         if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:

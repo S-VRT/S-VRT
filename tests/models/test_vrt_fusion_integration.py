@@ -57,6 +57,88 @@ def test_vrt_builds_with_fusion_config():
     assert fused["meta"]["frame_contract"] == "expanded"
 
 
+def test_vrt_allows_mamba_expanded_frame_contract_config():
+    opt = {
+        "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "mamba",
+                "out_chans": 3,
+                "early": {
+                    "frame_contract": "expanded",
+                    "expand_to_full_t": True,
+                },
+                "operator_params": {},
+            },
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.fusion_adapter.requested_frame_contract == "expanded"
+    assert model.fusion_adapter.frame_contract == "expanded"
+
+
+def test_vrt_mamba_operator_name_is_case_insensitive_for_default_contract():
+    opt = {
+        "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "Mamba",
+                "out_chans": 3,
+                "operator_params": {},
+            },
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.fusion_adapter.requested_frame_contract == "operator_default"
+    assert model.fusion_adapter.frame_contract == "collapsed"
+
+
 def test_vrt_forward_triggers_early_fusion(monkeypatch):
     opt = {
         "netG": {

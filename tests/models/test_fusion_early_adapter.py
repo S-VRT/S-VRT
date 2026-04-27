@@ -126,6 +126,50 @@ def test_early_adapter_returns_main_and_exec_for_collapsed_operator():
     assert result["meta"]["main_from_exec_rule"] is None
 
 
+def test_early_adapter_frame_contract_override_expands_collapsed_operator():
+    op = StructuredRecordingOperator()
+    adapter = EarlyFusionAdapter(
+        operator=op,
+        spike_chans=4,
+        frame_contract="expanded",
+    )
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+
+    result = adapter(rgb=rgb, spike=spike)
+
+    assert op.last_rgb.shape == (1, 8, 3, 8, 8)
+    assert op.last_spike.shape == (1, 8, 1, 8, 8)
+    assert result["fused_main"].shape == (1, 2, 3, 8, 8)
+    assert result["backbone_view"].shape == (1, 8, 3, 8, 8)
+    assert result["meta"]["requested_frame_contract"] == "expanded"
+    assert result["meta"]["frame_contract"] == "expanded"
+
+
+def test_early_adapter_default_contract_uses_operator_contract():
+    op = StructuredRecordingOperator()
+    adapter = EarlyFusionAdapter(operator=op, spike_chans=4)
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+
+    result = adapter(rgb=rgb, spike=spike)
+
+    assert op.last_rgb.shape == (1, 2, 3, 8, 8)
+    assert op.last_spike.shape == (1, 2, 4, 8, 8)
+    assert result["meta"]["requested_frame_contract"] == "operator_default"
+    assert result["meta"]["frame_contract"] == "collapsed"
+
+
+def test_early_adapter_rejects_invalid_frame_contract():
+    with pytest.raises(ValueError, match="frame_contract"):
+        EarlyFusionAdapter(operator=RecordingOperator(), frame_contract="bad")
+
+
+def test_early_adapter_collapsed_override_requires_structured_support():
+    with pytest.raises(ValueError, match="collapsed"):
+        EarlyFusionAdapter(operator=RecordingOperator(), frame_contract="collapsed")
+
+
 def test_early_adapter_expands_time():
     op = create_fusion_operator("concat", 3, 1, 3, {})
     adapter = EarlyFusionAdapter(operator=op)

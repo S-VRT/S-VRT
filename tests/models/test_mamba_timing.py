@@ -113,6 +113,44 @@ def test_mamba_operator_profile_ranges_are_config_gated(monkeypatch):
     ]
 
 
+def test_mamba_operator_runs_under_expanded_early_adapter_contract(monkeypatch):
+    from models.fusion.adapters.early import EarlyFusionAdapter
+    from models.fusion.operators import mamba as mamba_module
+    from models.fusion.operators.mamba import MambaFusionOperator
+
+    class _FakeBlock(torch.nn.Module):
+        def __init__(self, model_dim, d_state, d_conv, expand):
+            super().__init__()
+
+        def forward(self, tokens):
+            assert tokens.shape[1] == 1
+            return tokens
+
+    monkeypatch.setattr(mamba_module, "_MambaBlock", _FakeBlock)
+
+    operator = MambaFusionOperator(
+        rgb_chans=3,
+        spike_chans=1,
+        out_chans=3,
+        operator_params={"token_dim": 4, "token_stride": 2, "num_layers": 1},
+    )
+    adapter = EarlyFusionAdapter(
+        operator=operator,
+        spike_chans=4,
+        frame_contract="expanded",
+    )
+
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+    result = adapter(rgb=rgb, spike=spike)
+
+    assert result["meta"]["requested_frame_contract"] == "expanded"
+    assert result["meta"]["frame_contract"] == "expanded"
+    assert result["fused_main"].shape == (1, 2, 3, 8, 8)
+    assert result["backbone_view"].shape == (1, 8, 3, 8, 8)
+    assert result["meta"]["spike_bins"] == 4
+
+
 def test_mamba_operator_defaults_to_fp32_mixer_policy(monkeypatch):
     from models.fusion.operators import mamba as mamba_module
     from models.fusion.operators.mamba import MambaFusionOperator

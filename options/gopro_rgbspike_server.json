@@ -359,6 +359,9 @@
       "operator": "mamba",
       "mode": "replace",
       "out_chans": 3,
+      "early": {
+        "frame_contract": "operator_default"
+      },
       "operator_params": {
         "token_dim": 48,
         "token_stride": 4,
