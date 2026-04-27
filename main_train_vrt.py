@@ -28,6 +28,7 @@ from utils import utils_image as util  # 图像处理工具函数
 from utils import utils_option as option  # 配置文件解析工具
 from utils.utils_dist import get_dist_info, init_dist, barrier_safe, setup_distributed, get_rank, is_main_process  # 分布式训练工具
 from utils.utils_profiler import TrainProfiler, TrainProfilerConfig
+from utils.utils_runtime import apply_runtime_cpu_config
 
 # 数据集和模型定义
 from data.select_dataset import define_Dataset  # 数据集工厂函数
@@ -274,6 +275,7 @@ def main():
     # opt['dist'] 已由 option.parse() 根据 WORLD_SIZE 环境变量自动设置
     # 获取当前进程的排名和总进程数
     opt['rank'], opt['world_size'] = get_dist_info()
+    runtime_cpu_summary = apply_runtime_cpu_config(opt)
     
     # ----------------------------------------
     # 创建必要的目录（仅主进程 rank 0 执行）
@@ -364,6 +366,7 @@ def main():
         logger = logging.getLogger(logger_name)
         # 记录完整的配置信息到日志
         logger.info(option.dict2str(opt))
+        logger.info('[RUNTIME] cpu config applied: %s', runtime_cpu_summary)
         
         # 初始化 TensorBoard 和 WANDB 日志记录器
         # 用于可视化训练过程（损失曲线、学习率等）

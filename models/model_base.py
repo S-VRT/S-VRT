@@ -131,36 +131,103 @@ class ModelBase():
             raise ValueError("train.compile must be a dict when provided.")
         return compile_opt
 
-    def compile_model_if_enabled(self, network):
-        compile_opt = self._compile_options()
-        if not bool(compile_opt.get('enable', False)):
-            return network
-        if not hasattr(torch, 'compile'):
-            if bool(compile_opt.get('fallback_on_error', True)):
-                if self.opt.get('rank', 0) == 0:
-                    logging.getLogger('train').warning('[COMPILE] torch.compile unavailable; using eager model.')
-                return network
-            raise RuntimeError('torch.compile is unavailable in this PyTorch build.')
+    def _compile_scope(self, compile_opt):
+        scope = str(compile_opt.get('scope', 'full_model')).strip().lower()
+        if scope not in {'full_model', 'fusion_only'}:
+            raise ValueError(
+                f"Unsupported train.compile.scope={scope!r}; expected 'full_model' or 'fusion_only'."
+            )
+        return scope
 
-        kwargs = {
+    def _compile_kwargs(self, compile_opt):
+        return {
             'mode': compile_opt.get('mode', 'default'),
             'fullgraph': bool(compile_opt.get('fullgraph', False)),
             'dynamic': bool(compile_opt.get('dynamic', True)),
             'backend': compile_opt.get('backend', 'inductor'),
         }
+
+    def _compile_module(self, module, compile_opt, label, forward_only=False):
+        if not hasattr(torch, 'compile'):
+            if bool(compile_opt.get('fallback_on_error', True)):
+                if self.opt.get('rank', 0) == 0:
+                    logging.getLogger('train').warning(
+                        '[COMPILE] torch.compile unavailable; using eager %s.', label
+                    )
+                return module
+            raise RuntimeError('torch.compile is unavailable in this PyTorch build.')
+
+        kwargs = self._compile_kwargs(compile_opt)
+        target = module.forward if forward_only else module
         try:
-            compiled = torch.compile(network, **kwargs)
+            compiled = torch.compile(target, **kwargs)
             if self.opt.get('rank', 0) == 0:
-                logging.getLogger('train').info('[COMPILE] Enabled torch.compile with %s', kwargs)
+                logging.getLogger('train').info('[COMPILE] Enabled torch.compile for %s with %s', label, kwargs)
+            if forward_only:
+                module.forward = compiled
+                return module
             return compiled
         except Exception as exc:
             if bool(compile_opt.get('fallback_on_error', True)):
                 if self.opt.get('rank', 0) == 0:
                     logging.getLogger('train').warning(
-                        '[COMPILE] torch.compile failed (%s); using eager model.', exc
+                        '[COMPILE] torch.compile failed for %s (%s); using eager module.', label, exc
                     )
-                return network
+                return module
             raise
+
+    def compile_model_if_enabled(self, network):
+        compile_opt = self._compile_options()
+        if not bool(compile_opt.get('enable', False)):
+            return network
+        scope = self._compile_scope(compile_opt)
+        if scope != 'full_model':
+            if self.opt.get('rank', 0) == 0:
+                logging.getLogger('train').info('[COMPILE] scope=%s; keeping netG eager.', scope)
+            return network
+        return self._compile_module(network, compile_opt, 'netG')
+
+    def _fusion_compile_targets(self, network):
+        targets = []
+        adapter = getattr(network, 'fusion_adapter', None)
+        operator = getattr(network, 'fusion_operator', None)
+        if isinstance(operator, nn.Module):
+            targets.append(('fusion_operator', network, 'fusion_operator', operator))
+        if adapter is not None:
+            for attr in ('operator',):
+                module = getattr(adapter, attr, None)
+                if isinstance(module, nn.Module):
+                    targets.append((f'fusion_adapter.{attr}', adapter, attr, module))
+            for adapter_attr in ('early_adapter', 'middle_adapter'):
+                nested = getattr(adapter, adapter_attr, None)
+                module = getattr(nested, 'operator', None)
+                if isinstance(module, nn.Module):
+                    targets.append((f'fusion_adapter.{adapter_attr}.operator', nested, 'operator', module))
+        return targets
+
+    def compile_fusion_modules_if_enabled(self, network):
+        compile_opt = self._compile_options()
+        scope = self._compile_scope(compile_opt)
+        if not bool(compile_opt.get('enable', False)) or scope != 'fusion_only':
+            return {'scope': scope, 'compiled': []}
+
+        compiled = []
+        compiled_by_id = {}
+        for label, owner, attr, module in self._fusion_compile_targets(network):
+            module_id = id(module)
+            if module_id in compiled_by_id:
+                setattr(owner, attr, compiled_by_id[module_id])
+                continue
+            original_forward = module.forward
+            compiled_module = self._compile_module(module, compile_opt, label, forward_only=True)
+            compiled_by_id[module_id] = compiled_module
+            if compiled_module.forward is not original_forward:
+                compiled.append(label)
+
+        summary = {'scope': scope, 'compiled': compiled}
+        if self.opt.get('rank', 0) == 0:
+            logging.getLogger('train').info('[COMPILE] fusion scope summary: %s', summary)
+        return summary
 
     def model_to_device(self, network):
         """Model to device. It also warps models with DistributedDataParallel

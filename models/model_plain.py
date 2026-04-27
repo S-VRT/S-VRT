@@ -225,6 +225,7 @@ class ModelPlain(ModelBase):
             frozen_count = sum(1 for p in bare_model.parameters() if not p.requires_grad)
             trainable_count = sum(1 for p in bare_model.parameters() if p.requires_grad)
             print(f'[Stage A/C] Frozen {frozen_count} params, trainable {trainable_count} params')
+        self.compile_fusion_modules_if_enabled(bare_model)
         self.netG.train()                     # set training mode,for BN
         self.define_loss()                    # define loss
         self.define_optimizer()               # define optimizer

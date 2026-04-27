@@ -1,5 +1,6 @@
 import functools
 import os
+import logging
 import torch
 from torch.nn import init
 
@@ -11,10 +12,73 @@ from torch.nn import init
 """
 
 
+def _as_int_list(value, key):
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{key} must be a list of integer block indices, got {type(value).__name__}.")
+    result = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int):
+            raise ValueError(f"{key} must contain only integer block indices, got {item!r}.")
+        result.append(item)
+    return result
+
+
+def _merge_unique_sorted(*values):
+    merged = []
+    seen = set()
+    for value in values:
+        for item in value:
+            if item not in seen:
+                seen.add(item)
+                merged.append(item)
+    return sorted(merged)
+
+
+def apply_compile_checkpoint_policy(opt):
+    """Apply compile-specific checkpoint compatibility blocks to netG options."""
+    train_opt = opt.get('train', {}) or {}
+    compile_opt = train_opt.get('compile', {}) or {}
+    compat_opt = compile_opt.get('checkpoint_compat', {}) or {}
+    summary = {'applied': False}
+
+    scope = str(compile_opt.get('scope', 'full_model')).strip().lower()
+    if (
+        not bool(compile_opt.get('enable', False))
+        or scope != 'full_model'
+        or not bool(compat_opt.get('enable', True))
+    ):
+        return summary
+
+    net_opt = opt.get('netG', {}) or {}
+    disable_ffn_blocks = _as_int_list(compat_opt.get('disable_ffn_blocks', []), 'train.compile.checkpoint_compat.disable_ffn_blocks')
+    disable_attn_blocks = _as_int_list(compat_opt.get('disable_attn_blocks', []), 'train.compile.checkpoint_compat.disable_attn_blocks')
+    current_ffn = _as_int_list(net_opt.get('no_checkpoint_ffn_blocks', []), 'netG.no_checkpoint_ffn_blocks')
+    current_attn = _as_int_list(net_opt.get('no_checkpoint_attn_blocks', []), 'netG.no_checkpoint_attn_blocks')
+
+    merged_ffn = _merge_unique_sorted(current_ffn, disable_ffn_blocks)
+    merged_attn = _merge_unique_sorted(current_attn, disable_attn_blocks)
+    net_opt['no_checkpoint_ffn_blocks'] = merged_ffn
+    net_opt['no_checkpoint_attn_blocks'] = merged_attn
+
+    summary = {
+        'applied': True,
+        'disable_ffn_blocks': _merge_unique_sorted(disable_ffn_blocks),
+        'disable_attn_blocks': _merge_unique_sorted(disable_attn_blocks),
+        'no_checkpoint_ffn_blocks': merged_ffn,
+        'no_checkpoint_attn_blocks': merged_attn,
+    }
+    if opt.get('rank', 0) == 0:
+        logging.getLogger('train').info('[COMPILE] checkpoint_compat applied: %s', summary)
+    return summary
+
+
 # --------------------------------------------
 # Generator, netG, G
 # --------------------------------------------
 def define_G(opt):
+    apply_compile_checkpoint_policy(opt)
     opt_net = opt['netG']
     net_type = opt_net['net_type']
     input_cfg = opt_net.get('input', {}) if isinstance(opt_net.get('input', {}), dict) else {}
@@ -46,6 +110,7 @@ def define_G(opt):
                    sgp_k=opt_net.get('sgp_k', 3),
                    sgp_reduction=opt_net.get('sgp_reduction', 4),
                    use_flash_attn=opt_net.get('use_flash_attn', True),
+                   pa_fuse_amp_policy=opt_net.get('pa_fuse_amp_policy', 'fp32'),
                    dcn_config={
                        'type': opt_net['dcn_type'],
                        'apply_softmax': opt_net['dcn_apply_softmax']
