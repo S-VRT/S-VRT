@@ -1,0 +1,103 @@
+import pytest
+import torch
+
+
+class _IdentityModule(torch.nn.Module):
+    def forward(self, x):
+        return x
+
+
+class _PaFuseProbe(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.input_dtype = None
+        self.autocast_enabled = None
+
+    def forward(self, x):
+        self.input_dtype = x.dtype
+        self.autocast_enabled = torch.is_autocast_enabled(x.device.type)
+        return x[..., :1]
+
+
+def _make_stage(policy="fp32"):
+    from models.architectures.vrt.stages import Stage
+
+    stage = Stage(
+        in_dim=1,
+        dim=1,
+        input_resolution=(2, 4, 4),
+        depth=0,
+        num_heads=1,
+        window_size=(2, 4, 4),
+        pa_frames=2,
+        reshape="none",
+        pa_fuse_amp_policy=policy,
+    )
+    stage.reshape = _IdentityModule()
+    stage.residual_group1 = _IdentityModule()
+    stage.residual_group2 = _IdentityModule()
+    stage.linear1 = _IdentityModule()
+    stage.linear2 = _IdentityModule()
+    stage.get_aligned_feature_2frames = lambda x, *_args: (torch.zeros_like(x), torch.zeros_like(x))
+    stage.pa_fuse = _PaFuseProbe()
+    return stage
+
+
+def test_pa_fuse_defaults_to_fp32_policy():
+    stage = _make_stage()
+
+    assert stage.pa_fuse_amp_policy == "fp32"
+
+
+def test_pa_fuse_autocast_policy_keeps_outer_autocast_enabled_on_cpu():
+    stage = _make_stage(policy="autocast")
+    x = torch.randn(1, 1, 2, 4, 4)
+    flows = [torch.zeros(1, 2, 4, 4)]
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        stage(x, flows, flows)
+
+    assert stage.pa_fuse.autocast_enabled is True
+
+
+def test_pa_fuse_fp32_policy_disables_outer_autocast_on_cpu():
+    stage = _make_stage(policy="fp32")
+    x = torch.randn(1, 1, 2, 4, 4)
+    flows = [torch.zeros(1, 2, 4, 4)]
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        stage(x, flows, flows)
+
+    assert stage.pa_fuse.autocast_enabled is False
+    assert stage.pa_fuse.input_dtype == torch.float32
+
+
+def test_pa_fuse_invalid_policy_fails_fast():
+    with pytest.raises(ValueError, match="pa_fuse_amp_policy"):
+        _make_stage(policy="bad")
+
+
+def test_pa_fuse_records_profiler_label(monkeypatch):
+    from models.architectures.vrt import stages as stages_module
+
+    labels = []
+
+    class _Record:
+        def __init__(self, name):
+            labels.append(name)
+
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(stages_module.torch.profiler, "record_function", _Record)
+
+    stage = _make_stage(policy="autocast")
+    x = torch.randn(1, 1, 2, 4, 4)
+    flows = [torch.zeros(1, 2, 4, 4)]
+
+    stage(x, flows, flows)
+
+    assert "pa_fuse" in labels
