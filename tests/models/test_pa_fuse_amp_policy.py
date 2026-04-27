@@ -101,3 +101,23 @@ def test_pa_fuse_records_profiler_label(monkeypatch):
     stage(x, flows, flows)
 
     assert "pa_fuse" in labels
+
+
+def test_vrt_passes_pa_fuse_amp_policy_to_all_stages():
+    from models.architectures.vrt.vrt import VRT
+
+    model = VRT(
+        upscale=1,
+        in_chans=3,
+        out_chans=3,
+        img_size=[2, 16, 16],
+        window_size=[2, 4, 4],
+        depths=[0] * 8,
+        embed_dims=[8] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        pa_fuse_amp_policy="autocast",
+    )
+
+    for index in range(1, 8):
+        assert getattr(model, f"stage{index}").pa_fuse_amp_policy == "autocast"

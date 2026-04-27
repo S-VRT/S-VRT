@@ -124,6 +124,7 @@ class VRT(nn.Module):
                  sgp_reduction=4,
                  sgp_use_partitioned=True,
                  use_flash_attn=True,
+                 pa_fuse_amp_policy='fp32',
                  dcn_config=None,  # DCN configuration dict: {'type': 'DCNv2'/'DCNv4', 'apply_softmax': bool}
                  opt=None):  # Global configuration for initialization
         super().__init__()
@@ -157,6 +158,7 @@ class VRT(nn.Module):
         self.nonblind_denoising = nonblind_denoising
         self.use_sgp = use_sgp
         self.use_flash_attn = use_flash_attn
+        self.pa_fuse_amp_policy = str(pa_fuse_amp_policy).strip().lower()
 
         # Parse DCN configuration
         self.dcn_config = dcn_config or {}
@@ -416,6 +418,7 @@ class VRT(nn.Module):
                         sgp_reduction=sgp_reduction,
                         sgp_use_partitioned=sgp_use_partitioned,
                         use_flash_attn=use_flash_attn,
+                        pa_fuse_amp_policy=self.pa_fuse_amp_policy,
                         dcn_config={'type': self.dcn_type, 'apply_softmax': self.dcn_apply_softmax})
                     )
 

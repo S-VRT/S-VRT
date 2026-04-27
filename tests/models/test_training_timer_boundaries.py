@@ -1,5 +1,7 @@
 from contextlib import nullcontext
 
+import torch
+
 from utils.utils_timer import Timer
 
 
@@ -114,3 +116,66 @@ def test_model_plain_timer_does_not_sync_cuda_by_default(monkeypatch):
     ModelPlain.init_train(model)
 
     assert captured["sync_cuda"] is False
+
+
+def test_optimize_parameters_skips_optimizer_when_loss_is_nonfinite():
+    from models.model_plain import ModelPlain
+
+    class _Net:
+        def __call__(self, _x):
+            return torch.tensor(float("nan"), requires_grad=True)
+
+    class _Optimizer:
+        def __init__(self):
+            self.zero_grad_calls = 0
+            self.step_calls = 0
+
+        def zero_grad(self):
+            self.zero_grad_calls += 1
+
+        def step(self):
+            self.step_calls += 1
+
+    class _Scaler:
+        def is_enabled(self):
+            return False
+
+    model = ModelPlain.__new__(ModelPlain)
+    model._trace_current_step = None
+    model.configure_calls = 0
+    model.timer = _TimerStub()
+    model.opt_train = {
+        "G_optimizer_clipgrad": 0,
+        "G_regularizer_orthstep": 0,
+        "G_regularizer_clipstep": 0,
+        "checkpoint_save": 999,
+        "E_decay": 0,
+    }
+    model.opt = {"train": {"checkpoint_save": 999}}
+    model.fix_iter = 0
+    model.G_optimizer = _Optimizer()
+    model.grad_scaler = _Scaler()
+    model.amp_train_enabled = False
+    model.amp_train_dtype = torch.float16
+    model.netG = _Net()
+    model.L = torch.tensor([1.0])
+    model.L_flow_spike = None
+    model.H = torch.tensor([1.0])
+    model.G_lossfn_weight = 1.0
+    model.G_lossfn = lambda e, _h: e
+    model.log_dict = {}
+    model.parameters = lambda: []
+    model.get_bare_model = lambda net: net
+    model._record_fusion_diagnostics_to_log = lambda _meta: None
+    model._compute_fusion_aux_loss = lambda **_kwargs: torch.tensor(0.0)
+    model._configure_fusion_warmup_trainability = lambda _step: None
+    model._autocast_context = lambda **_kwargs: nullcontext()
+    model.update_E = lambda _decay: (_ for _ in ()).throw(AssertionError("update_E should be skipped"))
+
+    ModelPlain.optimize_parameters(model, current_step=6001)
+
+    assert model.G_optimizer.zero_grad_calls == 1
+    assert model.G_optimizer.step_calls == 0
+    assert model.log_dict["G_loss"] != model.log_dict["G_loss"]
+    assert model.log_dict["nan_guard_skip"] == 1.0
+    assert model.log_dict["nan_guard_step"] == 6001.0

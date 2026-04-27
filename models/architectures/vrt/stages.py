@@ -377,11 +377,18 @@ class Stage(nn.Module):
                  sgp_reduction=4,
                  sgp_use_partitioned=True,
                  use_flash_attn=True,
+                 pa_fuse_amp_policy='fp32',
                  opt=None,
                  dcn_config=None):
         super(Stage, self).__init__()
         self.pa_frames = pa_frames
         self.use_flash_attn = use_flash_attn
+        self.pa_fuse_amp_policy = str(pa_fuse_amp_policy).strip().lower()
+        if self.pa_fuse_amp_policy not in {'fp32', 'autocast', 'fp16', 'bf16'}:
+            raise ValueError(
+                f"Unsupported pa_fuse_amp_policy={pa_fuse_amp_policy!r}; "
+                "expected one of ['fp32', 'autocast', 'fp16', 'bf16']."
+            )
 
         if reshape == 'none':
             self.reshape = nn.Sequential(Rearrange('n c d h w -> n d h w c'),
@@ -443,6 +450,27 @@ class Stage(nn.Module):
                                      max_residue_magnitude=max_residue_magnitude, pa_frames=pa_frames)
             self.pa_fuse = Mlp_GEGLU(dim * (1 + 2), dim * (1 + 2), dim)
 
+    def _pa_fuse_policy_dtype(self, x):
+        if self.pa_fuse_amp_policy == 'fp16':
+            return torch.float16
+        if self.pa_fuse_amp_policy == 'bf16':
+            return torch.bfloat16
+        if self.pa_fuse_amp_policy == 'fp32':
+            return torch.float32
+        return x.dtype
+
+    def _run_pa_fuse(self, x_pa):
+        with torch.profiler.record_function("pa_fuse"):
+            if self.pa_fuse_amp_policy == 'autocast':
+                return self.pa_fuse(x_pa)
+
+            target_dtype = self._pa_fuse_policy_dtype(x_pa)
+            x_pa = x_pa.to(dtype=target_dtype)
+            if torch.is_autocast_enabled(x_pa.device.type):
+                with torch.autocast(device_type=x_pa.device.type, enabled=False):
+                    return self.pa_fuse(x_pa)
+            return self.pa_fuse(x_pa)
+
     def forward(self, x, flows_backward, flows_forward, fusion_hook=None, stage_idx=None, spike_ctx=None):
         x = self.reshape(x)
         x = self.linear1(self.residual_group1(x).transpose(1, 4)).transpose(1, 4) + x
@@ -452,11 +480,7 @@ class Stage(nn.Module):
             x = x.transpose(1, 2)
             x_backward, x_forward = getattr(self, f'get_aligned_feature_{self.pa_frames}frames')(x, flows_backward, flows_forward)
             x_pa = torch.cat([x, x_backward, x_forward], 2).permute(0, 1, 3, 4, 2)
-            if torch.is_autocast_enabled(x_pa.device.type):
-                with torch.autocast(device_type=x_pa.device.type, enabled=False):
-                    x = self.pa_fuse(x_pa.float()).permute(0, 4, 1, 2, 3)
-            else:
-                x = self.pa_fuse(x_pa).permute(0, 4, 1, 2, 3)
+            x = self._run_pa_fuse(x_pa).permute(0, 4, 1, 2, 3)
 
         if fusion_hook is not None and stage_idx is not None and spike_ctx is not None:
             x = fusion_hook(stage_idx=stage_idx, x=x, spike_ctx=spike_ctx)

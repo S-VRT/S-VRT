@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from contextlib import nullcontext
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import lr_scheduler
@@ -534,6 +535,12 @@ class ModelPlain(ModelBase):
             loss = loss + update_penalty_weight * effective_update.abs().mean()
         return loss
 
+    def _has_nonfinite_loss(self, loss: torch.Tensor) -> bool:
+        is_nonfinite = (~torch.isfinite(loss.detach())).to(dtype=torch.int32)
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(is_nonfinite, op=dist.ReduceOp.MAX)
+        return bool(is_nonfinite.item())
+
     # ----------------------------------------
     # phase1 fast-path: only run fusion_adapter, skip full VRT forward
     # ----------------------------------------
@@ -583,6 +590,12 @@ class ModelPlain(ModelBase):
                 G_loss = self.G_lossfn_weight * self.G_lossfn(self.E, self.H)
                 G_loss = G_loss + self._compute_fusion_aux_loss(is_phase1=False, current_step=current_step)
 
+        if self._has_nonfinite_loss(G_loss):
+            self.log_dict['G_loss'] = G_loss.detach().item()
+            self.log_dict['nan_guard_skip'] = 1.0
+            self.log_dict['nan_guard_step'] = float(current_step)
+            return
+
         with self.timer.timer('backward'):
             if self.grad_scaler.is_enabled():
                 self.grad_scaler.scale(G_loss).backward()
@@ -621,6 +634,7 @@ class ModelPlain(ModelBase):
 
         # self.log_dict['G_loss'] = G_loss.item()/self.E.size()[0]  # if `reduction='sum'`
         self.log_dict['G_loss'] = G_loss.item()
+        self.log_dict['nan_guard_skip'] = 0.0
 
         vrt = self.get_bare_model(self.netG)
         self._record_fusion_diagnostics_to_log(getattr(vrt, "_last_fusion_meta", None))
