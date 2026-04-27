@@ -53,3 +53,81 @@ def test_mamba_operator_records_forward_stage_timings(monkeypatch):
         "mamba_writeback",
         "mamba_upsample",
     ]
+
+
+def test_mamba_operator_uses_record_function_labels(monkeypatch):
+    from models.fusion.operators import mamba as mamba_module
+    from models.fusion.operators.mamba import MambaFusionOperator
+
+    class _FakeBlock(torch.nn.Module):
+        def __init__(self, model_dim, d_state, d_conv, expand):
+            super().__init__()
+
+        def forward(self, tokens):
+            return tokens
+
+    labels = []
+
+    class _Record:
+        def __init__(self, name):
+            labels.append(name)
+
+        def __enter__(self):
+            return None
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(mamba_module, "_MambaBlock", _FakeBlock)
+    monkeypatch.setattr(mamba_module.torch.profiler, "record_function", _Record)
+
+    operator = MambaFusionOperator(
+        rgb_chans=3,
+        spike_chans=1,
+        out_chans=3,
+        operator_params={"token_dim": 4, "token_stride": 2, "num_layers": 1},
+    )
+
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+    operator(rgb, spike)
+
+    assert "mamba_rgb_encoder" in labels
+    assert "mamba_spike_encoder" in labels
+    assert "mamba_token_pack" in labels
+    assert "mamba_mixer" in labels
+    assert "mamba_writeback" in labels
+    assert "mamba_upsample" in labels
+
+
+def test_mamba_operator_defaults_to_fp32_mixer_policy(monkeypatch):
+    from models.fusion.operators import mamba as mamba_module
+    from models.fusion.operators.mamba import MambaFusionOperator
+
+    class _FakeBlock(torch.nn.Module):
+        def __init__(self, model_dim, d_state, d_conv, expand):
+            super().__init__()
+
+        def forward(self, tokens):
+            assert tokens.dtype == torch.float32
+            return tokens
+
+    monkeypatch.setattr(mamba_module, "_MambaBlock", _FakeBlock)
+    operator = MambaFusionOperator(3, 1, 3, {"token_dim": 4, "token_stride": 2, "num_layers": 1})
+
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+    operator(rgb, spike)
+
+    assert operator.mamba_amp_policy == "fp32"
+
+
+def test_mamba_operator_rejects_unknown_amp_policy():
+    from models.fusion.operators.mamba import MambaFusionOperator
+
+    try:
+        MambaFusionOperator(3, 1, 3, {"mamba_amp_policy": "bad"})
+    except ValueError as exc:
+        assert "mamba_amp_policy" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError for bad mamba_amp_policy")

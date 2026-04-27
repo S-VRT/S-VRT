@@ -1,9 +1,9 @@
+from contextlib import contextmanager, nullcontext
 from typing import Dict
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from contextlib import nullcontext
 
 
 class _MambaBlock(nn.Module):
@@ -48,6 +48,13 @@ class MambaFusionOperator(nn.Module):
         alpha_init = float(operator_params.get("alpha_init", 0.05))
         gate_bias_init = float(operator_params.get("gate_bias_init", operator_params.get("init_gate_bias", -2.0)))
         enable_diagnostics = bool(operator_params.get("enable_diagnostics", True))
+        mamba_amp_policy = str(operator_params.get("mamba_amp_policy", "fp32")).strip().lower()
+        if mamba_amp_policy not in {"fp32", "autocast", "fp16", "bf16"}:
+            raise ValueError(
+                f"Unsupported mamba_amp_policy={mamba_amp_policy!r}; "
+                "expected one of ['fp32', 'autocast', 'fp16', 'bf16']."
+            )
+        self.mamba_amp_policy = mamba_amp_policy
 
         self.enable_diagnostics = enable_diagnostics
         self.token_chunk_size = token_chunk_size
@@ -94,6 +101,12 @@ class MambaFusionOperator(nn.Module):
             return nullcontext()
         return timer.timer(name)
 
+    @contextmanager
+    def _profiled_timer(self, name: str):
+        with torch.profiler.record_function(name):
+            with self._timer(name):
+                yield
+
     def set_warmup_stage(self, stage) -> None:
         normalized = "full" if stage in {None, "", "full"} else str(stage).strip().lower()
         if normalized not in {"full", "writeback_only", "token_mixer"}:
@@ -116,7 +129,6 @@ class MambaFusionOperator(nn.Module):
             return torch.autocast(device_type="cuda", enabled=False)
         if tensor.device.type == "cpu":
             return torch.autocast(device_type="cpu", enabled=False)
-        from contextlib import nullcontext
         return nullcontext()
 
     @staticmethod
@@ -130,6 +142,15 @@ class MambaFusionOperator(nn.Module):
             "device": str(detached.device),
         }
         return summary
+
+    def _prepare_mixer_input(self, seq: torch.Tensor) -> torch.Tensor:
+        if self.mamba_amp_policy == "fp32":
+            return seq.float().contiguous()
+        if self.mamba_amp_policy == "fp16":
+            return seq.to(dtype=torch.float16).contiguous()
+        if self.mamba_amp_policy == "bf16":
+            return seq.to(dtype=torch.bfloat16).contiguous()
+        return seq.contiguous()
 
     def _run_mamba_token_mixer(self, seq: torch.Tensor) -> torch.Tensor:
         chunk_size = self.token_chunk_size
@@ -170,17 +191,17 @@ class MambaFusionOperator(nn.Module):
         if rgb_chans != 3:
             raise ValueError(f"Expected rgb channels=3, got {rgb_chans}")
 
-        with self._timer("mamba_rgb_encoder"):
+        with self._profiled_timer("mamba_rgb_encoder"):
             rgb_flat = rgb_feat.reshape(bsz * steps, 3, height, width)
             rgb_low = self.rgb_context_encoder(rgb_flat)
             _, token_dim, token_h, token_w = rgb_low.shape
             rgb_low = rgb_low.reshape(bsz, steps, token_dim, token_h, token_w)
 
-        with self._timer("mamba_spike_encoder"):
+        with self._profiled_timer("mamba_spike_encoder"):
             spike_flat = spike_feat.reshape(bsz * steps * spike_bins, 1, height, width)
             spike_low = self.spike_token_encoder(spike_flat).reshape(bsz, steps, spike_bins, token_dim, token_h, token_w)
 
-        with self._timer("mamba_token_pack"):
+        with self._profiled_timer("mamba_token_pack"):
             spike_tokens = spike_low.permute(0, 1, 4, 5, 2, 3).reshape(
                 bsz * steps * token_h * token_w, spike_bins, token_dim
             ).contiguous()
@@ -190,21 +211,24 @@ class MambaFusionOperator(nn.Module):
             seq = (spike_tokens + rgb_tokens).contiguous()
             mixer_input_dtype = seq.dtype
 
-        with self._timer("mamba_mixer"):
-            with self._device_autocast_disabled_context(seq):
-                seq = seq.float()
-                seq = seq.contiguous()
+        with self._profiled_timer("mamba_mixer"):
+            if self.mamba_amp_policy == "autocast":
+                seq = self._prepare_mixer_input(seq)
                 seq = self._run_mamba_token_mixer(seq)
+            else:
+                with self._device_autocast_disabled_context(seq):
+                    seq = self._prepare_mixer_input(seq)
+                    seq = self._run_mamba_token_mixer(seq)
             seq = seq.to(dtype=mixer_input_dtype)
 
-        with self._timer("mamba_writeback"):
+        with self._profiled_timer("mamba_writeback"):
             pooled = seq.mean(dim=1).reshape(bsz, steps, token_h, token_w, token_dim).permute(0, 1, 4, 2, 3)
             fused_low = pooled + rgb_low
             writeback = self.fusion_writeback_head["body"](fused_low.reshape(bsz * steps, token_dim, token_h, token_w))
             delta_low = self.fusion_writeback_head["delta"](writeback)
             gate_logits_low = self.fusion_writeback_head["gate"](writeback)
 
-        with self._timer("mamba_upsample"):
+        with self._profiled_timer("mamba_upsample"):
             delta = F.interpolate(delta_low, size=(height, width), mode="bilinear", align_corners=False).reshape(bsz, steps, 3, height, width)
             gate_logits = F.interpolate(gate_logits_low, size=(height, width), mode="bilinear", align_corners=False).reshape(bsz, steps, 3, height, width)
         gate = torch.sigmoid(gate_logits)
