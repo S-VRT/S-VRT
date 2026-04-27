@@ -26,6 +26,7 @@ from utils import utils_image as util
 from data.dataset_video_test import TestDataset, \
     SingleTestDataset
 from data.select_dataset import define_Dataset
+from models.fusion.debug import FusionDebugDumper
 
 
 def get_memory_usage():
@@ -193,6 +194,53 @@ def _init_distributed():
     return False, 0, 1
 
 
+def _get_bare_model(model):
+    return model.module if hasattr(model, 'module') else model
+
+
+def dump_post_inference_fusion_debug(model, args, batch, batch_idx, dumper_cls=FusionDebugDumper):
+    if not bool(getattr(args, 'fusion_debug', False)):
+        return False
+    max_batches = int(getattr(args, 'fusion_debug_max_batches', 1) or 1)
+    if batch_idx >= max_batches:
+        return False
+    if int(getattr(args, 'rank', 0)) != 0:
+        return False
+
+    cfg = getattr(args, 'cfg', None)
+    if not isinstance(cfg, dict):
+        return False
+
+    debug_opt = json.loads(json.dumps(cfg))
+    debug_cfg = debug_opt.setdefault('netG', {}).setdefault('fusion', {}).setdefault('debug', {})
+    debug_cfg['enable'] = True
+    debug_cfg['save_images'] = True
+    if getattr(args, 'fusion_debug_subdir', None):
+        debug_cfg['subdir'] = args.fusion_debug_subdir
+    else:
+        debug_cfg.setdefault('subdir', 'fusion_post_infer')
+    if getattr(args, 'fusion_debug_source_view', None):
+        debug_cfg['source_view'] = args.fusion_debug_source_view
+    debug_opt.setdefault('path', {})
+    debug_opt['path']['images'] = getattr(args, 'fusion_debug_dir', None) or debug_opt['path'].get('images', 'results')
+
+    dumper = dumper_cls(debug_opt)
+    if not (getattr(dumper, 'enabled', False) and getattr(dumper, 'save_images', False)):
+        return False
+
+    bare = _get_bare_model(model)
+    return dumper.dump_tensor(
+        fusion_main=getattr(bare, '_last_fusion_main', None),
+        fusion_exec=getattr(bare, '_last_fusion_exec', None),
+        fusion_meta=getattr(bare, '_last_fusion_meta', {}) or {},
+        current_step=batch_idx,
+        folder=batch.get('folder'),
+        gt=batch.get('H'),
+        rank=getattr(args, 'rank', 0),
+        lq_paths=batch.get('lq_path'),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--opt', type=str, default=None,
@@ -209,6 +257,16 @@ def main():
                         help='Overlapping of different tiles')
     parser.add_argument('--num_workers', type=int, default=None, help='number of workers in data loading')
     parser.add_argument('--save_result', action='store_true', help='save resulting image')
+    parser.add_argument('--fusion_debug', action='store_true',
+                        help='Dump fusion module outputs during inference after loading checkpoint weights.')
+    parser.add_argument('--fusion_debug_dir', type=str, default=None,
+                        help='Override root directory for fusion debug images.')
+    parser.add_argument('--fusion_debug_subdir', type=str, default='fusion_post_infer',
+                        help='Subdirectory under each folder for fusion debug images.')
+    parser.add_argument('--fusion_debug_source_view', type=str, default=None, choices=['main', 'exec'],
+                        help='Fusion debug view to dump: main fused output or execution/backbone view.')
+    parser.add_argument('--fusion_debug_max_batches', type=int, default=1,
+                        help='Maximum number of inference batches to dump for fusion debug.')
     args = parser.parse_args()
 
     cfg = None
@@ -357,6 +415,8 @@ def main():
         # inference - keep original test_video logic but ensure model compatibility
         with torch.no_grad():
             output = test_video(lq, model, args)
+        if args.fusion_debug:
+            dump_post_inference_fusion_debug(model, args, batch, idx)
 
         if 'videofi' in args.task:
             output = output[:, :1, ...]
@@ -578,10 +638,12 @@ def prepare_model_dataset(args):
         path_cfg = args.path_cfg or {}
         pretrained_netG = path_cfg.get('pretrained_netG')
         pretrained_netE = path_cfg.get('pretrained_netE')
+        input_cfg = netG_cfg.get('input', {}) if isinstance(netG_cfg.get('input', {}), dict) else {}
+        raw_ingress_chans = int(input_cfg.get('raw_ingress_chans', netG_cfg.get('in_chans', 3)))
         
         # Build model from config (even if pretrained paths are not set, we need the model structure)
         model = net(upscale=netG_cfg.get('upscale', 1),
-                   in_chans=netG_cfg.get('in_chans', 3),
+                   in_chans=raw_ingress_chans,
                    img_size=netG_cfg['img_size'],
                    window_size=netG_cfg['window_size'],
                    depths=netG_cfg['depths'],
@@ -603,7 +665,8 @@ def prepare_model_dataset(args):
                    dcn_config={
                        'type': netG_cfg.get('dcn_type', 'DCNv2'),
                        'apply_softmax': netG_cfg.get('dcn_apply_softmax', False)
-                   })
+                   },
+                   opt=getattr(args, 'cfg', None))
         
         # Set args for testing
         args.scale = netG_cfg.get('upscale', 1)

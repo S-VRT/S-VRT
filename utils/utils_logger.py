@@ -284,6 +284,7 @@ class _LogfireBridge:
                 'token': logging_config.get('logfire_token'),
                 'service_name': service_name,
                 'environment': environment,
+                'console': False,
             }
         )
 

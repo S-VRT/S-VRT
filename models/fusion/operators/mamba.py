@@ -1,9 +1,9 @@
-from contextlib import contextmanager, nullcontext
 from typing import Dict
 
 import torch
 import torch.nn.functional as F
 from torch import nn
+from contextlib import contextmanager, nullcontext
 
 
 class _MambaBlock(nn.Module):
@@ -47,17 +47,17 @@ class MambaFusionOperator(nn.Module):
         token_chunk_size = int(operator_params.get("token_chunk_size", 0))
         alpha_init = float(operator_params.get("alpha_init", 0.05))
         gate_bias_init = float(operator_params.get("gate_bias_init", operator_params.get("init_gate_bias", -2.0)))
-        enable_diagnostics = bool(operator_params.get("enable_diagnostics", True))
+        enable_diagnostics = bool(operator_params.get("enable_diagnostics", False))
         mamba_amp_policy = str(operator_params.get("mamba_amp_policy", "fp32")).strip().lower()
         if mamba_amp_policy not in {"fp32", "autocast", "fp16", "bf16"}:
             raise ValueError(
                 f"Unsupported mamba_amp_policy={mamba_amp_policy!r}; "
-                "expected one of ['fp32', 'autocast', 'fp16', 'bf16']."
+                "expected one of: fp32, autocast, fp16, bf16"
             )
-        self.mamba_amp_policy = mamba_amp_policy
 
         self.enable_diagnostics = enable_diagnostics
         self.token_chunk_size = token_chunk_size
+        self.mamba_amp_policy = mamba_amp_policy
         self.rgb_context_encoder = nn.Sequential(
             nn.Conv2d(3, token_dim, kernel_size=3, stride=token_stride, padding=1),
             nn.ReLU(inplace=True),
@@ -129,6 +129,7 @@ class MambaFusionOperator(nn.Module):
             return torch.autocast(device_type="cuda", enabled=False)
         if tensor.device.type == "cpu":
             return torch.autocast(device_type="cpu", enabled=False)
+        from contextlib import nullcontext
         return nullcontext()
 
     @staticmethod
@@ -142,15 +143,6 @@ class MambaFusionOperator(nn.Module):
             "device": str(detached.device),
         }
         return summary
-
-    def _prepare_mixer_input(self, seq: torch.Tensor) -> torch.Tensor:
-        if self.mamba_amp_policy == "fp32":
-            return seq.float().contiguous()
-        if self.mamba_amp_policy == "fp16":
-            return seq.to(dtype=torch.float16).contiguous()
-        if self.mamba_amp_policy == "bf16":
-            return seq.to(dtype=torch.bfloat16).contiguous()
-        return seq.contiguous()
 
     def _run_mamba_token_mixer(self, seq: torch.Tensor) -> torch.Tensor:
         chunk_size = self.token_chunk_size
@@ -177,6 +169,15 @@ class MambaFusionOperator(nn.Module):
         if len(mixed_chunks) == 1:
             return mixed_chunks[0]
         return torch.cat(mixed_chunks, dim=0)
+
+    def _prepare_mixer_input(self, seq: torch.Tensor) -> torch.Tensor:
+        if self.mamba_amp_policy == "fp32":
+            return seq.float().contiguous()
+        if self.mamba_amp_policy == "fp16":
+            return seq.to(dtype=torch.float16).contiguous()
+        if self.mamba_amp_policy == "bf16":
+            return seq.to(dtype=torch.bfloat16).contiguous()
+        return seq.contiguous()
 
     def forward(self, rgb_feat: torch.Tensor, spike_feat: torch.Tensor) -> torch.Tensor:
         if rgb_feat.dim() != 5:
@@ -212,13 +213,13 @@ class MambaFusionOperator(nn.Module):
             mixer_input_dtype = seq.dtype
 
         with self._profiled_timer("mamba_mixer"):
-            if self.mamba_amp_policy == "autocast":
-                seq = self._prepare_mixer_input(seq)
-                seq = self._run_mamba_token_mixer(seq)
-            else:
+            if self.mamba_amp_policy == "fp32":
                 with self._device_autocast_disabled_context(seq):
                     seq = self._prepare_mixer_input(seq)
                     seq = self._run_mamba_token_mixer(seq)
+            else:
+                seq = self._prepare_mixer_input(seq)
+                seq = self._run_mamba_token_mixer(seq)
             seq = seq.to(dtype=mixer_input_dtype)
 
         with self._profiled_timer("mamba_writeback"):

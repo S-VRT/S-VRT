@@ -1,81 +1,150 @@
-<mxfile host="app.diagrams.net" modified="2026-04-08T14:20:00.000Z" agent="Codex" version="24.7.17">
-  <diagram id="mamba-fusion-only" name="MambaFusionOperator">
-    <mxGraphModel dx="1600" dy="950" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1300" math="0" shadow="0">
+<mxfile host="app.diagrams.net" modified="2026-04-26T00:00:00.000Z" agent="Codex" version="24.7.17">
+  <diagram id="mamba-fusion-tokenized" name="MambaFusionOperator">
+    <mxGraphModel dx="1800" dy="1100" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1400" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="title" value="MambaFusionOperator: Data Flow &amp; Tensor Shapes" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=22;fontStyle=1;" vertex="1" parent="1">
-          <mxGeometry x="40" y="20" width="860" height="40" as="geometry" />
-        </mxCell>
-        <mxCell id="contract" value="Input (5D path)&#xa;rgb_feat: [B, S, Cr, H, W]&#xa;spike_feat: [B, S, Cs, H, W]&#xa;Output: [B, S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="40" y="80" width="430" height="120" as="geometry" />
-        </mxCell>
-        <mxCell id="dep" value="Dependency Guard&#xa;if mamba_ssm unavailable: raise RuntimeError" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="520" y="80" width="420" height="120" as="geometry" />
+
+        <mxCell id="title" value="MambaFusionOperator: Tokenized Collapsed Early Fusion" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=22;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1040" height="40" as="geometry" />
         </mxCell>
 
-        <mxCell id="s1" value="1) Flatten Temporal Axis&#xa;rgb_flat = reshape(rgb_feat) -&gt; [B*S, Cr, H, W]&#xa;spike_flat = reshape(spike_feat) -&gt; [B*S, Cs, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="40" y="250" width="900" height="100" as="geometry" />
+        <mxCell id="contract" value="External operator contract&#xa;rgb_feat: [B, T, 3, H, W]&#xa;spike_feat: [B, T, S, H, W]&#xa;out: [B, T, 3, H, W]&#xa;frame_contract = collapsed" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="80" width="500" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="guards" value="Construction / runtime guards&#xa;rgb_chans must be 3&#xa;spike_chans constructor value must be 1&#xa;out_chans must be 3&#xa;forward requires 5D rgb and 5D spike&#xa;rgb/spike share B,T,H,W" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="580" y="80" width="430" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="defaults" value="Key operator_params defaults&#xa;token_dim/model_dim: 48&#xa;token_stride: 4&#xa;d_state: 32, d_conv: 4, expand: 2&#xa;num_layers: 3&#xa;alpha_init: 0.05&#xa;gate_bias_init: -2.0&#xa;mamba_amp_policy: fp32&#xa;token_chunk_size: 0" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="70" width="360" height="170" as="geometry" />
         </mxCell>
 
-        <mxCell id="rgb_proj" value="2a) RGB Projection&#xa;rgb_p = Conv1x1(Cr -&gt; Co)(rgb_flat)&#xa;[B*S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="40" y="400" width="280" height="120" as="geometry" />
-        </mxCell>
-        <mxCell id="spk_proj" value="2b) Spike Projection&#xa;spk_p = Conv1x1(Cs -&gt; Co)(spike_flat)&#xa;[B*S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="360" y="400" width="280" height="120" as="geometry" />
-        </mxCell>
-        <mxCell id="sum" value="2c) Linear Fusion&#xa;fused_flat = rgb_p + spk_p&#xa;[B*S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="680" y="400" width="260" height="120" as="geometry" />
+        <mxCell id="adapter" value="EarlyFusionAdapter collapsed path&#xa;Passes structured tensors directly to operator&#xa;No expansion to [B, T*S, C, H, W] for mamba&#xa;Optional SpikeUpsample aligns spike H/W before operator&#xa;returns fused_main == backbone_view; aux_view = None" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="250" width="610" height="120" as="geometry" />
         </mxCell>
 
-        <mxCell id="reshape1" value="3) Restore Video Layout&#xa;fused = reshape(fused_flat) -&gt; [B, S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="40" y="580" width="420" height="90" as="geometry" />
+        <mxCell id="rgb_in" value="RGB input&#xa;rgb_feat [B, T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="430" width="250" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="tokenize" value="4) Pixel-wise Tokenization for Mamba&#xa;seq = fused.permute(0,3,4,1,2).reshape(B*H*W, S, Co)&#xa;Each spatial location becomes one sequence token stream" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="500" y="560" width="440" height="110" as="geometry" />
-        </mxCell>
-        <mxCell id="mamba" value="5) Temporal Modeling&#xa;seq_out = Mamba(seq)&#xa;shape keeps: [B*H*W, S, Co]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="500" y="710" width="440" height="90" as="geometry" />
-        </mxCell>
-        <mxCell id="reshape2" value="6) Restore Back to Video Tensor&#xa;out = seq_out.reshape(B,H,W,S,Co).permute(0,3,4,1,2)&#xa;Final: [B, S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
-          <mxGeometry x="500" y="840" width="440" height="95" as="geometry" />
+        <mxCell id="spike_in" value="Spike input&#xa;spike_feat [B, T, S, H, W]&#xa;S = spike bins per RGB frame" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="610" width="250" height="90" as="geometry" />
         </mxCell>
 
-        <mxCell id="note4d" value="4D path in code&#xa;Input [B, Cr, H, W] + [B, Cs, H, W]&#xa;fused [B, Co, H, W] -&gt; seq [B*H*W, 1, Co] -&gt; Mamba -&gt; [B, Co, H, W]" style="shape=note;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
-          <mxGeometry x="1020" y="560" width="320" height="130" as="geometry" />
+        <mxCell id="rgb_flat" value="1a) Flatten RGB frames&#xa;reshape -&gt; [B*T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="350" y="420" width="280" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="params" value="Mamba params (operator_params)&#xa;d_state (default 16)&#xa;d_conv (default 4)&#xa;expand (default 2)" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
-          <mxGeometry x="1020" y="720" width="320" height="120" as="geometry" />
+        <mxCell id="rgb_encoder" value="1b) rgb_context_encoder&#xa;Conv3x3 stride=token_stride, ReLU&#xa;Conv3x3, ReLU&#xa;[B*T, D, Htok, Wtok]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="690" y="400" width="290" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="rgb_low" value="1c) Restore frame layout&#xa;rgb_low [B, T, D, Htok, Wtok]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="410" width="300" height="90" as="geometry" />
         </mxCell>
 
-        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="contract" target="s1">
+        <mxCell id="spike_flat" value="2a) Flatten spike bins&#xa;reshape -&gt; [B*T*S, 1, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="350" y="610" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="spike_encoder" value="2b) spike_token_encoder&#xa;Conv3x3 stride=token_stride, ReLU&#xa;Conv3x3&#xa;[B*T*S, D, Htok, Wtok]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="690" y="590" width="290" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="spike_low" value="2c) Restore structured spike layout&#xa;spike_low [B, T, S, D, Htok, Wtok]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1040" y="600" width="300" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="pack" value="3) Token pack and RGB conditioning&#xa;spike_tokens = permute/reshape(spike_low)&#xa;  [B*T*Htok*Wtok, S, D]&#xa;rgb_tokens = permute/reshape(rgb_low)&#xa;  [B*T*Htok*Wtok, 1, D]&#xa;seq = spike_tokens + rgb_tokens&#xa;Mamba sequence axis is spike-bin S, not video T" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="730" y="760" width="520" height="155" as="geometry" />
+        </mxCell>
+        <mxCell id="mixer" value="4) mamba_token_mixer&#xa;Optional split by token_chunk_size along batch-token axis&#xa;For each chunk and each layer:&#xa;_MambaBlock(seq): seq + Mamba(LayerNorm(seq))&#xa;shape preserved: [B*T*Htok*Wtok, S, D]&#xa;mamba_amp_policy controls mixer dtype" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="730" y="970" width="520" height="145" as="geometry" />
+        </mxCell>
+        <mxCell id="writeback" value="5) Low-res writeback preparation&#xa;pooled = mean(seq, dim=S)&#xa;pooled -&gt; [B, T, D, Htok, Wtok]&#xa;fused_low = pooled + rgb_low&#xa;flatten frames -&gt; [B*T, D, Htok, Wtok]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="730" y="1170" width="520" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="heads" value="6) fusion_writeback_head&#xa;body: Conv3x3(D-&gt;D), ReLU&#xa;delta: Conv1x1(D-&gt;3), small random init&#xa;gate: Conv1x1(D-&gt;3), bias gate_bias_init&#xa;delta_low / gate_logits_low [B*T, 3, Htok, Wtok]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1330" y="1160" width="390" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="upsample" value="7) Upsample to RGB resolution&#xa;bilinear interpolate delta_low and gate_logits_low&#xa;delta [B, T, 3, H, W]&#xa;gate = sigmoid(gate_logits) [B, T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1330" y="970" width="390" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="residual" value="8) Conservative residual RGB update&#xa;effective_update = alpha * gate * delta&#xa;alpha shape [1, 3, 1, 1], broadcast over B,T,H,W&#xa;out = rgb_feat + effective_update&#xa;out [B, T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1330" y="780" width="390" height="135" as="geometry" />
+        </mxCell>
+
+        <mxCell id="block_detail" value="_MambaBlock internals&#xa;LayerNorm(D) before Mamba&#xa;Residual add after Mamba&#xa;Requires mamba_ssm and CUDA tensors for real Mamba path&#xa;Runtime errors include chunk/block tensor summaries" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1310" y="540" width="360" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="diagnostics" value="Diagnostics after forward&#xa;token_norm: mean norm of spike_tokens&#xa;mamba_norm: mean norm after mixer&#xa;delta_norm: mean abs(delta)&#xa;gate_mean: mean(sigmoid(gate_logits))&#xa;effective_update_norm: mean abs(update)&#xa;warmup_stage: full/writeback_only/token_mixer" style="shape=note;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1420" y="260" width="390" height="170" as="geometry" />
+        </mxCell>
+        <mxCell id="warmup" value="Warmup control via set_warmup_stage(stage)&#xa;full: all operator params trainable&#xa;writeback_only: freeze RGB encoder, spike encoder, Mamba mixer; train writeback + alpha&#xa;token_mixer: unfreeze encoders and mixer; train writeback + alpha&#xa;Invalid stages raise ValueError" style="shape=note;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1420" y="450" width="390" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="not_old_path" value="Important difference from old diagram&#xa;Mamba no longer consumes full-resolution per-pixel streams [B*H*W, T, C].&#xa;It consumes low-resolution spike-bin streams [B*T*Htok*Wtok, S, D].&#xa;Video-frame temporal modeling remains the VRT backbone role." style="shape=note;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="760" width="560" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_contract_adapter" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="contract" target="adapter">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="dep" target="s1">
+        <mxCell id="e_guard_adapter" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="guards" target="adapter">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="s1" target="rgb_proj">
+        <mxCell id="e_adapter_rgb" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="adapter" target="rgb_in">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="s1" target="spk_proj">
+        <mxCell id="e_adapter_spike" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="adapter" target="spike_in">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="rgb_proj" target="sum">
+        <mxCell id="e_rgb_flat" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="rgb_in" target="rgb_flat">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="spk_proj" target="sum">
+        <mxCell id="e_rgb_encoder" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="rgb_flat" target="rgb_encoder">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="sum" target="reshape1">
+        <mxCell id="e_rgb_low" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="rgb_encoder" target="rgb_low">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="reshape1" target="tokenize">
+        <mxCell id="e_spike_flat" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="spike_in" target="spike_flat">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="tokenize" target="mamba">
+        <mxCell id="e_spike_encoder" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="spike_flat" target="spike_encoder">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="mamba" target="reshape2">
+        <mxCell id="e_spike_low" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="spike_encoder" target="spike_low">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_rgb_pack" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="rgb_low" target="pack">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_spike_pack" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="spike_low" target="pack">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_pack_mixer" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="pack" target="mixer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_mixer_writeback" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="mixer" target="writeback">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_writeback_heads" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="writeback" target="heads">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_heads_upsample" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="heads" target="upsample">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_upsample_residual" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="upsample" target="residual">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_rgb_residual" value="passthrough base" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;dashed=1;" edge="1" parent="1" source="rgb_in" target="residual">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="180" y="920" />
+              <mxPoint x="1320" y="920" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e_mixer_detail" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;strokeWidth=1;dashed=1;" edge="1" parent="1" source="block_detail" target="mixer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_residual_diag" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;strokeWidth=1;dashed=1;" edge="1" parent="1" source="residual" target="diagnostics">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
       </root>

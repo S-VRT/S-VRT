@@ -123,6 +123,17 @@ def test_logger_disables_logfire_when_package_missing(monkeypatch, tmp_path):
     assert logger.logfire_bridge.timings_enabled is False
 
 
+def test_logfire_configure_disables_console_output_to_avoid_terminal_duplicates(monkeypatch, tmp_path):
+    fake = _FakeLogfire()
+    monkeypatch.setattr(utils_logger, "LOGFIRE_AVAILABLE", True)
+    monkeypatch.setattr(utils_logger, "logfire", fake)
+
+    utils_logger.Logger(_make_opt(tmp_path, use_logfire=True), logger=None)
+
+    assert fake.configured
+    assert fake.configured[0]["console"] is False
+
+
 def test_logger_sends_scalars_and_timings_to_logfire(monkeypatch, tmp_path):
     fake = _FakeLogfire()
     monkeypatch.setattr(utils_logger, "LOGFIRE_AVAILABLE", True)
@@ -151,6 +162,7 @@ def test_logger_sends_scalars_and_timings_to_logfire(monkeypatch, tmp_path):
             "token": "token-123",
             "service_name": "s-vrt",
             "environment": "local",
+            "console": False,
         }
     ]
 

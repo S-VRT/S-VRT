@@ -120,3 +120,26 @@ def test_fusion_debug_dumper_can_dump_collapsed_mamba_train_batch_view(tmp_path)
     )
 
     assert dumped is True
+
+
+def test_fusion_debug_dumper_does_not_trigger_during_training_by_default(tmp_path):
+    dumper = FusionDebugDumper(_make_opt(tmp_path))
+
+    assert dumper.should_dump_phase1_last(
+        current_step=9,
+        fix_iter=10,
+        source="train_batch",
+    ) is False
+
+
+def test_fusion_debug_dumper_can_opt_into_training_runtime_debug(tmp_path):
+    opt = _make_opt(tmp_path)
+    opt["netG"]["fusion"]["debug"]["run_during_train"] = True
+
+    dumper = FusionDebugDumper(opt)
+
+    assert dumper.should_dump_phase1_last(
+        current_step=9,
+        fix_iter=10,
+        source="train_batch",
+    ) is True

@@ -3,7 +3,7 @@
   // 基础配置
   // ========================================
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
-  "task": "gopro_tfp4_scflow_mamba_dcn4"
+  "task": "gopro_tfp4_scflow_mamba_tokenized_dcn4"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
   ,
   "model": "vrt"
@@ -155,7 +155,7 @@
       ,
       "tfp_device": "cpu"
       ,
-      "tfp_devices": ["cuda:0","cuda:1"]
+      "tfp_devices": ["cuda:0","cuda:1","cuda:2","cuda:3"]
       // 归一化设置：RGB 使用 ImageNet 均值方差，Spike 通道目前保持恒等缩放
       ,
       "rgb_normalize": null
@@ -189,7 +189,7 @@
       "num_frame": 6
       // 真实标签图像尺寸：支持单值或 [phase1, phase2]
       ,
-      "gt_size": [96, 128]
+      "gt_size": [192, 128]
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -212,10 +212,10 @@
       // 注意：在DDP模式下，每个GPU会创建 dataloader_num_workers // num_gpu 个worker
       // 建议值：每个GPU 4-8个worker，3卡DDP建议设置为12-24
       ,
-      "dataloader_num_workers": 12
+      "dataloader_num_workers": 32
       // 批次大小：支持单值或 [phase1, phase2]
       ,
-      "dataloader_batch_size": [8, 2]
+      "dataloader_batch_size": [96, 16]
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -305,7 +305,7 @@
       // Spike TFP 多 GPU 设备列表：可选，配置后 DataLoader worker 会按 worker_id/LOCAL_RANK 轮询使用
       // 例如 ["cuda:0","cuda:1","cuda:2"]；为空数组表示禁用多 GPU TFP
       ,
-      "tfp_devices": ["cuda:0","cuda:1"]
+      "tfp_devices": ["cuda:0","cuda:1","cuda:2","cuda:3"]
       // Spike 数据文件夹名称
       ,
       "spike_folder_name": "spike"
@@ -366,13 +366,13 @@
         "d_conv": 4,
         "expand": 2,
         "num_layers": 3,
+        "mamba_amp_policy": "fp32",
         "alpha_init": 0.05,
         "gate_bias_init": -2.0,
-        "enable_diagnostics": true,
-        "mamba_amp_policy": "fp32"
+        "enable_diagnostics": false
       },
       "debug": {
-        "enable": true,
+        "enable": false,
         "save_images": true,
         "trigger": "phase1_last",
         "source": "train_batch",
@@ -588,7 +588,7 @@
     "fusion_passthrough_loss_weight": 0.2
     ,
     "fusion_warmup": {
-      "head_only_iters": 2000,
+      "head_only_iters": 800,
       "passthrough_weight_start": 0.2,
       "passthrough_weight_end": 0.0,
       "update_penalty_weight": 0.01
@@ -633,7 +633,7 @@
     // 固定参数配置（用于分阶段训练）
     // 固定参数的迭代次数：在前 fix_iter 次迭代中，fix_keys 指定的参数保持固定
     ,
-    "fix_iter": 20000
+    "fix_iter": 4000
     // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
     ,
     "fix_lr_mul": 0.1
@@ -653,7 +653,7 @@
     "G_scheduler_type": "CosineAnnealingWarmRestarts"
     // 调度器周期：余弦退火的周期长度（迭代次数）
     ,
-    "G_scheduler_periods": 30000
+    "G_scheduler_periods": 40000
     // 最小学习率：学习率的下限
     ,
     "G_scheduler_eta_min": 1e-7
@@ -674,7 +674,7 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": [30000, 40000]
+    "checkpoint_test": [4000, 10000, 15000, 20000, 25000, 30000, 35000, 40000]
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 2000
@@ -693,6 +693,21 @@
       "record_shapes": true,
       "with_stack": false,
       "profile_memory": true
+    }
+    // 混合精度训练开关：enable=true 时使用 autocast；float16 时启用 GradScaler
+    ,
+    "amp": {
+      "enable": true,
+      "dtype": "bfloat16"
+    }
+    ,
+    "compile": {
+      "enable": false,
+      "mode": "reduce-overhead",
+      "fullgraph": false,
+      "dynamic": true,
+      "backend": "inductor",
+      "fallback_on_error": true
     }
   }
   // ========================================
@@ -713,7 +728,7 @@
     "center_frame_only": false
     // 测试时使用的帧数：18 表示测试时处理 18 帧视频
     ,
-    "num_frame_testing": 24
+    "num_frame_testing": 12
     // 测试时的重叠帧数：2 表示相邻测试窗口之间有 2 帧重叠（用于滑动窗口测试）
     ,
     "num_frame_overlapping": 2
@@ -769,7 +784,7 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_tfp4_scflow_mamba_dcn4"
+    "wandb_name": "gopro_tfp4_scflow_mamba_tokenized_dcn4"
     // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
     ,
     "wandb_mode": "online"
@@ -787,10 +802,10 @@
     "swanlab_workspace": null
     // SwanLab 运行名称：用于区分不同实验
     ,
-    "swanlab_name": "gopro_tfp4_scflow_mamba_dcn4"
+    "swanlab_name": "gopro_tfp4_scflow_mamba_tokenized_dcn4"
     // SwanLab 实验描述：可选文本信息
     ,
-    "swanlab_description": "early fusion mamba + scflow"
+    "swanlab_description": "early fusion mamba_tokenized + scflow"
     // SwanLab 运行模式：可设置 cloud/offline/local；留空自动根据 API key 决定
     ,
     "swanlab_mode": null

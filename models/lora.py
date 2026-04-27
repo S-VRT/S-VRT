@@ -83,10 +83,22 @@ def inject_lora(
                 continue
             if not any(s in child_name for s in targets):
                 continue
+            dotted = f"{parent_name}.{child_name}" if parent_name else child_name
+            if any(
+                part in dotted
+                for part in (
+                    "fusion_adapter",
+                    "fusion_operator",
+                    "mamba_token_mixer",
+                    "pa_deform",
+                    ".dcn.",
+                    "spynet",
+                )
+            ):
+                continue
             wrapper = LoRALinear(child, rank=rank, alpha=alpha)
             wrapper = wrapper.to(child.weight.device, dtype=child.weight.dtype)
             setattr(parent, child_name, wrapper)
-            dotted = f"{parent_name}.{child_name}" if parent_name else child_name
             replaced.append(dotted)
 
     return replaced

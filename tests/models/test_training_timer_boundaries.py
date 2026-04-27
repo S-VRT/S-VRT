@@ -82,3 +82,35 @@ def test_timing_summary_keeps_non_time_keys_unchanged():
     assert summarized["time_forward_max"] == 0.5
     assert summarized["time_forward_mean"] == 0.5
     assert "fusion_warmup_stage_max" not in summarized
+
+
+def test_model_plain_timer_does_not_sync_cuda_by_default(monkeypatch):
+    import models.model_plain as model_plain_module
+    from models.model_plain import ModelPlain
+
+    captured = {}
+
+    class _TimerSpy:
+        def __init__(self, device=None, sync_cuda=True):
+            captured["sync_cuda"] = sync_cuda
+            self.current_timings = {}
+
+    monkeypatch.setattr(model_plain_module, "define_G", lambda _opt: object())
+    monkeypatch.setattr(model_plain_module.ModelBase, "model_to_device", lambda _self, net: net)
+    monkeypatch.setattr(model_plain_module, "Timer", _TimerSpy)
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt = {"train": {}}
+    model.opt_train = {}
+    model.netG = type("Net", (), {"train": lambda _self: None})()
+    model.device = type("Device", (), {"type": "cpu"})()
+    model.load = lambda: None
+    model.define_loss = lambda: None
+    model.define_optimizer = lambda: None
+    model.load_optimizers = lambda: None
+    model.define_scheduler = lambda: None
+    model.get_bare_model = lambda net: net
+
+    ModelPlain.init_train(model)
+
+    assert captured["sync_cuda"] is False

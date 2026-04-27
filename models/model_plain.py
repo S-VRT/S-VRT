@@ -202,21 +202,18 @@ class ModelPlain(ModelBase):
     # initialize training
     # ----------------------------------------
     def init_train(self):
-        self.load()                           # load model
         train_opt = self.opt.get('train', {})
         bare_model = self.get_bare_model(self.netG)
 
-        if train_opt.get('use_lora', False):
-            from models.lora import inject_lora
-            targets = train_opt.get('lora_target_modules', ['qkv', 'proj'])
-            rank = int(train_opt.get('lora_rank', 8))
-            alpha = float(train_opt.get('lora_alpha', 16))
-            replaced = inject_lora(bare_model, targets, rank=rank, alpha=alpha)
-            print(f'[Stage C] Injected LoRA(rank={rank}, alpha={alpha}) into '
-                  f'{len(replaced)} Linear layers; targets={targets}')
-            if train_opt.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
-                bare_e = self.get_bare_model(self.netE)
-                inject_lora(bare_e, targets, rank=rank, alpha=alpha)
+        lora_injected = False
+        if self._should_inject_lora_before_load(train_opt):
+            self._inject_lora_adapters(train_opt, bare_model)
+            lora_injected = True
+
+        self.load()                           # load model
+
+        if train_opt.get('use_lora', False) and not lora_injected:
+            self._inject_lora_adapters(train_opt, bare_model)
 
         if train_opt.get('freeze_backbone', False):
             freeze_backbone(bare_model)
@@ -235,10 +232,42 @@ class ModelPlain(ModelBase):
         self.define_scheduler()               # define scheduler
         self.log_dict = OrderedDict()         # log
         # 初始化计时器
-        self.timer = Timer(device=self.device, sync_cuda=True)
+        self.timer = Timer(device=self.device, sync_cuda=bool(self.opt_train.get('sync_cuda_timing', False)))
         # 将计时器传递给网络，以便网络内部模块可以使用
         if hasattr(self.get_bare_model(self.netG), 'set_timer'):
             self.get_bare_model(self.netG).set_timer(self.timer)
+
+    def _inject_lora_adapters(self, train_opt, bare_model):
+        from models.lora import inject_lora
+
+        targets = train_opt.get('lora_target_modules', ['qkv', 'proj'])
+        rank = int(train_opt.get('lora_rank', 8))
+        alpha = float(train_opt.get('lora_alpha', 16))
+        replaced = inject_lora(bare_model, targets, rank=rank, alpha=alpha)
+        print(f'[Stage C] Injected LoRA(rank={rank}, alpha={alpha}) into '
+              f'{len(replaced)} Linear layers; targets={targets}')
+        if train_opt.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
+            bare_e = self.get_bare_model(self.netE)
+            inject_lora(bare_e, targets, rank=rank, alpha=alpha)
+
+    def _should_inject_lora_before_load(self, train_opt):
+        if not train_opt.get('use_lora', False):
+            return False
+        path_opt = self.opt.get('path', {})
+        for path_key, param_key in (('pretrained_netG', 'params'), ('pretrained_netE', 'params_ema')):
+            load_path = path_opt.get(path_key)
+            if load_path is not None and self._checkpoint_contains_lora(load_path, param_key=param_key):
+                return True
+        return False
+
+    @staticmethod
+    def _checkpoint_contains_lora(load_path, param_key='params'):
+        state_dict = torch.load(load_path, map_location='cpu')
+        if isinstance(state_dict, dict) and param_key in state_dict:
+            state_dict = state_dict[param_key]
+        if not isinstance(state_dict, dict):
+            return False
+        return any('.lora_A.' in key or '.lora_B.' in key for key in state_dict.keys())
 
     # ----------------------------------------
     # load pre-trained G model

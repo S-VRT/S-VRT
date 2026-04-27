@@ -434,3 +434,76 @@ def test_mamba_operator_token_mixer_stage_unfreezes_temporal_stack():
     assert all(p.requires_grad for p in op.mamba_token_mixer.parameters())
     assert all(p.requires_grad for p in op.fusion_writeback_head.parameters())
     assert op.alpha.requires_grad is True
+
+
+def test_mamba_operator_runs_token_mixer_in_fp32_under_autocast():
+    class _RecordingBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.last_input_dtype = None
+            self.last_input_is_contiguous = None
+
+        def forward(self, tokens):
+            self.last_input_dtype = tokens.dtype
+            self.last_input_is_contiguous = tokens.is_contiguous()
+            return tokens
+
+    op = create_fusion_operator(
+        "mamba",
+        3,
+        1,
+        3,
+        {
+            "token_dim": 16,
+            "token_stride": 2,
+            "num_layers": 1,
+            "enable_diagnostics": False,
+        },
+    )
+    recorder = _RecordingBlock()
+    op.mamba_token_mixer = nn.ModuleList([recorder])
+
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        out = op(rgb, spike)
+
+    assert out.shape == rgb.shape
+    assert recorder.last_input_dtype == torch.float32
+    assert recorder.last_input_is_contiguous is True
+
+
+def test_mamba_operator_token_chunk_size_splits_mixer_work():
+    class _CountingBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.chunk_shapes = []
+
+        def forward(self, tokens):
+            self.chunk_shapes.append(tuple(tokens.shape))
+            return tokens
+
+    op = create_fusion_operator(
+        "mamba",
+        3,
+        1,
+        3,
+        {
+            "token_dim": 8,
+            "token_stride": 2,
+            "num_layers": 1,
+            "token_chunk_size": 10,
+            "enable_diagnostics": False,
+        },
+    )
+    counter = _CountingBlock()
+    op.mamba_token_mixer = nn.ModuleList([counter])
+
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+
+    out = op(rgb, spike)
+
+    assert out.shape == rgb.shape
+    assert counter.chunk_shapes == [(10, 4, 8), (10, 4, 8), (10, 4, 8), (2, 4, 8)]

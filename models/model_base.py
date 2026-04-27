@@ -1,5 +1,6 @@
 import os
 import shutil
+import logging
 import torch
 import torch.nn as nn
 from utils.utils_bnorm import merge_bn, tidy_sequential
@@ -116,12 +117,50 @@ class ModelBase():
         pass
 
     def get_bare_model(self, network):
-        """Get bare model, especially under wrapping with
-        DistributedDataParallel or DataParallel.
-        """
+        """Get bare model under DDP/DataParallel and torch.compile wrappers."""
         if isinstance(network, (DataParallel, DistributedDataParallel)):
             network = network.module
+        if hasattr(network, '_orig_mod'):
+            network = network._orig_mod
         return network
+
+    def _compile_options(self):
+        train_opt = self.opt.get('train', {}) or {}
+        compile_opt = train_opt.get('compile', {}) or {}
+        if not isinstance(compile_opt, dict):
+            raise ValueError("train.compile must be a dict when provided.")
+        return compile_opt
+
+    def compile_model_if_enabled(self, network):
+        compile_opt = self._compile_options()
+        if not bool(compile_opt.get('enable', False)):
+            return network
+        if not hasattr(torch, 'compile'):
+            if bool(compile_opt.get('fallback_on_error', True)):
+                if self.opt.get('rank', 0) == 0:
+                    logging.getLogger('train').warning('[COMPILE] torch.compile unavailable; using eager model.')
+                return network
+            raise RuntimeError('torch.compile is unavailable in this PyTorch build.')
+
+        kwargs = {
+            'mode': compile_opt.get('mode', 'default'),
+            'fullgraph': bool(compile_opt.get('fullgraph', False)),
+            'dynamic': bool(compile_opt.get('dynamic', True)),
+            'backend': compile_opt.get('backend', 'inductor'),
+        }
+        try:
+            compiled = torch.compile(network, **kwargs)
+            if self.opt.get('rank', 0) == 0:
+                logging.getLogger('train').info('[COMPILE] Enabled torch.compile with %s', kwargs)
+            return compiled
+        except Exception as exc:
+            if bool(compile_opt.get('fallback_on_error', True)):
+                if self.opt.get('rank', 0) == 0:
+                    logging.getLogger('train').warning(
+                        '[COMPILE] torch.compile failed (%s); using eager model.', exc
+                    )
+                return network
+            raise
 
     def model_to_device(self, network):
         """Model to device. It also warps models with DistributedDataParallel
@@ -130,6 +169,7 @@ class ModelBase():
             network (nn.Module)
         """
         network = network.to(self.device)
+        network = self.compile_model_if_enabled(network)
         if self.opt['dist']:
             # Use LOCAL_RANK for device assignment in DDP
             local_rank = get_local_rank()

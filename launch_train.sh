@@ -39,6 +39,7 @@ DEFAULT_CONFIG="options/gopro_rgbspike_server.json"
 DEFAULT_GOPRO_ROOT="/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large"
 DEFAULT_SPIKE_ROOT="/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq"
 DEFAULT_GPU_COUNT=1
+ORIGINAL_ARGS=("$@")
 
 if command -v uv >/dev/null 2>&1 && uv run python -c "import sys" >/dev/null 2>&1; then
     PYTHON_BIN="$(uv run python -c 'import sys; print(sys.executable)')"
@@ -84,6 +85,8 @@ DATASET_ROOT=""
 OVERRIDE_GOPRO_ROOT=""
 OVERRIDE_SPIKE_ROOT=""
 GPU_LIST=""
+TERMINAL_LOG=true
+TERMINAL_MODE="attach"
 
 # Parse all arguments
 for arg in "$@"; do
@@ -116,6 +119,22 @@ for arg in "$@"; do
             GPU_LIST="${arg#*=}"
             shift
             ;;
+        --foreground)
+            TERMINAL_MODE="foreground"
+            shift
+            ;;
+        --attach)
+            TERMINAL_MODE="attach"
+            shift
+            ;;
+        --detach)
+            TERMINAL_MODE="detach"
+            shift
+            ;;
+        --no-terminal-log)
+            TERMINAL_LOG=false
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [GPU_COUNT] [CONFIG_PATH] [OPTIONS]"
             echo ""
@@ -131,12 +150,18 @@ for arg in "$@"; do
             echo "  --gopro-root=/path/to/GOPRO_Large             Override GoPro root"
             echo "  --spike-root=/path/to/GOPRO_Large_spike_seq   Override Spike root"
             echo "  --gpus=0,1,2     Comma-separated GPU ids for single-node DDP (default: 0,1,2)"
+            echo "  --attach         Run inside screen and attach immediately (default)"
+            echo "  --detach         Run inside a detached screen session and return"
+            echo "  --foreground     Run in the current terminal, still recording terminal_*.log"
+            echo "  --no-terminal-log Disable screen/script terminal transcript wrapping"
             echo "  --help, -h       Show this help message"
             echo ""
             echo "Examples:"
             echo "  $0 1 --prepare-data"
             echo "  $0 4 --prepare-data --generate-lmdb"
             echo "  $0 8 options/vrt/custom.json"
+            echo "  $0 4 options/gopro_rgbspike_server_debug.json --detach"
+            echo "  screen -r svrt_<task>_<timestamp>"
             exit 0
             ;;
         *)
@@ -178,6 +203,102 @@ fi
 
 if [[ -z "${MASTER_PORT:-}" ]]; then
     export MASTER_PORT=12355
+fi
+
+resolve_train_log_dir() {
+    local opt_path="$1"
+    "$PYTHON_BIN" - "$opt_path" <<'PY'
+import contextlib
+import io
+import sys
+from utils import utils_option
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(sys.argv[1], is_train=True)
+print(opt['path']['log'])
+PY
+}
+
+quote_shell_word() {
+    printf '%q' "$1"
+}
+
+build_reentry_command() {
+    local command_text
+    command_text="cd $(quote_shell_word "$(pwd)") && SVRT_LAUNCH_INNER=1"
+    if [[ -n "${SVRT_TERMINAL_LOG:-}" ]]; then
+        command_text+=" SVRT_TERMINAL_LOG=$(quote_shell_word "$SVRT_TERMINAL_LOG")"
+    fi
+    command_text+=" exec bash $(quote_shell_word "$0")"
+    local arg
+    for arg in "$@"; do
+        command_text+=" $(quote_shell_word "$arg")"
+    done
+    printf '%s' "$command_text"
+}
+
+start_terminal_transcript_wrapper() {
+    local log_dir="$1"
+    shift
+
+    local timestamp task_name session_name terminal_log info_file inner_command script_command
+    timestamp="$(date +%y%m%d_%H%M%S)"
+    task_name="$(basename "$log_dir")"
+    task_name="${task_name//[!A-Za-z0-9_.-]/_}"
+    session_name="svrt_${task_name}_${timestamp}"
+    terminal_log="${log_dir}/terminal_${timestamp}.log"
+    info_file="${log_dir}/screen_${timestamp}.info"
+
+    mkdir -p "$log_dir"
+
+    if ! command -v script >/dev/null 2>&1; then
+        echo "Warning: script not found; terminal transcript logging is disabled." >&2
+        return 0
+    fi
+
+    export SVRT_TERMINAL_LOG="$terminal_log"
+    inner_command="$(build_reentry_command "$@")"
+    script_command="script -q -f -e -c $(quote_shell_word "$inner_command") $(quote_shell_word "$terminal_log")"
+
+    {
+        echo "screen_session=$session_name"
+        echo "terminal_log=$terminal_log"
+        echo "launch_mode=$TERMINAL_MODE"
+        echo "created_at=$(date '+%Y-%m-%d %H:%M:%S %z')"
+        echo "reattach_command=screen -r $session_name"
+        echo "tail_command=tail -f $terminal_log"
+    } > "$info_file"
+
+    if [[ "$TERMINAL_MODE" == "foreground" ]]; then
+        echo "Terminal transcript: $terminal_log"
+        exec script -q -f -e -c "$inner_command" "$terminal_log"
+    fi
+
+    if ! command -v screen >/dev/null 2>&1; then
+        echo "Warning: screen not found; falling back to foreground script logging." >&2
+        echo "Terminal transcript: $terminal_log"
+        exec script -q -f -e -c "$inner_command" "$terminal_log"
+    fi
+
+    echo "Screen session: $session_name"
+    echo "Terminal transcript: $terminal_log"
+    echo "Session info: $info_file"
+
+    if [[ "$TERMINAL_MODE" == "detach" || ! -t 0 ]]; then
+        screen -dmS "$session_name" bash -lc "$script_command"
+        echo "Detached. Reattach with: screen -r $session_name"
+        exit 0
+    fi
+
+    exec screen -S "$session_name" bash -lc "$script_command"
+}
+
+if [[ "$TERMINAL_LOG" == true && "${SVRT_LAUNCH_INNER:-0}" != "1" ]]; then
+    TRAIN_LOG_DIR_FOR_TRANSCRIPT="$(resolve_train_log_dir "$CONFIG_PATH")"
+    if [[ -n "$TRAIN_LOG_DIR_FOR_TRANSCRIPT" ]]; then
+        start_terminal_transcript_wrapper "$TRAIN_LOG_DIR_FOR_TRANSCRIPT" "${ORIGINAL_ARGS[@]}"
+    else
+        echo "Warning: could not resolve log dir from $CONFIG_PATH; continuing without terminal transcript wrapper." >&2
+    fi
 fi
 
 # Resolve effective dataset roots
@@ -344,19 +465,6 @@ PYINIT
     if ! "$PYTHON_BIN" -c "from models.op.dcnv4 import DCNv4; from DCNv4 import ext" >/dev/null 2>&1; then
         handle_error 1 "DCNv4 扩展导入失败（DCNv4.ext 不可用），请检查编译环境与 Python 环境是否一致。"
     fi
-}
-
-resolve_train_log_dir() {
-    local opt_path="$1"
-    "$PYTHON_BIN" - "$opt_path" <<'PY'
-import contextlib
-import io
-import sys
-from utils import utils_option
-with contextlib.redirect_stdout(io.StringIO()):
-    opt = utils_option.parse(sys.argv[1], is_train=True)
-print(opt['path']['log'])
-PY
 }
 
 launch_echo() {

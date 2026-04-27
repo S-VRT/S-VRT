@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from models.architectures.vrt.attention import WindowAttention
+import models.architectures.vrt.attention as attention_module
 
 
 def test_window_attention_forward():
@@ -63,3 +64,45 @@ def test_window_attention_flash_vs_sdpa_parity():
     assert out_sdpa.shape == (Bn, N, dim)
     assert torch.allclose(out_flash_raw.float(), out_sdpa.float(), atol=5e-2, rtol=1e-2), \
         f"max diff: {(out_flash_raw.float() - out_sdpa.float()).abs().max().item():.4f}"
+
+
+def test_window_attention_uses_flash_only_for_unmasked_half_mutual_path(monkeypatch):
+    calls = []
+
+    def fake_flash_attn_func(q, k, v, softmax_scale=None):
+        calls.append((q.shape, k.shape, v.shape, softmax_scale))
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(attention_module, "FLASH_ATTN_AVAILABLE", True)
+    monkeypatch.setattr(attention_module, "flash_attn_func", fake_flash_attn_func)
+
+    attn = WindowAttention(dim=8, window_size=(2, 2, 2), num_heads=2,
+                           mut_attn=True, use_flash_attn=True)
+    q = torch.randn(2, 2, 4, 4, dtype=torch.float16)
+    k = torch.randn(2, 2, 4, 4, dtype=torch.float16)
+    v = torch.randn(2, 2, 4, 4, dtype=torch.float16)
+
+    out = attn.attention(q, k, v, mask=None, x_shape=(2, 4, 8),
+                         relative_position_encoding=False)
+
+    assert out.shape == (2, 4, 8)
+    assert len(calls) == 1
+
+
+def test_window_attention_self_attention_keeps_sdpa_path_with_relative_bias(monkeypatch):
+    def fail_flash_attn_func(*args, **kwargs):
+        raise AssertionError("self-attention with relative position bias must not call flash_attn_func")
+
+    monkeypatch.setattr(attention_module, "FLASH_ATTN_AVAILABLE", True)
+    monkeypatch.setattr(attention_module, "flash_attn_func", fail_flash_attn_func)
+
+    attn = WindowAttention(dim=8, window_size=(2, 2, 2), num_heads=2,
+                           mut_attn=False, use_flash_attn=True)
+    q = torch.randn(2, 2, 8, 4, dtype=torch.float16)
+    k = torch.randn(2, 2, 8, 4, dtype=torch.float16)
+    v = torch.randn(2, 2, 8, 4, dtype=torch.float16)
+
+    out = attn.attention(q, k, v, mask=None, x_shape=(2, 8, 8),
+                         relative_position_encoding=True)
+
+    assert out.shape == (2, 8, 8)

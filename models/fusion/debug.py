@@ -19,6 +19,7 @@ class FusionDebugDumper:
         self.placement = str(fusion_cfg.get('placement', 'early')).strip().lower()
         self.enabled = bool(raw_cfg.get('enable', raw_cfg.get('save_images', False)))
         self.save_images = bool(raw_cfg.get('save_images', self.enabled))
+        self.run_during_train = bool(raw_cfg.get('run_during_train', False))
         self.trigger = str(raw_cfg.get('trigger', 'phase1_last')).strip().lower()
         self.source = str(raw_cfg.get('source', 'train_batch')).strip().lower()
         self.source_view = str(raw_cfg.get('source_view', 'main')).strip().lower()
@@ -88,6 +89,8 @@ class FusionDebugDumper:
 
     def should_dump_phase1_last(self, current_step, fix_iter, source=None):
         if not (self.enabled and self.save_images):
+            return False
+        if source in {'train_batch', 'val_full_frame'} and not self.run_during_train:
             return False
         if self.trigger != 'phase1_last':
             return False
