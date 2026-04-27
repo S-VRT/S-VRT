@@ -115,6 +115,22 @@ def build_timing_summary(logs, dist_enabled=False, device=None):
     return summarized
 
 
+def format_eta(seconds):
+    if not isinstance(seconds, numbers.Real) or not math.isfinite(float(seconds)) or seconds <= 0:
+        total_seconds = 0
+    else:
+        total_seconds = int(float(seconds))
+
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
+def compute_training_eta(current_step, total_iter, seconds_per_iter):
+    remaining_iters = max(int(total_iter) - int(current_step), 0)
+    return format_eta(remaining_iters * float(seconds_per_iter))
+
+
 def build_train_loader_bundle(opt, train_dataset_opt, is_phase1, seed, logger):
     dataset_opt = build_phase_train_dataset_opt(train_dataset_opt, is_phase1)
     train_set = define_Dataset(dataset_opt)
@@ -633,6 +649,11 @@ def main():
                     # 构建日志消息：包含 epoch、迭代次数、学习率
                     message = '<epoch:{:3d}, iter:{:8,d}, lr:{:.3e}> '.format(epoch, current_step,
                                                                               model.current_learning_rate())
+                    seconds_per_iter = logs.get('time_total', logs.get('time_iter'))
+                    if isinstance(seconds_per_iter, numbers.Real):
+                        message += 'eta: {:s} '.format(
+                            compute_training_eta(current_step, opt['train']['total_iter'], seconds_per_iter)
+                        )
                     # 将损失信息合并到消息中
                     for k, v in logs.items():  # 合并日志信息到消息
                         if k.startswith('time_'):
