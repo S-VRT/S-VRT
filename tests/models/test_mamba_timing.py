@@ -3,8 +3,10 @@ import torch
 
 
 class _TimerStub:
-    def __init__(self):
+    def __init__(self, record_ranges=False):
         self.names = []
+        self.range_names = []
+        self.record_ranges = record_ranges
 
     def timer(self, name):
         self.names.append(name)
@@ -18,8 +20,21 @@ class _TimerStub:
 
         return _Ctx()
 
+    def profile_range(self, name):
+        if self.record_ranges:
+            self.range_names.append(name)
 
-def test_mamba_operator_records_forward_stage_timings(monkeypatch):
+        class _Ctx:
+            def __enter__(_self):
+                return None
+
+            def __exit__(_self, *_exc):
+                return False
+
+        return _Ctx()
+
+
+def test_mamba_operator_uses_timer_only_when_attached(monkeypatch):
     from models.fusion.operators import mamba as mamba_module
     from models.fusion.operators.mamba import MambaFusionOperator
 
@@ -38,11 +53,12 @@ def test_mamba_operator_records_forward_stage_timings(monkeypatch):
         out_chans=3,
         operator_params={"token_dim": 4, "token_stride": 2, "num_layers": 1},
     )
-    timer = _TimerStub()
-    operator.set_timer(timer)
-
     rgb = torch.randn(1, 2, 3, 8, 8)
     spike = torch.randn(1, 2, 4, 8, 8)
+    operator(rgb, spike)
+
+    timer = _TimerStub()
+    operator.set_timer(timer)
     operator(rgb, spike)
 
     assert timer.names == [
@@ -55,7 +71,7 @@ def test_mamba_operator_records_forward_stage_timings(monkeypatch):
     ]
 
 
-def test_mamba_operator_uses_record_function_labels(monkeypatch):
+def test_mamba_operator_profile_ranges_are_config_gated(monkeypatch):
     from models.fusion.operators import mamba as mamba_module
     from models.fusion.operators.mamba import MambaFusionOperator
 
@@ -66,20 +82,7 @@ def test_mamba_operator_uses_record_function_labels(monkeypatch):
         def forward(self, tokens):
             return tokens
 
-    labels = []
-
-    class _Record:
-        def __init__(self, name):
-            labels.append(name)
-
-        def __enter__(self):
-            return None
-
-        def __exit__(self, *_exc):
-            return False
-
     monkeypatch.setattr(mamba_module, "_MambaBlock", _FakeBlock)
-    monkeypatch.setattr(mamba_module.torch.profiler, "record_function", _Record)
 
     operator = MambaFusionOperator(
         rgb_chans=3,
@@ -90,14 +93,24 @@ def test_mamba_operator_uses_record_function_labels(monkeypatch):
 
     rgb = torch.randn(1, 2, 3, 8, 8)
     spike = torch.randn(1, 2, 4, 8, 8)
+
+    timer = _TimerStub(record_ranges=False)
+    operator.set_timer(timer)
+    operator(rgb, spike)
+    assert timer.range_names == []
+
+    timer = _TimerStub(record_ranges=True)
+    operator.set_timer(timer)
     operator(rgb, spike)
 
-    assert "mamba_rgb_encoder" in labels
-    assert "mamba_spike_encoder" in labels
-    assert "mamba_token_pack" in labels
-    assert "mamba_mixer" in labels
-    assert "mamba_writeback" in labels
-    assert "mamba_upsample" in labels
+    assert timer.range_names == [
+        "mamba_rgb_encoder",
+        "mamba_spike_encoder",
+        "mamba_token_pack",
+        "mamba_mixer",
+        "mamba_writeback",
+        "mamba_upsample",
+    ]
 
 
 def test_mamba_operator_defaults_to_fp32_mixer_policy(monkeypatch):

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
+from contextlib import nullcontext
 from einops import rearrange
 from einops.layers.torch import Rearrange
 from models.utils.flow import flow_warp
@@ -10,6 +11,11 @@ from models.blocks.mlp import Mlp_GEGLU
 from models.blocks.dcn import get_deformable_module
 from models.utils.windows import get_window_size, compute_mask, window_partition, window_reverse
 from models.utils.init import DropPath
+
+
+def _checkpoint_non_reentrant(function, *args):
+    return torch.utils.checkpoint.checkpoint(function, *args, use_reentrant=False)
+
 
 class TMSA(nn.Module):
     """ Temporal Mutual Self Attention (TMSA).
@@ -171,7 +177,7 @@ class TMSA(nn.Module):
                 # full-block: the injected attn implements its own residual/FFN internally,
                 # so call it and DO NOT add outer residual/FFN here.
                 if self.use_checkpoint_attn:
-                    x = torch.utils.checkpoint.checkpoint(self.forward_part1, x, mask_matrix)
+                    x = _checkpoint_non_reentrant(self.forward_part1, x, mask_matrix)
                 else:
                     x = self.forward_part1(x, mask_matrix)
                 # outer FFN/residual intentionally skipped
@@ -179,7 +185,7 @@ class TMSA(nn.Module):
                 # operator-only: attn returns operator output (no internal identity/FFN).
                 # We must preserve the original outer residual + FFN semantics.
                 if self.use_checkpoint_attn:
-                    attn_out = torch.utils.checkpoint.checkpoint(self.forward_part1, x, mask_matrix)
+                    attn_out = _checkpoint_non_reentrant(self.forward_part1, x, mask_matrix)
                 else:
                     attn_out = self.forward_part1(x, mask_matrix)
 
@@ -188,18 +194,18 @@ class TMSA(nn.Module):
 
                 # outer FFN
                 if self.use_checkpoint_ffn:
-                    x = x + torch.utils.checkpoint.checkpoint(self.forward_part2, x)
+                    x = x + _checkpoint_non_reentrant(self.forward_part2, x)
                 else:
                     x = x + self.forward_part2(x)
         else:
             # Original WindowAttention path: preserve previous behavior (outer residual + FFN)
             if self.use_checkpoint_attn:
-                x = x + torch.utils.checkpoint.checkpoint(self.forward_part1, x, mask_matrix)
+                x = x + _checkpoint_non_reentrant(self.forward_part1, x, mask_matrix)
             else:
                 x = x + self.forward_part1(x, mask_matrix)
 
             if self.use_checkpoint_ffn:
-                x = x + torch.utils.checkpoint.checkpoint(self.forward_part2, x)
+                x = x + _checkpoint_non_reentrant(self.forward_part2, x)
             else:
                 x = x + self.forward_part2(x)
 
@@ -382,6 +388,7 @@ class Stage(nn.Module):
                  dcn_config=None):
         super(Stage, self).__init__()
         self.pa_frames = pa_frames
+        self.timer = None
         self.use_flash_attn = use_flash_attn
         self.pa_fuse_amp_policy = str(pa_fuse_amp_policy).strip().lower()
         if self.pa_fuse_amp_policy not in {'fp32', 'autocast', 'fp16', 'bf16'}:
@@ -450,6 +457,9 @@ class Stage(nn.Module):
                                      max_residue_magnitude=max_residue_magnitude, pa_frames=pa_frames)
             self.pa_fuse = Mlp_GEGLU(dim * (1 + 2), dim * (1 + 2), dim)
 
+    def set_timer(self, timer):
+        self.timer = timer
+
     def _pa_fuse_policy_dtype(self, x):
         if self.pa_fuse_amp_policy == 'fp16':
             return torch.float16
@@ -460,7 +470,8 @@ class Stage(nn.Module):
         return x.dtype
 
     def _run_pa_fuse(self, x_pa):
-        with torch.profiler.record_function("pa_fuse"):
+        range_ctx = self.timer.profile_range("pa_fuse") if hasattr(self.timer, "profile_range") else nullcontext()
+        with range_ctx:
             if self.pa_fuse_amp_policy == 'autocast':
                 return self.pa_fuse(x_pa)
 

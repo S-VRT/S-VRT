@@ -48,6 +48,15 @@ def test_iteration_timer_boundary_clears_then_records_batch_wait():
     assert "batch_wait" in current
 
 
+def test_timer_disabled_does_not_record_timings():
+    timer = Timer(device=None, sync_cuda=False, enabled=False)
+
+    with timer.timer("forward"):
+        pass
+
+    assert timer.get_current_timings() == {}
+
+
 def test_ddp_timing_summary_adds_max_and_mean_for_time_keys():
     from main_train_vrt import build_timing_summary
 
@@ -93,8 +102,10 @@ def test_model_plain_timer_does_not_sync_cuda_by_default(monkeypatch):
     captured = {}
 
     class _TimerSpy:
-        def __init__(self, device=None, sync_cuda=True):
+        def __init__(self, device=None, sync_cuda=True, enabled=True, record_ranges=False):
             captured["sync_cuda"] = sync_cuda
+            captured["enabled"] = enabled
+            captured["record_ranges"] = record_ranges
             self.current_timings = {}
 
     monkeypatch.setattr(model_plain_module, "define_G", lambda _opt: object())
@@ -116,6 +127,8 @@ def test_model_plain_timer_does_not_sync_cuda_by_default(monkeypatch):
     ModelPlain.init_train(model)
 
     assert captured["sync_cuda"] is False
+    assert captured["enabled"] is False
+    assert captured["record_ranges"] is False
 
 
 def test_optimize_parameters_skips_optimizer_when_loss_is_nonfinite():

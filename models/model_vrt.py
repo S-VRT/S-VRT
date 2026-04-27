@@ -11,7 +11,7 @@ from torch.optim import lr_scheduler
 from torch.optim import Adam
 
 from models.select_network import define_G
-from models.model_plain import ModelPlain
+from models.model_plain import ModelPlain, freeze_known_unused_parameters
 from models.loss import CharbonnierLoss
 from models.loss_ssim import SSIMLoss
 from data.spike_recc.encoding25 import load_encoding25_artifact_with_shape
@@ -172,8 +172,12 @@ class ModelVRT(ModelPlain):
                 else:
                     print(f'Train all the parameters from {self.fix_iter} iters.')
                     self.netG.requires_grad_(True)
-                if self.opt.get('dist', False) and self.opt.get('use_static_graph', False):
-                    print('Re-wrapping DDP for static graph change...')
+                if self.opt_train.get('freeze_known_unused_parameters', True):
+                    frozen_unused = freeze_known_unused_parameters(self.get_bare_model(self.netG))
+                    if frozen_unused:
+                        print(f'[DDP] Re-froze {frozen_unused} known-unused parameter tensors after phase2 unfreeze.')
+                if self.opt.get('dist', False):
+                    print('Re-wrapping DDP after phase2 trainability change...')
                     self.netG = self.model_to_device(self.get_bare_model(self.netG))
 
         dump_train_batch = self.fusion_debug.should_dump_phase1_last(

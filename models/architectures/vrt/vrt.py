@@ -495,6 +495,10 @@ class VRT(nn.Module):
     def set_timer(self, timer):
         """Inject a Timer instance for optional timing measurement."""
         self.timer = timer
+        for index in range(1, 12):
+            set_timer = getattr(getattr(self, f'stage{index}', None), 'set_timer', None)
+            if callable(set_timer):
+                set_timer(timer)
         for target in (
             getattr(self, 'fusion_operator', None),
             getattr(getattr(self, 'fusion_adapter', None), 'operator', None),

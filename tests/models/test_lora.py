@@ -252,14 +252,138 @@ def test_init_train_injects_lora(monkeypatch, tmp_path):
     monkeypatch.setattr(model, "load_optimizers", lambda: None)
     monkeypatch.setattr(model, "define_loss", lambda: None)
     monkeypatch.setattr(model, "define_scheduler", lambda: None)
-    monkeypatch.setattr(model, "get_bare_model", lambda net: net)
+    monkeypatch.setattr(model, "get_bare_model", lambda net: net.module if hasattr(net, "module") else net)
 
     model.init_train()
 
-    assert isinstance(model.netG.qkv_self, LoRALinear)
-    assert isinstance(model.netG.proj, LoRALinear)
-    assert model.netG.qkv_self.base.weight.requires_grad is False
-    assert model.netG.qkv_self.lora_A.weight.requires_grad is True
+    bare = model.get_bare_model(model.netG)
+    assert isinstance(bare.qkv_self, LoRALinear)
+    assert isinstance(bare.proj, LoRALinear)
+    assert bare.qkv_self.base.weight.requires_grad is False
+    assert bare.qkv_self.lora_A.weight.requires_grad is True
+
+
+def test_init_train_rewraps_distributed_model_after_lora_injection(monkeypatch):
+    """DDP must be rebuilt after LoRA adds parameters to an already-wrapped netG."""
+    from models.model_plain import ModelPlain
+    from models.architectures.vrt.attention import WindowAttention
+
+    class _FakeDDP(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+    opt = {
+        "train": {
+            "use_lora": True,
+            "lora_rank": 4,
+            "lora_alpha": 8,
+            "lora_target_modules": ["qkv", "proj"],
+            "freeze_backbone": True,
+            "E_decay": 0,
+            "G_optimizer_reuse": False,
+            "G_param_strict": False,
+        },
+        "path": {
+            "pretrained_netG": None,
+            "pretrained_netE": None,
+            "pretrained_optimizerG": None,
+        },
+        "rank": 0,
+        "dist": True,
+    }
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt = opt
+    model.opt_train = opt["train"]
+    model.device = torch.device("cpu")
+    model.schedulers = []
+    bare = WindowAttention(dim=8, window_size=(2, 2, 2), num_heads=2, mut_attn=True)
+    model.netG = _FakeDDP(bare)
+    rewrapped = []
+
+    def fake_get_bare_model(net):
+        return net.module if isinstance(net, _FakeDDP) else net
+
+    def fake_model_to_device(net):
+        rewrapped.append(net)
+        return _FakeDDP(net)
+
+    monkeypatch.setattr(model, "load", lambda: None)
+    monkeypatch.setattr(model, "define_loss", lambda: None)
+    monkeypatch.setattr(model, "define_optimizer", lambda: None)
+    monkeypatch.setattr(model, "load_optimizers", lambda: None)
+    monkeypatch.setattr(model, "define_scheduler", lambda: None)
+    monkeypatch.setattr(model, "get_bare_model", fake_get_bare_model)
+    monkeypatch.setattr(model, "model_to_device", fake_model_to_device)
+
+    model.init_train()
+
+    assert rewrapped == [bare]
+    assert isinstance(model.netG, _FakeDDP)
+    assert model.netG.module is bare
+    assert isinstance(bare.qkv_self, LoRALinear)
+
+
+def test_init_train_wraps_once_after_lora_when_model_starts_unwrapped(monkeypatch):
+    """Initial DDP wrapping should happen after load/injection/freeze, not before LoRA."""
+    from models.model_plain import ModelPlain
+    from models.architectures.vrt.attention import WindowAttention
+
+    opt = {
+        "train": {
+            "use_lora": True,
+            "lora_rank": 4,
+            "lora_alpha": 8,
+            "lora_target_modules": ["qkv", "proj"],
+            "freeze_backbone": True,
+            "E_decay": 0,
+            "G_optimizer_reuse": False,
+            "G_param_strict": False,
+        },
+        "path": {
+            "pretrained_netG": None,
+            "pretrained_netE": None,
+            "pretrained_optimizerG": None,
+        },
+        "rank": 0,
+        "dist": True,
+    }
+
+    class _FakeDDP(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt = opt
+    model.opt_train = opt["train"]
+    model.device = torch.device("cpu")
+    model.schedulers = []
+    bare = WindowAttention(dim=8, window_size=(2, 2, 2), num_heads=2, mut_attn=True)
+    model.netG = bare
+    wrapped = []
+
+    def fake_get_bare_model(net):
+        return net.module if isinstance(net, _FakeDDP) else net
+
+    def fake_model_to_device(net):
+        assert isinstance(net.qkv_self, LoRALinear)
+        wrapped.append(net)
+        return _FakeDDP(net)
+
+    monkeypatch.setattr(model, "load", lambda: None)
+    monkeypatch.setattr(model, "define_loss", lambda: None)
+    monkeypatch.setattr(model, "define_optimizer", lambda: None)
+    monkeypatch.setattr(model, "load_optimizers", lambda: None)
+    monkeypatch.setattr(model, "define_scheduler", lambda: None)
+    monkeypatch.setattr(model, "get_bare_model", fake_get_bare_model)
+    monkeypatch.setattr(model, "model_to_device", fake_model_to_device)
+
+    model.init_train()
+
+    assert wrapped == [bare]
+    assert model.netG.module is bare
 
 
 def test_init_train_strict_loads_lora_checkpoint_after_injection(monkeypatch, tmp_path):
@@ -306,13 +430,14 @@ def test_init_train_strict_loads_lora_checkpoint_after_injection(monkeypatch, tm
     monkeypatch.setattr(model, "define_optimizer", lambda: None)
     monkeypatch.setattr(model, "load_optimizers", lambda: None)
     monkeypatch.setattr(model, "define_scheduler", lambda: None)
-    monkeypatch.setattr(model, "get_bare_model", lambda net: net)
+    monkeypatch.setattr(model, "get_bare_model", lambda net: net.module if hasattr(net, "module") else net)
 
     model.init_train()
 
-    assert isinstance(model.netG.qkv_self, LoRALinear)
-    assert torch.allclose(model.netG.qkv_self.lora_A.weight, source.qkv_self.lora_A.weight)
-    assert torch.allclose(model.netG.qkv_self.lora_B.weight, source.qkv_self.lora_B.weight)
+    bare = model.get_bare_model(model.netG)
+    assert isinstance(bare.qkv_self, LoRALinear)
+    assert torch.allclose(bare.qkv_self.lora_A.weight, source.qkv_self.lora_A.weight)
+    assert torch.allclose(bare.qkv_self.lora_B.weight, source.qkv_self.lora_B.weight)
 
 
 def test_init_train_strict_loads_plain_checkpoint_before_lora_injection(monkeypatch, tmp_path):
@@ -357,12 +482,13 @@ def test_init_train_strict_loads_plain_checkpoint_before_lora_injection(monkeypa
     monkeypatch.setattr(model, "define_optimizer", lambda: None)
     monkeypatch.setattr(model, "load_optimizers", lambda: None)
     monkeypatch.setattr(model, "define_scheduler", lambda: None)
-    monkeypatch.setattr(model, "get_bare_model", lambda net: net)
+    monkeypatch.setattr(model, "get_bare_model", lambda net: net.module if hasattr(net, "module") else net)
 
     model.init_train()
 
-    assert isinstance(model.netG.qkv_self, LoRALinear)
-    assert torch.allclose(model.netG.qkv_self.base.weight, source.qkv_self.weight)
+    bare = model.get_bare_model(model.netG)
+    assert isinstance(bare.qkv_self, LoRALinear)
+    assert torch.allclose(bare.qkv_self.base.weight, source.qkv_self.weight)
 
 
 def test_save_merged_writes_fused_ckpt(tmp_path):

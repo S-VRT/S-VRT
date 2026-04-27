@@ -18,6 +18,11 @@ from utils.utils_timer import Timer
 
 
 _TRAINABLE_NAME_MARKERS = ("fusion_adapter", "fusion_operator", "lora_A", "lora_B")
+_KNOWN_UNUSED_NAME_MARKERS = (
+    "fusion_adapter.spike_upsample.refine",
+    "fusion_adapter.early_adapter.spike_upsample.refine",
+    "pa_deform.dcn.offset_mask",
+)
 
 
 def freeze_backbone(model):
@@ -29,6 +34,19 @@ def freeze_backbone(model):
             param.requires_grad = False
 
 
+def freeze_known_unused_parameters(model):
+    """Freeze parameters that are registered but bypassed by the current graph."""
+    frozen = 0
+    if not hasattr(model, 'named_parameters'):
+        return frozen
+    for name, param in model.named_parameters():
+        if any(marker in name for marker in _KNOWN_UNUSED_NAME_MARKERS):
+            if param.requires_grad:
+                frozen += 1
+            param.requires_grad = False
+    return frozen
+
+
 class ModelPlain(ModelBase):
     """Train with pixel loss"""
     def __init__(self, opt):
@@ -38,7 +56,7 @@ class ModelPlain(ModelBase):
         # ------------------------------------
         self.opt_train = self.opt['train']    # training option
         self.netG = define_G(opt)
-        self.netG = self.model_to_device(self.netG)
+        self.netG = self.netG.to(self.device)
         if self.opt_train['E_decay'] > 0:
             self.netE = define_G(opt).to(self.device).eval()
         self.L_flow_spike = None
@@ -207,14 +225,15 @@ class ModelPlain(ModelBase):
         bare_model = self.get_bare_model(self.netG)
 
         lora_injected = False
+        structure_changed = False
         if self._should_inject_lora_before_load(train_opt):
-            self._inject_lora_adapters(train_opt, bare_model)
+            structure_changed = self._inject_lora_adapters(train_opt, bare_model)
             lora_injected = True
 
         self.load()                           # load model
 
         if train_opt.get('use_lora', False) and not lora_injected:
-            self._inject_lora_adapters(train_opt, bare_model)
+            structure_changed = self._inject_lora_adapters(train_opt, bare_model)
 
         if train_opt.get('freeze_backbone', False):
             freeze_backbone(bare_model)
@@ -226,15 +245,30 @@ class ModelPlain(ModelBase):
             frozen_count = sum(1 for p in bare_model.parameters() if not p.requires_grad)
             trainable_count = sum(1 for p in bare_model.parameters() if p.requires_grad)
             print(f'[Stage A/C] Frozen {frozen_count} params, trainable {trainable_count} params')
+        if train_opt.get('freeze_known_unused_parameters', True):
+            known_unused_count = freeze_known_unused_parameters(bare_model)
+            if known_unused_count:
+                print(f'[DDP] Frozen {known_unused_count} known-unused parameter tensors.')
         self.compile_fusion_modules_if_enabled(bare_model)
+        self._wrap_netG_after_train_setup(bare_model, structure_changed=structure_changed)
         self.netG.train()                     # set training mode,for BN
         self.define_loss()                    # define loss
         self.define_optimizer()               # define optimizer
         self.load_optimizers()                # load optimizer
         self.define_scheduler()               # define scheduler
         self.log_dict = OrderedDict()         # log
-        # 初始化计时器
-        self.timer = Timer(device=self.device, sync_cuda=bool(self.opt_train.get('sync_cuda_timing', False)))
+        # Optional timing/profiler instrumentation is off by default for production training.
+        timing_cfg = self.opt_train.get('timing', {}) or {}
+        profiler_cfg = self.opt_train.get('profiler', {}) or {}
+        timing_enabled = bool(timing_cfg.get('enable', False))
+        sync_cuda = bool(timing_cfg.get('sync_cuda', self.opt_train.get('sync_cuda_timing', False)))
+        record_ranges = bool(profiler_cfg.get('record_ranges', False))
+        self.timer = Timer(
+            device=self.device,
+            sync_cuda=sync_cuda,
+            enabled=timing_enabled,
+            record_ranges=record_ranges,
+        )
         # 将计时器传递给网络，以便网络内部模块可以使用
         if hasattr(self.get_bare_model(self.netG), 'set_timer'):
             self.get_bare_model(self.netG).set_timer(self.timer)
@@ -251,6 +285,20 @@ class ModelPlain(ModelBase):
         if train_opt.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
             bare_e = self.get_bare_model(self.netE)
             inject_lora(bare_e, targets, rank=rank, alpha=alpha)
+        return bool(replaced)
+
+    def _wrap_netG_after_train_setup(self, bare_model, structure_changed=False):
+        if isinstance(self.netG, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
+            if structure_changed:
+                self._rewrap_distributed_netG_after_structure_change(bare_model, reason='LoRA injection')
+            return
+        self.netG = self.model_to_device(bare_model)
+
+    def _rewrap_distributed_netG_after_structure_change(self, bare_model, reason):
+        if not self.opt.get('dist', False):
+            return
+        print(f'[DDP] Re-wrapping netG after {reason} so DDP registers final trainable parameters.')
+        self.netG = self.model_to_device(bare_model)
 
     def _should_inject_lora_before_load(self, train_opt):
         if not train_opt.get('use_lora', False):

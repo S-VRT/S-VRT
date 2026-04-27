@@ -103,7 +103,9 @@ class MambaFusionOperator(nn.Module):
 
     @contextmanager
     def _profiled_timer(self, name: str):
-        with torch.profiler.record_function(name):
+        timer = getattr(self, "timer", None)
+        range_ctx = timer.profile_range(name) if hasattr(timer, "profile_range") else nullcontext()
+        with range_ctx:
             with self._timer(name):
                 yield
 

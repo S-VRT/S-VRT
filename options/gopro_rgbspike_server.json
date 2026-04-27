@@ -650,13 +650,13 @@
     // 学习率调度器配置
     // 总迭代次数：训练的总迭代步数
     ,
-    "total_iter": 40000
+    "total_iter": 10000
     // 生成器学习率调度器类型："CosineAnnealingWarmRestarts" 表示带重启的余弦退火调度器
     ,
     "G_scheduler_type": "CosineAnnealingWarmRestarts"
     // 调度器周期：余弦退火的周期长度（迭代次数）
     ,
-    "G_scheduler_periods": 40000
+    "G_scheduler_periods": 10000
     // 最小学习率：学习率的下限
     ,
     "G_scheduler_eta_min": 1e-7
@@ -677,7 +677,7 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": [4000, 10000, 15000, 20000, 25000, 30000, 35000, 40000]
+    "checkpoint_test": [4000, 6000, 8000, 10000]
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
     "checkpoint_save": 2000
@@ -685,8 +685,14 @@
     ,
     "checkpoint_print": 100
     ,
+    "timing": {
+      "enable": false,
+      "sync_cuda": false
+    }
+    ,
     "profiler": {
       "enable": false,
+      "record_ranges": false,
       "start_iter": 100,
       "wait": 1,
       "warmup": 1,

@@ -77,30 +77,38 @@ def test_pa_fuse_invalid_policy_fails_fast():
         _make_stage(policy="bad")
 
 
-def test_pa_fuse_records_profiler_label(monkeypatch):
-    from models.architectures.vrt import stages as stages_module
+def test_pa_fuse_profile_range_is_config_gated():
+    class _TimerStub:
+        def __init__(self, record_ranges=False):
+            self.record_ranges = record_ranges
+            self.range_names = []
 
-    labels = []
+        def profile_range(self, name):
+            if self.record_ranges:
+                self.range_names.append(name)
 
-    class _Record:
-        def __init__(self, name):
-            labels.append(name)
+            class _Ctx:
+                def __enter__(_self):
+                    return None
 
-        def __enter__(self):
-            return None
+                def __exit__(_self, *_exc):
+                    return False
 
-        def __exit__(self, *_exc):
-            return False
-
-    monkeypatch.setattr(stages_module.torch.profiler, "record_function", _Record)
+            return _Ctx()
 
     stage = _make_stage(policy="autocast")
     x = torch.randn(1, 1, 2, 4, 4)
     flows = [torch.zeros(1, 2, 4, 4)]
 
+    timer = _TimerStub(record_ranges=False)
+    stage.set_timer(timer)
     stage(x, flows, flows)
+    assert timer.range_names == []
 
-    assert "pa_fuse" in labels
+    timer = _TimerStub(record_ranges=True)
+    stage.set_timer(timer)
+    stage(x, flows, flows)
+    assert timer.range_names == ["pa_fuse"]
 
 
 def test_vrt_passes_pa_fuse_amp_policy_to_all_stages():

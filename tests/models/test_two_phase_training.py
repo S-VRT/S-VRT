@@ -27,6 +27,14 @@ class _MiniModel(nn.Module):
         self.fusion_operator_gate = nn.Linear(4, 4)
 
 
+class _KnownUnusedMiniModel(_MiniModel):
+    def __init__(self):
+        super().__init__()
+        self.pa_deform = nn.Module()
+        self.pa_deform.dcn = nn.Module()
+        self.pa_deform.dcn.offset_mask = nn.Linear(4, 4)
+
+
 def test_phase2_lora_mode_freezes_lora_in_phase1():
     """phase2_lora_mode=true 时，freeze_backbone 后 LoRA 参数应被额外冻结。"""
     from models.model_plain import freeze_backbone
@@ -138,6 +146,67 @@ def test_phase2_unfreezes_fix_keys_and_lora_only():
     assert model.backbone_qkv.base.weight.requires_grad is False
     # fusion 仍可训练
     assert model.fusion_operator_gate.weight.requires_grad is True
+
+
+def test_model_vrt_rewraps_ddp_after_phase2_unfreeze_without_static_graph(monkeypatch):
+    """DDP must be rebuilt after phase2 changes requires_grad, even when static_graph is off."""
+    from models.model_plain import ModelPlain
+    from models.model_vrt import ModelVRT
+
+    class _FakeDDP(nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+    class _NoopFusionDebug:
+        def should_dump_phase1_last(self, *args, **kwargs):
+            return False
+
+        def arm(self):
+            pass
+
+        def disarm(self):
+            pass
+
+    bare = _KnownUnusedMiniModel()
+    bare.requires_grad_(False)
+    model = ModelVRT.__new__(ModelVRT)
+    model.opt = {
+        "dist": True,
+        "use_static_graph": False,
+        "train": {
+            "use_lora": False,
+            "phase2_lora_mode": False,
+            "freeze_known_unused_parameters": True,
+        },
+    }
+    model.opt_train = model.opt["train"]
+    model.fix_iter = 3
+    model.fix_keys = ["spynet"]
+    model.fix_unflagged = False
+    model.netG = _FakeDDP(bare)
+    model.fusion_debug = _NoopFusionDebug()
+    rewrapped = []
+
+    def fake_get_bare_model(net):
+        return net.module if isinstance(net, _FakeDDP) else net
+
+    def fake_model_to_device(net):
+        rewrapped.append(net)
+        return _FakeDDP(net)
+
+    monkeypatch.setattr(model, "get_bare_model", fake_get_bare_model)
+    monkeypatch.setattr(model, "model_to_device", fake_model_to_device)
+    monkeypatch.setattr(ModelPlain, "optimize_parameters", lambda self, current_step: None)
+
+    model.optimize_parameters(current_step=3)
+
+    assert rewrapped == [bare]
+    assert model.netG.module is bare
+    assert bare.spynet_conv.weight.requires_grad is True
+    assert bare.pa_deform_conv.weight.requires_grad is True
+    assert bare.pa_deform.dcn.offset_mask.weight.requires_grad is False
+    assert bare.pa_deform.dcn.offset_mask.bias.requires_grad is False
 
 
 # These tests validate the helper logic on ModelPlain directly.
