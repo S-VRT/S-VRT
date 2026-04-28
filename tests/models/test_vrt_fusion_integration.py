@@ -57,6 +57,88 @@ def test_vrt_builds_with_fusion_config():
     assert fused["meta"]["frame_contract"] == "expanded"
 
 
+def test_vrt_allows_mamba_expanded_frame_contract_config():
+    opt = {
+        "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "mamba",
+                "out_chans": 3,
+                "early": {
+                    "frame_contract": "expanded",
+                    "expand_to_full_t": True,
+                },
+                "operator_params": {},
+            },
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.fusion_adapter.requested_frame_contract == "expanded"
+    assert model.fusion_adapter.frame_contract == "expanded"
+
+
+def test_vrt_mamba_operator_name_is_case_insensitive_for_default_contract():
+    opt = {
+        "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "Mamba",
+                "out_chans": 3,
+                "operator_params": {},
+            },
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.fusion_adapter.requested_frame_contract == "operator_default"
+    assert model.fusion_adapter.frame_contract == "collapsed"
+
+
 def test_vrt_forward_triggers_early_fusion(monkeypatch):
     opt = {
         "netG": {
@@ -956,6 +1038,165 @@ def test_vrt_rejects_mamba_with_full_t_early_expansion():
                 }
             },
         )
+
+
+def test_model_vrt_optimize_parameters_switches_mamba_warmup_stage_and_phase2_unfreezes(monkeypatch):
+    from collections import OrderedDict
+    from contextlib import nullcontext
+    from models.model_vrt import ModelVRT
+
+    class _WarmupAwareOperator:
+        def __init__(self):
+            self.last_stage = None
+
+        def set_warmup_stage(self, stage):
+            self.last_stage = stage
+
+    class _BareNet(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fusion_enabled = True
+            self.fusion_cfg = {"placement": "early"}
+            self.fusion_adapter = type("Adapter", (), {"operator": _WarmupAwareOperator()})()
+            self.spynet_conv = nn.Linear(4, 4)
+            self.pa_deform_conv = nn.Linear(4, 4)
+            self.backbone_base = nn.Linear(4, 4)
+            self.lora_A = nn.Parameter(torch.zeros(1))
+            self.lora_B = nn.Parameter(torch.zeros(1))
+
+    model = ModelVRT.__new__(ModelVRT)
+    model.opt = {"train": {"checkpoint_save": 100}, "dist": False}
+    model.opt_train = {
+        "fusion_warmup": {"head_only_iters": 2},
+        "G_optimizer_clipgrad": None,
+        "G_regularizer_orthstep": None,
+        "G_regularizer_clipstep": None,
+        "E_decay": 0,
+        "phase2_lora_mode": True,
+        "use_lora": True,
+    }
+    model.fix_iter = 10
+    model.fix_keys = ["spynet", "pa_deform"]
+    model.fix_unflagged = False
+    model.timer = type("TimerStub", (), {"current_timings": {}, "timer": staticmethod(lambda *_args, **_kwargs: nullcontext())})()
+    model.log_dict = OrderedDict()
+    model.grad_scaler = type(
+        "ScalerStub",
+        (),
+        {
+            "is_enabled": staticmethod(lambda: False),
+            "step": staticmethod(lambda _optimizer: None),
+            "update": staticmethod(lambda: None),
+            "scale": staticmethod(lambda value: value),
+        },
+    )()
+    model.G_optimizer = type("OptimizerStub", (), {"zero_grad": staticmethod(lambda: None), "step": staticmethod(lambda: None)})()
+    model.fusion_debug = type(
+        "DebugStub",
+        (),
+        {
+            "should_dump_phase1_last": staticmethod(lambda *args, **kwargs: False),
+            "arm": staticmethod(lambda: None),
+            "disarm": staticmethod(lambda: None),
+        },
+    )()
+
+    bare = _BareNet()
+    bare.spynet_conv.weight.requires_grad_(False)
+    bare.pa_deform_conv.weight.requires_grad_(False)
+    bare.lora_A.requires_grad_(False)
+    bare.lora_B.requires_grad_(False)
+    bare.backbone_base.weight.requires_grad_(False)
+    model.netG = bare
+    model.get_bare_model = lambda net: net
+    model._phase1_fusion_forward = lambda: None
+    model.netG_forward = lambda: setattr(model, "E", torch.zeros(1, 1, 3, 4, 4, requires_grad=True))
+    model._compute_fusion_aux_loss = lambda is_phase1, current_step=None: torch.tensor(0.0, requires_grad=True)
+    model.G_lossfn_weight = 0.0
+    model.G_lossfn = lambda pred, target: pred.sum() * 0.0
+    model.H = torch.zeros(1, 1, 3, 4, 4)
+
+    model.optimize_parameters(current_step=0)
+    assert bare.fusion_adapter.operator.last_stage == "writeback_only"
+
+    model.optimize_parameters(current_step=3)
+    assert bare.fusion_adapter.operator.last_stage == "token_mixer"
+
+    model.optimize_parameters(current_step=10)
+    assert bare.fusion_adapter.operator.last_stage == "full"
+    assert bare.spynet_conv.weight.requires_grad is True
+    assert bare.pa_deform_conv.weight.requires_grad is True
+    assert bare.lora_A.requires_grad is True
+    assert bare.lora_B.requires_grad is True
+    assert bare.backbone_base.weight.requires_grad is False
+
+
+def test_vrt_collapsed_mamba_meta_merges_operator_diagnostics(monkeypatch):
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[6, 8, 8],
+        window_size=[6, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt={
+            "netG": {
+                "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 7},
+                "fusion": {
+                    "placement": "early",
+                    "operator": "mamba",
+                    "out_chans": 3,
+                    "operator_params": {"token_dim": 8, "token_stride": 2, "num_layers": 1},
+                    "early": {"expand_to_full_t": False},
+                },
+                "output_mode": "restoration",
+            }
+        },
+    )
+
+    monkeypatch.setattr(model.fusion_adapter.operator, "forward", lambda rgb, spike: rgb)
+    monkeypatch.setattr(
+        model.fusion_adapter.operator,
+        "diagnostics",
+        lambda: {
+            "token_norm": 1.0,
+            "mamba_norm": 2.0,
+            "delta_norm": 3.0,
+            "gate_mean": 0.25,
+            "effective_update_norm": 0.0,
+            "warmup_stage": "token_mixer",
+        },
+    )
+
+    dummy_flows = [
+        torch.zeros(1, 5, 2, 8, 8),
+        torch.zeros(1, 5, 2, 4, 4),
+        torch.zeros(1, 5, 2, 2, 2),
+        torch.zeros(1, 5, 2, 1, 1),
+    ]
+
+    monkeypatch.setattr(model, "get_flows", lambda _x, flow_spike=None: (dummy_flows, dummy_flows))
+    monkeypatch.setattr(
+        model,
+        "get_aligned_image_2frames",
+        lambda _x, _fb, _ff: [torch.zeros(1, 6, model.backbone_in_chans * 4, 8, 8)] * 2,
+    )
+    monkeypatch.setattr(model, "forward_features", lambda _x, *_args, **_kwargs: torch.zeros_like(_x))
+
+    x = torch.randn(1, 6, 7, 8, 8)
+    with torch.no_grad():
+        _ = model(x)
+
+    assert model._last_fusion_meta["token_norm"] == 1.0
+    assert model._last_fusion_meta["mamba_norm"] == 2.0
+    assert model._last_fusion_meta["gate_mean"] == 0.25
+    assert model._last_fusion_meta["warmup_stage"] == "token_mixer"
 
 
 def test_full_t_hybrid_rejects_non_spikecv_tfp_from_test_dataset():

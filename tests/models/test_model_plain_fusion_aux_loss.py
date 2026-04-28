@@ -3,7 +3,7 @@ import pytest
 import torch
 
 
-def _make_opt(phase1_aux=1.0, phase2_aux=0.2, passthrough=0.2, fix_iter=10):
+def _make_opt(phase1_aux=1.0, phase2_aux=0.2, passthrough=0.2, fix_iter=10, fusion_warmup=None):
     return {
         'scale': 1,
         'n_channels': 3,
@@ -41,6 +41,7 @@ def _make_opt(phase1_aux=1.0, phase2_aux=0.2, passthrough=0.2, fix_iter=10):
             'phase1_fusion_aux_loss_weight': phase1_aux,
             'phase2_fusion_aux_loss_weight': phase2_aux,
             'fusion_passthrough_loss_weight': passthrough,
+            'fusion_warmup': fusion_warmup or {},
             'G_optimizer_type': 'adam',
             'G_optimizer_lr': 1e-4,
             'G_optimizer_betas': [0.9, 0.99],
@@ -172,3 +173,64 @@ def test_fusion_aux_loss_rejects_time_mismatch_in_last_fusion_main():
 
     with pytest.raises(ValueError, match="Fusion aux loss expected canonical main timeline"):
         model._compute_fusion_aux_loss(is_phase1=True)
+
+
+def test_phase1_passthrough_weight_decays_linearly_from_warmup_cfg():
+    from models.model_plain import ModelPlain
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.opt_train = {
+        "fusion_passthrough_loss_weight": 0.2,
+        "fusion_warmup": {
+            "passthrough_weight_start": 0.2,
+            "passthrough_weight_end": 0.0,
+        },
+    }
+    model.fix_iter = 10
+
+    assert model._resolve_phase1_passthrough_weight(0) == pytest.approx(0.2)
+    assert model._resolve_phase1_passthrough_weight(9) == pytest.approx(0.0)
+
+
+def test_fusion_aux_loss_phase1_adds_update_penalty_from_effective_update():
+    from models.model_plain import ModelPlain
+
+    model = ModelPlain(
+        _make_opt(
+            phase1_aux=0.0,
+            phase2_aux=0.0,
+            passthrough=0.0,
+            fusion_warmup={"update_penalty_weight": 0.5},
+        )
+    )
+    model.define_loss()
+    fusion_main = torch.ones(1, 6, 3, 8, 8)
+    _inject_fusion_hook(model, fusion_main, spike_bins=4)
+    model.H = torch.ones(1, 6, 3, 8, 8)
+    model.L = torch.zeros(1, 6, 7, 8, 8)
+
+    loss = model._compute_fusion_aux_loss(is_phase1=True, current_step=0)
+
+    assert loss.item() == pytest.approx(0.5, rel=1e-4, abs=1e-4)
+
+
+def test_phase2_fusion_aux_loss_ignores_update_penalty():
+    from models.model_plain import ModelPlain
+
+    model = ModelPlain(
+        _make_opt(
+            phase1_aux=0.0,
+            phase2_aux=0.0,
+            passthrough=0.0,
+            fusion_warmup={"update_penalty_weight": 0.5},
+        )
+    )
+    model.define_loss()
+    fusion_main = torch.ones(1, 6, 3, 8, 8)
+    _inject_fusion_hook(model, fusion_main, spike_bins=4)
+    model.H = torch.ones(1, 6, 3, 8, 8)
+    model.L = torch.zeros(1, 6, 7, 8, 8)
+
+    loss = model._compute_fusion_aux_loss(is_phase1=False, current_step=0)
+
+    assert loss.item() == 0.0

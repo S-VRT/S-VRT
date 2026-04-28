@@ -39,6 +39,7 @@ class EarlyFusionAdapter(nn.Module):
         mode: str = "replace",
         inject_stages: Optional[list] = None,
         spike_chans: Optional[int] = None,
+        frame_contract: str = "operator_default",
         **kwargs: Any,
     ):
         super().__init__()
@@ -47,10 +48,26 @@ class EarlyFusionAdapter(nn.Module):
         self.inject_stages = inject_stages if inject_stages is not None else []
         self.spike_chans = spike_chans
         self.spike_upsample = SpikeUpsample(spike_chans) if spike_chans is not None else None
-        self.frame_contract = str(getattr(operator, "frame_contract", "expanded")).strip().lower()
+        self.operator_frame_contract = str(getattr(operator, "frame_contract", "expanded")).strip().lower()
+        self.requested_frame_contract = str(frame_contract or "operator_default").strip().lower()
+        allowed_contracts = {"operator_default", "collapsed", "expanded"}
+        if self.requested_frame_contract not in allowed_contracts:
+            raise ValueError(
+                f"Unsupported frame_contract={frame_contract!r}; "
+                "expected one of: operator_default, collapsed, expanded"
+            )
+        self.frame_contract = (
+            self.operator_frame_contract
+            if self.requested_frame_contract == "operator_default"
+            else self.requested_frame_contract
+        )
         self.expects_structured_early = bool(
             getattr(operator, "expects_structured_early", False)
-        ) or self.frame_contract == "collapsed"
+        ) or self.operator_frame_contract == "collapsed"
+        if self.frame_contract == "collapsed" and not self.expects_structured_early:
+            raise ValueError(
+                "frame_contract='collapsed' requires an operator that supports structured early fusion."
+            )
         self.kwargs = kwargs
 
     def _build_meta(
@@ -64,6 +81,7 @@ class EarlyFusionAdapter(nn.Module):
     ) -> dict[str, Any]:
         return {
             "operator_name": self.operator.__class__.__name__,
+            "requested_frame_contract": self.requested_frame_contract,
             "frame_contract": frame_contract,
             "spike_bins": spike_bins,
             "main_steps": main_steps,
@@ -71,6 +89,12 @@ class EarlyFusionAdapter(nn.Module):
             "aux_steps": aux_steps,
             "main_from_exec_rule": main_from_exec_rule,
         }
+
+    def _attach_operator_diagnostics(self, meta: dict[str, Any]) -> dict[str, Any]:
+        diagnostics_getter = getattr(self.operator, "diagnostics", None)
+        if not callable(diagnostics_getter):
+            return meta
+        return {**meta, **diagnostics_getter()}
 
     @staticmethod
     def _reduce_expanded_exec_to_main(exec_view: torch.Tensor, spike_bins: int) -> torch.Tensor:
@@ -97,7 +121,7 @@ class EarlyFusionAdapter(nn.Module):
             spike_flat = self.spike_upsample(spike_flat, target_h=height, target_w=width)
             spike = spike_flat.reshape(bsz, steps, spike_steps_per_frame, height, width)
 
-        frame_contract = str(getattr(self.operator, "frame_contract", self.frame_contract)).strip().lower()
+        frame_contract = self.frame_contract
         if frame_contract == "collapsed":
             backbone_view = self.operator(rgb, spike)
             if backbone_view.dim() != 5 or backbone_view.size(1) != steps:
@@ -109,13 +133,15 @@ class EarlyFusionAdapter(nn.Module):
                 "fused_main": backbone_view,
                 "backbone_view": backbone_view,
                 "aux_view": None,
-                "meta": self._build_meta(
-                    frame_contract=frame_contract,
-                    spike_bins=spike_steps_per_frame,
-                    main_steps=steps,
-                    exec_steps=backbone_view.size(1),
-                    aux_steps=None,
-                    main_from_exec_rule=None,
+                "meta": self._attach_operator_diagnostics(
+                    self._build_meta(
+                        frame_contract=frame_contract,
+                        spike_bins=spike_steps_per_frame,
+                        main_steps=steps,
+                        exec_steps=backbone_view.size(1),
+                        aux_steps=None,
+                        main_from_exec_rule=None,
+                    )
                 ),
             }
         if frame_contract != "expanded":
@@ -138,13 +164,15 @@ class EarlyFusionAdapter(nn.Module):
             "fused_main": fused_main,
             "backbone_view": backbone_view,
             "aux_view": backbone_view,
-            "meta": self._build_meta(
-                frame_contract=frame_contract,
-                spike_bins=spike_steps_per_frame,
-                main_steps=steps,
-                exec_steps=backbone_view.size(1),
-                aux_steps=backbone_view.size(1),
-                main_from_exec_rule="center_subframe",
+            "meta": self._attach_operator_diagnostics(
+                self._build_meta(
+                    frame_contract=frame_contract,
+                    spike_bins=spike_steps_per_frame,
+                    main_steps=steps,
+                    exec_steps=backbone_view.size(1),
+                    aux_steps=backbone_view.size(1),
+                    main_from_exec_rule="center_subframe",
+                )
             ),
         }
 

@@ -93,3 +93,53 @@ def test_fusion_debug_dumper_can_dump_expanded_execution_view_when_requested(tmp
         source_view="exec",
     )
     assert dumped is True
+
+
+def test_tokenized_mamba_runnable_configs_use_train_batch_debug_source():
+    main_text = Path("options/gopro_rgbspike_server.json").read_text(encoding="utf-8")
+    debug_text = Path("options/gopro_rgbspike_server_debug.json").read_text(encoding="utf-8")
+
+    assert '"operator": "mamba"' in main_text
+    assert '"source": "train_batch"' in main_text
+    assert '"source": "train_batch"' in debug_text
+
+
+def test_fusion_debug_dumper_can_dump_collapsed_mamba_train_batch_view(tmp_path):
+    dumper = FusionDebugDumper(_make_opt(tmp_path))
+    fusion_main = torch.rand(1, 6, 3, 8, 8)
+
+    dumped = dumper.dump_tensor(
+        fusion_main=fusion_main,
+        fusion_exec=fusion_main,
+        fusion_meta={"frame_contract": "collapsed", "spike_bins": 4, "warmup_stage": "token_mixer"},
+        current_step=5,
+        folder="GOPR0003",
+        gt=torch.rand(1, 6, 3, 8, 8),
+        rank=0,
+        source_view="main",
+    )
+
+    assert dumped is True
+
+
+def test_fusion_debug_dumper_does_not_trigger_during_training_by_default(tmp_path):
+    dumper = FusionDebugDumper(_make_opt(tmp_path))
+
+    assert dumper.should_dump_phase1_last(
+        current_step=9,
+        fix_iter=10,
+        source="train_batch",
+    ) is False
+
+
+def test_fusion_debug_dumper_can_opt_into_training_runtime_debug(tmp_path):
+    opt = _make_opt(tmp_path)
+    opt["netG"]["fusion"]["debug"]["run_during_train"] = True
+
+    dumper = FusionDebugDumper(opt)
+
+    assert dumper.should_dump_phase1_last(
+        current_step=9,
+        fix_iter=10,
+        source="train_batch",
+    ) is True

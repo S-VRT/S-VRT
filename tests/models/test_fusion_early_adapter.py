@@ -126,6 +126,50 @@ def test_early_adapter_returns_main_and_exec_for_collapsed_operator():
     assert result["meta"]["main_from_exec_rule"] is None
 
 
+def test_early_adapter_frame_contract_override_expands_collapsed_operator():
+    op = StructuredRecordingOperator()
+    adapter = EarlyFusionAdapter(
+        operator=op,
+        spike_chans=4,
+        frame_contract="expanded",
+    )
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+
+    result = adapter(rgb=rgb, spike=spike)
+
+    assert op.last_rgb.shape == (1, 8, 3, 8, 8)
+    assert op.last_spike.shape == (1, 8, 1, 8, 8)
+    assert result["fused_main"].shape == (1, 2, 3, 8, 8)
+    assert result["backbone_view"].shape == (1, 8, 3, 8, 8)
+    assert result["meta"]["requested_frame_contract"] == "expanded"
+    assert result["meta"]["frame_contract"] == "expanded"
+
+
+def test_early_adapter_default_contract_uses_operator_contract():
+    op = StructuredRecordingOperator()
+    adapter = EarlyFusionAdapter(operator=op, spike_chans=4)
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+
+    result = adapter(rgb=rgb, spike=spike)
+
+    assert op.last_rgb.shape == (1, 2, 3, 8, 8)
+    assert op.last_spike.shape == (1, 2, 4, 8, 8)
+    assert result["meta"]["requested_frame_contract"] == "operator_default"
+    assert result["meta"]["frame_contract"] == "collapsed"
+
+
+def test_early_adapter_rejects_invalid_frame_contract():
+    with pytest.raises(ValueError, match="frame_contract"):
+        EarlyFusionAdapter(operator=RecordingOperator(), frame_contract="bad")
+
+
+def test_early_adapter_collapsed_override_requires_structured_support():
+    with pytest.raises(ValueError, match="collapsed"):
+        EarlyFusionAdapter(operator=RecordingOperator(), frame_contract="collapsed")
+
+
 def test_early_adapter_expands_time():
     op = create_fusion_operator("concat", 3, 1, 3, {})
     adapter = EarlyFusionAdapter(operator=op)
@@ -290,30 +334,45 @@ def test_mamba_operator_structured_early_shape_or_missing_dep():
     assert out.shape == (2, 5, 3, 12, 12)
 
 
-def test_mamba_operator_passthrough_at_init_or_missing_dep():
+def test_mamba_operator_small_output_non_degenerate_init_or_missing_dep():
     op = create_fusion_operator(
         "mamba",
         3,
         1,
         3,
         {
-            "model_dim": 48,
-            "d_state": 32,
+            "token_dim": 24,
+            "token_stride": 2,
+            "d_state": 16,
             "d_conv": 4,
             "expand": 2,
-            "num_layers": 3,
-            "init_gate_bias": -5.0,
+            "num_layers": 1,
+            "alpha_init": 0.05,
+            "gate_bias_init": -2.0,
+            "enable_diagnostics": True,
         },
     )
     rgb = torch.ones(1, 2, 3, 8, 8) * 0.5
     spike = torch.zeros(1, 2, 6, 8, 8)
+
     try:
-        with torch.no_grad():
-            out = op(rgb, spike)
+        out = op(rgb, spike)
     except RuntimeError as exc:
         assert "mamba_ssm is required" in str(exc)
         return
-    assert torch.allclose(out, rgb, atol=1e-5)
+
+    max_diff = (out - rgb).abs().max().item()
+    diagnostics = op.diagnostics()
+    assert 1e-7 < max_diff < 1e-2
+    assert 1e-7 < diagnostics["effective_update_norm"] < 1e-2
+
+    loss = (out - rgb).abs().mean()
+    loss.backward()
+
+    delta_grad = op.fusion_writeback_head["delta"].weight.grad
+    gate_grad = op.fusion_writeback_head["gate"].weight.grad
+    assert delta_grad is not None and delta_grad.abs().sum().item() > 0.0
+    assert gate_grad is not None and gate_grad.abs().sum().item() > 0.0
 
 
 def test_early_adapter_mamba_keeps_frame_structure():
@@ -343,3 +402,152 @@ def test_early_wrapper_inferrs_contract_from_operator_without_new_config():
     op = create_fusion_operator("mamba", 3, 1, 3, {})
     adapter = EarlyFusionAdapter(operator=op, mode="replace", inject_stages=[], spike_chans=4)
     assert getattr(adapter.operator, "frame_contract", None) == "collapsed"
+
+
+def test_mamba_operator_exposes_scalar_diagnostics_or_missing_dep():
+    op = create_fusion_operator(
+        "mamba",
+        3,
+        1,
+        3,
+        {
+            "token_dim": 24,
+            "token_stride": 2,
+            "d_state": 16,
+            "d_conv": 4,
+            "expand": 2,
+            "num_layers": 1,
+            "alpha_init": 0.05,
+            "gate_bias_init": -2.0,
+            "enable_diagnostics": True,
+        },
+    )
+    rgb = torch.randn(1, 2, 3, 12, 12)
+    spike = torch.randn(1, 2, 6, 12, 12)
+
+    try:
+        _ = op(rgb, spike)
+    except RuntimeError as exc:
+        assert "mamba_ssm is required" in str(exc)
+        return
+
+    diagnostics = op.diagnostics()
+    assert diagnostics["warmup_stage"] == "full"
+    assert set(diagnostics) >= {
+        "token_norm",
+        "mamba_norm",
+        "delta_norm",
+        "gate_mean",
+        "effective_update_norm",
+        "warmup_stage",
+    }
+    assert all(isinstance(diagnostics[key], float) for key in diagnostics if key != "warmup_stage")
+
+
+def test_mamba_operator_writeback_only_stage_freezes_token_mixers():
+    op = create_fusion_operator(
+        "mamba",
+        3,
+        1,
+        3,
+        {"token_dim": 16, "token_stride": 2, "num_layers": 1},
+    )
+
+    op.set_warmup_stage("writeback_only")
+
+    assert all(not p.requires_grad for p in op.rgb_context_encoder.parameters())
+    assert all(not p.requires_grad for p in op.spike_token_encoder.parameters())
+    assert all(not p.requires_grad for p in op.mamba_token_mixer.parameters())
+    assert all(p.requires_grad for p in op.fusion_writeback_head.parameters())
+    assert op.alpha.requires_grad is True
+
+
+def test_mamba_operator_token_mixer_stage_unfreezes_temporal_stack():
+    op = create_fusion_operator(
+        "mamba",
+        3,
+        1,
+        3,
+        {"token_dim": 16, "token_stride": 2, "num_layers": 1},
+    )
+
+    op.set_warmup_stage("token_mixer")
+
+    assert all(p.requires_grad for p in op.rgb_context_encoder.parameters())
+    assert all(p.requires_grad for p in op.spike_token_encoder.parameters())
+    assert all(p.requires_grad for p in op.mamba_token_mixer.parameters())
+    assert all(p.requires_grad for p in op.fusion_writeback_head.parameters())
+    assert op.alpha.requires_grad is True
+
+
+def test_mamba_operator_runs_token_mixer_in_fp32_under_autocast():
+    class _RecordingBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.last_input_dtype = None
+            self.last_input_is_contiguous = None
+
+        def forward(self, tokens):
+            self.last_input_dtype = tokens.dtype
+            self.last_input_is_contiguous = tokens.is_contiguous()
+            return tokens
+
+    op = create_fusion_operator(
+        "mamba",
+        3,
+        1,
+        3,
+        {
+            "token_dim": 16,
+            "token_stride": 2,
+            "num_layers": 1,
+            "enable_diagnostics": False,
+        },
+    )
+    recorder = _RecordingBlock()
+    op.mamba_token_mixer = nn.ModuleList([recorder])
+
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        out = op(rgb, spike)
+
+    assert out.shape == rgb.shape
+    assert recorder.last_input_dtype == torch.float32
+    assert recorder.last_input_is_contiguous is True
+
+
+def test_mamba_operator_token_chunk_size_splits_mixer_work():
+    class _CountingBlock(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.chunk_shapes = []
+
+        def forward(self, tokens):
+            self.chunk_shapes.append(tuple(tokens.shape))
+            return tokens
+
+    op = create_fusion_operator(
+        "mamba",
+        3,
+        1,
+        3,
+        {
+            "token_dim": 8,
+            "token_stride": 2,
+            "num_layers": 1,
+            "token_chunk_size": 10,
+            "enable_diagnostics": False,
+        },
+    )
+    counter = _CountingBlock()
+    op.mamba_token_mixer = nn.ModuleList([counter])
+
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+
+    out = op(rgb, spike)
+
+    assert out.shape == rgb.shape
+    assert counter.chunk_shapes == [(10, 4, 8), (10, 4, 8), (10, 4, 8), (2, 4, 8)]

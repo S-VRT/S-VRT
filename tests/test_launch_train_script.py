@@ -67,3 +67,62 @@ def test_training_process_is_not_wrapped_by_launch_logger():
 
     assert 'run_with_wrapper "train" "train"' not in launch_script
     assert 'run_with_wrapper "train" "dependency"' in launch_script
+
+
+def test_launch_script_exposes_terminal_session_logging_options():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    for option in (
+        "--foreground",
+        "--attach",
+        "--detach",
+        "--no-terminal-log",
+    ):
+        assert option in launch_script
+
+
+def test_launch_script_wraps_outer_invocation_with_screen_and_script():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert "SVRT_LAUNCH_INNER" in launch_script
+    assert 'SVRT_LAUNCH_INNER:-0}" != "1"' in launch_script
+    assert "terminal_" in launch_script
+    assert "screen_" in launch_script
+    assert "screen -S" in launch_script
+    assert "script -q -f -e" in launch_script
+
+
+def test_inner_training_command_remains_unwrapped_by_launch_logger():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert 'command_text="cd $(quote_shell_word "$(pwd)") && SVRT_LAUNCH_INNER=1"' in launch_script
+    assert 'env SVRT_LAUNCH_INNER=1' not in launch_script
+    assert 'exec bash $(quote_shell_word "$0")' in launch_script
+
+
+def test_outer_wrapper_replays_original_arguments_after_parser_shifts():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert 'ORIGINAL_ARGS=("$@")' in launch_script
+    assert 'start_terminal_transcript_wrapper "$TRAIN_LOG_DIR_FOR_TRANSCRIPT" "${ORIGINAL_ARGS[@]}"' in launch_script
+
+
+def test_launch_script_can_prepare_autodl_tensorboard_before_training():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert "--autodl-tensorboard" in launch_script
+    assert "resolve_tensorboard_logdir()" in launch_script
+    assert "ensure_autodl_tensorboard()" in launch_script
+    assert 'AUTODL_TENSORBOARD=${AUTODL_TENSORBOARD:-true}' in launch_script
+    assert 'ensure_autodl_tensorboard "$TENSORBOARD_LOGDIR"' in launch_script
+
+
+def test_launch_script_auto_detects_available_gpus_by_default():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert 'DEFAULT_GPU_COUNT="auto"' in launch_script
+    assert "detect_available_gpus()" in launch_script
+    assert "resolve_gpu_selection()" in launch_script
+    assert "SVRT_GPU_FREE_MEMORY_MAX_MB" in launch_script
+    assert 'GPU List Source: $GPU_LIST_SOURCE' in launch_script
+    assert 'resolve_gpu_selection "$GPU_COUNT" "$GPU_LIST"' in launch_script

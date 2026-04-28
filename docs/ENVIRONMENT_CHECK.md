@@ -1,8 +1,8 @@
 # Environment Check
 
-Last Updated: 2026-04-17
+Last Updated: 2026-04-25
 Workspace: `/root/projects/S-VRT`
-Host: `autodl-container-233rvqugpm-0c6a446f`
+Host: `autodl-container-2ccrzp7syw-b90af12d`
 
 ## Summary
 
@@ -11,11 +11,11 @@ Host: `autodl-container-233rvqugpm-0c6a446f`
 - CPU: `Intel(R) Xeon(R) Platinum 8470Q`
 - CPU Topology: `2 sockets / 104 physical cores / 208 threads`
 - RAM: `1.0 TiB`
-- GPU: `NVIDIA GeForce RTX 4080`
-- GPU Memory: `32760 MiB`
-- NVIDIA Driver: `580.95.05`
+- GPU: `4 x NVIDIA GeForce RTX 4090`
+- GPU Memory: `49140 MiB per GPU`
+- NVIDIA Driver: `580.105.08`
 - `nvidia-smi` CUDA Version: `13.0`
-- CUDA Toolkit: `12.8`
+- CUDA Toolkit: `13.0`
 - GCC: `11.4.0`
 - System Python: `3.12.3`
 - Project `.venv` Python: `3.11.15`
@@ -42,38 +42,49 @@ Host: `autodl-container-233rvqugpm-0c6a446f`
 ### Memory
 
 - Total RAM: `1.0 TiB`
-- Available at check time: `928 GiB`
+- Available at check time: `947 GiB`
 - Swap: `0 B`
 
 ### Filesystem
 
-- Workspace filesystem for `/` and `/root/projects/S-VRT`: `30G` total, `22G` used, `8.3G` available
+- Workspace filesystem for `/` and `/root/projects/S-VRT`: `30G` total, `24G` used, `6.1G` available
 
 ## GPU And CUDA
 
-- GPU: `NVIDIA GeForce RTX 4080`
-- Driver Version: `580.95.05`
+- GPU count: `4`
+- GPU model: `NVIDIA GeForce RTX 4090`
+- Driver Version: `580.105.08`
 - CUDA Version reported by `nvidia-smi`: `13.0`
-- Total GPU Memory: `32760 MiB`
-- Persistence Mode: `On`
+- Total GPU Memory: `49140 MiB per GPU`
+- Persistence Mode: `On` for all GPUs
 - Active GPU Processes at check time: none
 
 `nvidia-smi` snapshot:
 
 ```text
-Fri Apr 17 15:13:58 2026
+Sat Apr 25 11:03:32 2026
 +-----------------------------------------------------------------------------------------+
-| NVIDIA-SMI 580.95.05              Driver Version: 580.95.05      CUDA Version: 13.0     |
+| NVIDIA-SMI 580.105.08             Driver Version: 580.105.08     CUDA Version: 13.0     |
 +-----------------------------------------+------------------------+----------------------+
 | GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
 | Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
 |                                         |                        |               MIG M. |
 |=========================================+========================+======================|
-|   0  NVIDIA GeForce RTX 4080 ...    On  |   00000000:17:00.0 Off |                  N/A |
-| 30%   28C    P8             13W /  320W |       0MiB /  32760MiB |      0%      Default |
+|   0  NVIDIA GeForce RTX 4090        On  |   00000000:16:00.0 Off |                  Off |
+| 48%   30C    P8             32W /  450W |       0MiB /  49140MiB |      0%      Default |
 |                                         |                        |                  N/A |
 +-----------------------------------------+------------------------+----------------------+
-
+|   1  NVIDIA GeForce RTX 4090        On  |   00000000:5A:00.0 Off |                  Off |
+| 48%   32C    P8             24W /  450W |       0MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   2  NVIDIA GeForce RTX 4090        On  |   00000000:D8:00.0 Off |                  Off |
+| 48%   32C    P8             30W /  450W |       0MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+|   3  NVIDIA GeForce RTX 4090        On  |   00000000:D9:00.0 Off |                  Off |
+| 49%   30C    P8             12W /  450W |       0MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
 +-----------------------------------------------------------------------------------------+
 | Processes:                                                                              |
 |  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
@@ -86,19 +97,19 @@ Fri Apr 17 15:13:58 2026
 ### CUDA Toolkit
 
 - `/usr/local/cuda` exists and points into the system CUDA installation
-- Installed toolkit directory: `/usr/local/cuda-12.8`
+- Installed toolkit directory: `/usr/local/cuda-13.0`
 - `nvcc` exists at `/usr/local/cuda/bin/nvcc`
 - `nvcc` is not currently on `PATH`
-- NVCC version: `V12.8.93`
+- NVCC version: `V13.0.88`
 
 `/usr/local/cuda/bin/nvcc --version`:
 
 ```text
 nvcc: NVIDIA (R) Cuda compiler driver
 Copyright (c) 2005-2025 NVIDIA Corporation
-Built on Fri_Feb_21_20:23:50_PST_2025
-Cuda compilation tools, release 12.8, V12.8.93
-Build cuda_12.8.r12.8/compiler.35583870_0
+Built on Wed_Aug_20_01:58:59_PM_PDT_2025
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
 ```
 
 ### Runtime Libraries
@@ -111,12 +122,12 @@ Detected from `ldconfig -p`:
 - `libcudnn_adv.so.9`
 - `libcudnn_graph.so.9`
 - `libcudnn_heuristic.so.9`
-- `libcudart.so.12`
-- `libcublas.so.12`
-- `libcublasLt.so.12`
+- `libcudart.so.13`
+- `libcublas.so.13`
+- `libcublasLt.so.13`
 - `libnccl.so.2`
 
-This machine has the primary CUDA runtime libraries, cuDNN 9, and NCCL available at the system level.
+This machine has the primary CUDA 13 runtime libraries, cuDNN 9, and NCCL available at the system level. Compatibility symlinks and CUDA 12 variants are also present.
 
 ## Python And Project Runtime
 
@@ -146,6 +157,7 @@ einops
 tensorboard
 wandb
 swanlab
+logfire
 matplotlib
 snntorch
 ```
@@ -157,13 +169,13 @@ The project virtual environment is present and populated. At check time:
 - PyTorch: `2.11.0+cu130`
 - `torch.version.cuda`: `13.0`
 - `torch.cuda.is_available()`: `True`
-- `torch.cuda.device_count()`: `1`
+- `torch.cuda.device_count()`: `4`
 
-This means the previous note claiming that dependency installation was still incomplete is no longer accurate for the current machine state.
+The virtual environment can see all four GPUs successfully.
 
 ## Compatibility Notes
 
-- Driver support is newer than the locally installed CUDA toolkit, which is normal: driver reports CUDA capability `13.0`, while the installed toolkit is `12.8`.
-- The project `.venv` is already using a CUDA 13 PyTorch build and can see the GPU successfully.
+- Driver, toolkit, and PyTorch are aligned on CUDA `13.0` on this machine.
 - `nvcc` is available by absolute path but not exported on `PATH`; custom CUDA extension builds may need either an explicit `CUDA_HOME=/usr/local/cuda` or a `PATH` update.
-- The workspace filesystem only has about `8.3G` free at the time of the check, which may be tight for large checkpoints, dataset expansion, or build artifacts.
+- The workspace filesystem only has about `6.1G` free at the time of the check, which is tighter than the previous record and may be limiting for large checkpoints, dataset expansion, or build artifacts.
+- `lsb_release` is not installed on this machine, so OS distribution details were taken from `/etc/os-release`.

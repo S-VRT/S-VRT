@@ -25,7 +25,8 @@
 #   ./launch_train.sh [GPU_COUNT] [CONFIG_PATH] [--prepare-data] [--generate-lmdb] [--force-prepare]
 #
 # Examples:
-#   ./launch_train.sh 1                                # Single GPU, default config
+#   ./launch_train.sh                                  # Auto-detect available GPUs, default config
+#   ./launch_train.sh 1                                # Use one available GPU, default config
 #   ./launch_train.sh 1 --prepare-data                 # Single GPU, prepare data first
 #   ./launch_train.sh 1 --prepare-data --generate-lmdb # Single GPU, prepare data + LMDB
 #   ./launch_train.sh 4                                # 4 GPUs, default config
@@ -38,7 +39,8 @@
 DEFAULT_CONFIG="options/gopro_rgbspike_server.json"
 DEFAULT_GOPRO_ROOT="/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large"
 DEFAULT_SPIKE_ROOT="/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq"
-DEFAULT_GPU_COUNT=1
+DEFAULT_GPU_COUNT="auto"
+ORIGINAL_ARGS=("$@")
 
 if command -v uv >/dev/null 2>&1 && uv run python -c "import sys" >/dev/null 2>&1; then
     PYTHON_BIN="$(uv run python -c 'import sys; print(sys.executable)')"
@@ -84,6 +86,10 @@ DATASET_ROOT=""
 OVERRIDE_GOPRO_ROOT=""
 OVERRIDE_SPIKE_ROOT=""
 GPU_LIST=""
+TERMINAL_LOG=true
+TERMINAL_MODE="attach"
+AUTODL_TENSORBOARD=${AUTODL_TENSORBOARD:-true}
+TENSORBOARD_LOGDIR_OVERRIDE=""
 
 # Parse all arguments
 for arg in "$@"; do
@@ -116,11 +122,39 @@ for arg in "$@"; do
             GPU_LIST="${arg#*=}"
             shift
             ;;
+        --foreground)
+            TERMINAL_MODE="foreground"
+            shift
+            ;;
+        --attach)
+            TERMINAL_MODE="attach"
+            shift
+            ;;
+        --detach)
+            TERMINAL_MODE="detach"
+            shift
+            ;;
+        --no-terminal-log)
+            TERMINAL_LOG=false
+            shift
+            ;;
+        --autodl-tensorboard)
+            AUTODL_TENSORBOARD=true
+            shift
+            ;;
+        --no-autodl-tensorboard)
+            AUTODL_TENSORBOARD=false
+            shift
+            ;;
+        --tensorboard-logdir=*)
+            TENSORBOARD_LOGDIR_OVERRIDE="${arg#*=}"
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [GPU_COUNT] [CONFIG_PATH] [OPTIONS]"
             echo ""
             echo "Arguments:"
-            echo "  GPU_COUNT        Number of GPUs to use (default: 1)"
+            echo "  GPU_COUNT        Number of available GPUs to use (default: auto/all available)"
             echo "  CONFIG_PATH      Path to training config (default: $DEFAULT_CONFIG)"
             echo ""
             echo "Options:"
@@ -130,13 +164,23 @@ for arg in "$@"; do
             echo "  --dataset-root=/path/to/gopro_spike           Root where zip was extracted"
             echo "  --gopro-root=/path/to/GOPRO_Large             Override GoPro root"
             echo "  --spike-root=/path/to/GOPRO_Large_spike_seq   Override Spike root"
-            echo "  --gpus=0,1,2     Comma-separated GPU ids for single-node DDP (default: 0,1,2)"
+            echo "  --gpus=0,1,2     Comma-separated GPU ids for single-node DDP (overrides auto-detect)"
+            echo "  --attach         Run inside screen and attach immediately (default)"
+            echo "  --detach         Run inside a detached screen session and return"
+            echo "  --foreground     Run in the current terminal, still recording terminal_*.log"
+            echo "  --no-terminal-log Disable screen/script terminal transcript wrapping"
+            echo "  --autodl-tensorboard    Ensure AutoDL TensorBoard uses the project experiments logdir (default)"
+            echo "  --no-autodl-tensorboard Do not manage AutoDL TensorBoard before training"
+            echo "  --tensorboard-logdir=/path Override TensorBoard logdir used by --autodl-tensorboard"
             echo "  --help, -h       Show this help message"
             echo ""
             echo "Examples:"
+            echo "  $0 --detach"
             echo "  $0 1 --prepare-data"
             echo "  $0 4 --prepare-data --generate-lmdb"
             echo "  $0 8 options/vrt/custom.json"
+            echo "  $0 4 options/gopro_rgbspike_server_debug.json --detach"
+            echo "  screen -r svrt_<task>_<timestamp>"
             exit 0
             ;;
         *)
@@ -149,19 +193,76 @@ for arg in "$@"; do
     esac
 done
 
-# Set defaults if not provided (single-node 3-GPU by default)
+detect_available_gpus() {
+    local max_used_mb="${SVRT_GPU_FREE_MEMORY_MAX_MB:-512}"
+
+    if ! command -v nvidia-smi >/dev/null 2>&1; then
+        return 1
+    fi
+
+    nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | \
+        awk -F, -v max_used_mb="$max_used_mb" '
+            {
+                gsub(/^[ \t]+|[ \t]+$/, "", $1)
+                gsub(/^[ \t]+|[ \t]+$/, "", $2)
+                if ($1 != "" && $2 + 0 <= max_used_mb) {
+                    if (out != "") out = out ","
+                    out = out $1
+                }
+            }
+            END { if (out != "") print out }
+        '
+}
+
+resolve_gpu_selection() {
+    local requested_count="$1"
+    local requested_list="$2"
+    local available_list selected_list
+
+    if [[ -n "$requested_list" ]]; then
+        GPU_LIST="$requested_list"
+        GPU_LIST_SOURCE="manual"
+        return 0
+    fi
+
+    available_list="$(detect_available_gpus || true)"
+    if [[ -z "$available_list" ]]; then
+        echo "Error: no available GPU detected. Override with --gpus=0 or adjust SVRT_GPU_FREE_MEMORY_MAX_MB." >&2
+        exit 1
+    fi
+
+    if [[ -z "$requested_count" || "$requested_count" == "auto" ]]; then
+        GPU_LIST="$available_list"
+        GPU_LIST_SOURCE="auto"
+        return 0
+    fi
+
+    IFS=',' read -r -a available_ids <<< "$available_list"
+    if [[ "$requested_count" -gt "${#available_ids[@]}" ]]; then
+        echo "Error: requested $requested_count GPU(s), but only ${#available_ids[@]} available: $available_list" >&2
+        exit 1
+    fi
+
+    selected_list=""
+    local idx
+    for ((idx = 0; idx < requested_count; idx++)); do
+        if [[ -n "$selected_list" ]]; then
+            selected_list+=","
+        fi
+        selected_list+="${available_ids[$idx]}"
+    done
+
+    GPU_LIST="$selected_list"
+    GPU_LIST_SOURCE="auto_limited"
+}
+
+# Set defaults if not provided.
 GPU_COUNT=${GPU_COUNT:-$DEFAULT_GPU_COUNT}
 CONFIG_PATH=${CONFIG_PATH:-$DEFAULT_CONFIG}
-if [[ -z "$GPU_LIST" ]]; then
-    if [[ "$GPU_COUNT" -le 1 ]]; then
-        GPU_LIST="0"
-    else
-        # Generate comma-separated list 0,1,...,GPU_COUNT-1
-        GPU_LIST=$(seq -s, 0 $((GPU_COUNT - 1)))
-    fi
-fi
 
-# Normalize GPU list (remove spaces) and derive effective GPU count
+resolve_gpu_selection "$GPU_COUNT" "$GPU_LIST"
+
+# Normalize GPU list (remove spaces) and derive effective GPU count.
 GPU_LIST=$(echo "$GPU_LIST" | tr -d '[:space:]')
 IFS=',' read -r -a GPU_ID_ARRAY <<< "$GPU_LIST"
 GPU_COUNT_FROM_LIST=${#GPU_ID_ARRAY[@]}
@@ -170,14 +271,210 @@ if [[ "$GPU_COUNT_FROM_LIST" -eq 0 ]]; then
     exit 1
 fi
 
-if [[ "$GPU_COUNT" -ne "$GPU_COUNT_FROM_LIST" ]]; then
+if [[ "$GPU_COUNT" != "auto" && "$GPU_COUNT" -ne "$GPU_COUNT_FROM_LIST" ]]; then
     echo "Info: GPU_COUNT ($GPU_COUNT) and GPU list size ($GPU_COUNT_FROM_LIST) differ."
     echo "      Using GPU list size for torchrun."
-    GPU_COUNT=$GPU_COUNT_FROM_LIST
 fi
+GPU_COUNT=$GPU_COUNT_FROM_LIST
 
 if [[ -z "${MASTER_PORT:-}" ]]; then
     export MASTER_PORT=12355
+fi
+
+resolve_train_log_dir() {
+    local opt_path="$1"
+    "$PYTHON_BIN" - "$opt_path" <<'PY'
+import contextlib
+import io
+import sys
+from utils import utils_option
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(sys.argv[1], is_train=True)
+print(opt['path']['log'])
+PY
+}
+
+resolve_tensorboard_logdir() {
+    local opt_path="$1"
+    if [[ -n "$TENSORBOARD_LOGDIR_OVERRIDE" ]]; then
+        "$PYTHON_BIN" - "$TENSORBOARD_LOGDIR_OVERRIDE" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1]).expanduser()
+if not path.is_absolute():
+    path = pathlib.Path.cwd() / path
+print(path.resolve())
+PY
+        return
+    fi
+
+    "$PYTHON_BIN" - "$opt_path" <<'PY'
+import contextlib
+import io
+import pathlib
+import sys
+from utils import utils_option
+
+with contextlib.redirect_stdout(io.StringIO()):
+    opt = utils_option.parse(sys.argv[1], is_train=True)
+root = pathlib.Path(opt['path'].get('root', 'experiments')).expanduser()
+if not root.is_absolute():
+    root = pathlib.Path.cwd() / root
+print(root.resolve())
+PY
+}
+
+ensure_autodl_tensorboard() {
+    local logdir="$1"
+    local port="${AUTODL_TENSORBOARD_PORT:-6007}"
+
+    if [[ -z "$logdir" ]]; then
+        launch_echo "train" "tensorboard" "local_single" "warning" "AutoDL TensorBoard: empty logdir; skipping setup."
+        return 0
+    fi
+
+    if ! command -v tensorboard >/dev/null 2>&1; then
+        launch_echo "train" "tensorboard" "local_single" "warning" "AutoDL TensorBoard: tensorboard command not found; skipping setup."
+        return 0
+    fi
+
+    mkdir -p "$logdir"
+
+    local current_pids current_logdir
+    current_pids="$(pgrep -f "tensorboard.*--port[= ]${port}" || true)"
+    current_logdir="$(ps -eo pid,args | "$PYTHON_BIN" -c '
+import re
+import sys
+
+port = sys.argv[1]
+for raw in sys.stdin:
+    line = raw.strip()
+    if "tensorboard" not in line:
+        continue
+    if not re.search(rf"--port(?:=|\s+){re.escape(port)}(?:\s|$)", line):
+        continue
+    match = re.search(r"--logdir(?:=|\s+)(\S+)", line)
+    if match:
+        print(match.group(1))
+        break
+' "$port")"
+
+    if [[ -n "$current_logdir" ]]; then
+        local current_abs
+        current_abs="$("$PYTHON_BIN" - "$current_logdir" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1]).expanduser()
+if not path.is_absolute():
+    path = pathlib.Path.cwd() / path
+print(path.resolve())
+PY
+)"
+        if [[ "$current_abs" == "$logdir" ]]; then
+            launch_echo "train" "tensorboard" "local_single" "info" "AutoDL TensorBoard already configured: port $port logdir $logdir"
+            return 0
+        fi
+        launch_echo "train" "tensorboard" "local_single" "info" "AutoDL TensorBoard logdir mismatch: port $port currently uses $current_abs; expected $logdir"
+    else
+        launch_echo "train" "tensorboard" "local_single" "info" "AutoDL TensorBoard: no existing port $port process found; starting one for $logdir"
+    fi
+
+    if command -v supervisorctl >/dev/null 2>&1; then
+        supervisorctl stop tensorboard >/dev/null 2>&1 || true
+    fi
+
+    if [[ -n "$current_pids" ]]; then
+        kill $current_pids >/dev/null 2>&1 || true
+        sleep 2
+    fi
+
+    nohup tensorboard --host 0.0.0.0 --port "$port" --logdir "$logdir" >/tmp/s-vrt-tensorboard.log 2>&1 &
+    launch_echo "train" "tensorboard" "local_single" "info" "AutoDL TensorBoard started: port $port logdir $logdir"
+}
+
+quote_shell_word() {
+    printf '%q' "$1"
+}
+
+build_reentry_command() {
+    local command_text
+    command_text="cd $(quote_shell_word "$(pwd)") && SVRT_LAUNCH_INNER=1"
+    if [[ -n "${SVRT_TERMINAL_LOG:-}" ]]; then
+        command_text+=" SVRT_TERMINAL_LOG=$(quote_shell_word "$SVRT_TERMINAL_LOG")"
+    fi
+    command_text+=" exec bash $(quote_shell_word "$0")"
+    local arg
+    for arg in "$@"; do
+        command_text+=" $(quote_shell_word "$arg")"
+    done
+    printf '%s' "$command_text"
+}
+
+start_terminal_transcript_wrapper() {
+    local log_dir="$1"
+    shift
+
+    local timestamp task_name session_name terminal_log info_file inner_command script_command
+    timestamp="$(date +%y%m%d_%H%M%S)"
+    task_name="$(basename "$log_dir")"
+    task_name="${task_name//[!A-Za-z0-9_.-]/_}"
+    session_name="svrt_${task_name}_${timestamp}"
+    terminal_log="${log_dir}/terminal_${timestamp}.log"
+    info_file="${log_dir}/screen_${timestamp}.info"
+
+    mkdir -p "$log_dir"
+
+    if ! command -v script >/dev/null 2>&1; then
+        echo "Warning: script not found; terminal transcript logging is disabled." >&2
+        return 0
+    fi
+
+    export SVRT_TERMINAL_LOG="$terminal_log"
+    inner_command="$(build_reentry_command "$@")"
+    script_command="script -q -f -e -c $(quote_shell_word "$inner_command") $(quote_shell_word "$terminal_log")"
+
+    {
+        echo "screen_session=$session_name"
+        echo "terminal_log=$terminal_log"
+        echo "launch_mode=$TERMINAL_MODE"
+        echo "created_at=$(date '+%Y-%m-%d %H:%M:%S %z')"
+        echo "reattach_command=screen -r $session_name"
+        echo "tail_command=tail -f $terminal_log"
+    } > "$info_file"
+
+    if [[ "$TERMINAL_MODE" == "foreground" ]]; then
+        echo "Terminal transcript: $terminal_log"
+        exec script -q -f -e -c "$inner_command" "$terminal_log"
+    fi
+
+    if ! command -v screen >/dev/null 2>&1; then
+        echo "Warning: screen not found; falling back to foreground script logging." >&2
+        echo "Terminal transcript: $terminal_log"
+        exec script -q -f -e -c "$inner_command" "$terminal_log"
+    fi
+
+    echo "Screen session: $session_name"
+    echo "Terminal transcript: $terminal_log"
+    echo "Session info: $info_file"
+
+    if [[ "$TERMINAL_MODE" == "detach" || ! -t 0 ]]; then
+        screen -dmS "$session_name" bash -lc "$script_command"
+        echo "Detached. Reattach with: screen -r $session_name"
+        exit 0
+    fi
+
+    exec screen -S "$session_name" bash -lc "$script_command"
+}
+
+if [[ "$TERMINAL_LOG" == true && "${SVRT_LAUNCH_INNER:-0}" != "1" ]]; then
+    TRAIN_LOG_DIR_FOR_TRANSCRIPT="$(resolve_train_log_dir "$CONFIG_PATH")"
+    if [[ -n "$TRAIN_LOG_DIR_FOR_TRANSCRIPT" ]]; then
+        start_terminal_transcript_wrapper "$TRAIN_LOG_DIR_FOR_TRANSCRIPT" "${ORIGINAL_ARGS[@]}"
+    else
+        echo "Warning: could not resolve log dir from $CONFIG_PATH; continuing without terminal transcript wrapper." >&2
+    fi
 fi
 
 # Resolve effective dataset roots
@@ -346,19 +643,6 @@ PYINIT
     fi
 }
 
-resolve_train_log_dir() {
-    local opt_path="$1"
-    "$PYTHON_BIN" - "$opt_path" <<'PY'
-import contextlib
-import io
-import sys
-from utils import utils_option
-with contextlib.redirect_stdout(io.StringIO()):
-    opt = utils_option.parse(sys.argv[1], is_train=True)
-print(opt['path']['log'])
-PY
-}
-
 launch_echo() {
     local logger_name="$1"
     local launch_phase="$2"
@@ -525,6 +809,7 @@ fi
 LAUNCH_LOG_FILE="$(ensure_launch_logger "train" "$TRAIN_LOG_DIR" "$CONFIG_PATH")"
 start_launch_logger "train" "$LAUNCH_LOG_FILE" "$CONFIG_PATH"
 trap cleanup_launch_logger EXIT
+TENSORBOARD_LOGDIR="$(resolve_tensorboard_logdir "$CONFIG_PATH")"
 
 launch_echo_lines "train" "launch" "local_single" "info" \
     "==========================================" \
@@ -533,13 +818,20 @@ launch_echo_lines "train" "launch" "local_single" "info" \
     "Config: $CONFIG_PATH" \
     "Requested GPUs: $GPU_COUNT" \
     "GPU List: $GPU_LIST" \
+    "GPU List Source: $GPU_LIST_SOURCE" \
     "Prepare Data: $PREPARE_DATA" \
     "Generate LMDB: $GENERATE_LMDB" \
     "Dataset Root: ${DATASET_ROOT:-<none>}" \
     "GoPro Root: $EFFECTIVE_GOPRO_ROOT" \
     "Spike Root: $EFFECTIVE_SPIKE_ROOT" \
     "Python: $PYTHON_BIN" \
+    "AutoDL TensorBoard: $AUTODL_TENSORBOARD" \
+    "TensorBoard Logdir: ${TENSORBOARD_LOGDIR:-<unresolved>}" \
     ""
+
+if [[ "$AUTODL_TENSORBOARD" == true ]]; then
+    ensure_autodl_tensorboard "$TENSORBOARD_LOGDIR"
+fi
 
 # ================================================================================
 # Data Preparation (if requested)

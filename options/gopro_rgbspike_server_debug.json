@@ -3,7 +3,7 @@
   // 基础配置
   // ========================================
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
-  "task": "gopro_tfp4_scflow_mamba_dcn4_debug"
+  "task": "gopro_tfp4_scflow_mamba_collapsed_b16_gt128_finalsave_verify_debug"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
   ,
   "model": "vrt"
@@ -155,7 +155,7 @@
       ,
       "tfp_device": "cpu"
       ,
-      "tfp_devices": ["cuda:0","cuda:1"]
+      "tfp_devices": ["cuda:0","cuda:1","cuda:2","cuda:3"]
       // 归一化设置：RGB 使用 ImageNet 均值方差，Spike 通道目前保持恒等缩放
       ,
       "rgb_normalize": null
@@ -189,7 +189,7 @@
       "num_frame": 6
       // 真实标签图像尺寸：支持单值或 [phase1, phase2]
       ,
-      "gt_size": [96, 64]
+      "gt_size": [192, 128]
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -212,13 +212,13 @@
       // 注意：在DDP模式下，每个GPU会创建 dataloader_num_workers // num_gpu 个worker
       // 建议值：每个GPU 4-8个worker，3卡DDP建议设置为12-24
       ,
-      "dataloader_num_workers": 12
+      "dataloader_num_workers": 0
       // 批次大小：支持单值或 [phase1, phase2]
       ,
-      "dataloader_batch_size": [16, 2]
+      "dataloader_batch_size": [32, 16]
       // 预取因子：每个工作进程预取的批次数量
       ,
-      "dataloader_prefetch_factor": 2
+      "dataloader_prefetch_factor": 4
       // 是否保持工作进程持久化：true 表示工作进程在 epoch 之间保持活跃，提高效率
       ,
       "dataloader_persistent_workers": true
@@ -305,7 +305,7 @@
       // Spike TFP 多 GPU 设备列表：可选，配置后 DataLoader worker 会按 worker_id/LOCAL_RANK 轮询使用
       // 例如 ["cuda:0","cuda:1","cuda:2"]；为空数组表示禁用多 GPU TFP
       ,
-      "tfp_devices": ["cuda:0","cuda:1"]
+      "tfp_devices": ["cuda:0","cuda:1","cuda:2","cuda:3"]
       // Spike 数据文件夹名称
       ,
       "spike_folder_name": "spike"
@@ -359,19 +359,28 @@
       "operator": "mamba",
       "mode": "replace",
       "out_chans": 3,
-      "operator_params": {},
+      "early": {
+        "frame_contract": "collapsed"
+      },
+      "operator_params": {
+        "token_dim": 48,
+        "token_stride": 4,
+        "d_state": 32,
+        "d_conv": 4,
+        "expand": 2,
+        "num_layers": 3,
+        "alpha_init": 0.05,
+        "gate_bias_init": -2.0,
+        "enable_diagnostics": true
+      },
       "debug": {
         "enable": true,
         "save_images": true,
         "trigger": "phase1_last",
         "source": "train_batch",
-        "full_frame": true,
-        "subdir": "fusion_phase1_last_full",
+        "subdir": "fusion_phase1_last_train",
         "max_batches": 1,
-        "max_frames": 24,
-        "val_overrides": {
-          "size_patch_testing": 0
-        }
+        "max_frames": 24
       }
     }
     ,
@@ -493,6 +502,9 @@
     "deformable_groups": 16
     // 是否为非盲去噪：false 表示盲去模糊（不知道模糊核）
     ,
+    // PA fuse AMP policy: fp32 keeps current behavior; autocast follows the outer AMP context for A/B.
+    "pa_fuse_amp_policy": "fp32"
+    ,
     "nonblind_denoising": false
     // 梯度检查点配置（用于节省显存）
     // 是否对注意力层使用梯度检查点：true 表示使用，可以节省显存但增加计算时间
@@ -579,6 +591,13 @@
     "phase2_fusion_aux_loss_weight": 0.2
     ,
     "fusion_passthrough_loss_weight": 0.2
+    ,
+    "fusion_warmup": {
+      "head_only_iters": 2,
+      "passthrough_weight_start": 0.2,
+      "passthrough_weight_end": 0.0,
+      "update_penalty_weight": 0.01
+    }
     // Charbonnier 损失的 epsilon 参数：用于平滑 L1 损失的小常数
     ,
     "G_charbonnier_eps": 1e-6
@@ -614,7 +633,7 @@
     // 固定参数配置（用于分阶段训练）
     // 固定参数的迭代次数：在前 fix_iter 次迭代中，fix_keys 指定的参数保持固定
     ,
-    "fix_iter": 20
+    "fix_iter": 4
     // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
     ,
     "fix_lr_mul": 0.1
@@ -628,7 +647,7 @@
     // 学习率调度器配置
     // 总迭代次数：训练的总迭代步数
     ,
-    "total_iter": 40
+    "total_iter": 5
     // 生成器学习率调度器类型："CosineAnnealingWarmRestarts" 表示带重启的余弦退火调度器
     ,
     "G_scheduler_type": "CosineAnnealingWarmRestarts"
@@ -655,18 +674,50 @@
     // 检查点配置
     // 测试检查点间隔：每训练多少迭代进行一次测试评估
     ,
-    "checkpoint_test": 40
+    "checkpoint_test": 5
     // 模型保存检查点间隔：每训练多少迭代保存一次模型
     ,
-    "checkpoint_save": 30
+    "checkpoint_save": 100
     // 打印检查点间隔：每训练多少迭代打印一次训练信息
     ,
-    "checkpoint_print": 5
+    "checkpoint_print": 1
     // 混合精度训练开关：enable=true 时使用 autocast；float16 时启用 GradScaler
     ,
     "amp": {
       "enable": true,
       "dtype": "bfloat16"
+    }
+    ,
+    "compile": {
+      "enable": false,
+      "scope": "fusion_only",
+      "mode": "reduce-overhead",
+      "fullgraph": false,
+      "dynamic": true,
+      "backend": "inductor",
+      "fallback_on_error": true,
+      "checkpoint_compat": {
+        "enable": true,
+        "disable_ffn_blocks": [
+          0
+        ],
+        "disable_attn_blocks": []
+      }
+    }
+  }
+  // ========================================
+  // 运行时 CPU/Inductor 配置
+  // ========================================
+  ,
+  "runtime": {
+    "cpu": {
+      "torch_num_threads": 8,
+      "torch_num_interop_threads": 4,
+      "inductor_compile_threads": 16,
+      "omp_num_threads": 8,
+      "mkl_num_threads": 8,
+      "tmpdir": "/root/autodl-tmp/svrt_compile_tmp",
+      "inductor_cache_dir": "/root/autodl-tmp/svrt_inductor_cache"
     }
   }
   // ========================================
@@ -687,19 +738,19 @@
     "center_frame_only": false
     // 测试时使用的帧数：18 表示测试时处理 18 帧视频
     ,
-    "num_frame_testing": 12
+    "num_frame_testing": 18
     // 测试时的重叠帧数：2 表示相邻测试窗口之间有 2 帧重叠（用于滑动窗口测试）
     ,
     "num_frame_overlapping": 2
     // 测试时的补丁大小：160 表示将大图像分割成 160x160 的补丁进行测试
     ,
-    "size_patch_testing": 96
+    "size_patch_testing": 192
     // 测试时的补丁重叠大小：20 表示相邻测试补丁之间有 20 像素重叠（用于滑动窗口测试）
     ,
     "size_patch_overlapping": 24
     // 测试时将多个空间补丁合并为一个 batch 推理；不改变补丁划分、重叠或指标计算
     ,
-    "patch_batch_size": 2
+    "patch_batch_size": 1
     // DDP 验证时把同一个样本的空间补丁分配到各 rank 推理，再 all-reduce 合并；rank0 负责保存和计分
     ,
     "distributed_patch_testing": true
@@ -743,7 +794,7 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_tfp4_scflow_gated_dcn4"
+    "wandb_name": "gopro_tfp4_scflow_mamba_tokenized_dcn4_debug"
     // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
     ,
     "wandb_mode": null
@@ -761,10 +812,10 @@
     "swanlab_workspace": null
     // SwanLab 运行名称：用于区分不同实验
     ,
-    "swanlab_name": "gopro_tfp4_scflow_gated_dcn4"
+    "swanlab_name": "gopro_tfp4_scflow_mamba_tokenized_dcn4_debug"
     // SwanLab 实验描述：可选文本信息
     ,
-    "swanlab_description": "early fusion gated + scflow"
+    "swanlab_description": "early fusion mamba_tokenized + scflow"
     // SwanLab 运行模式：可设置 cloud/offline/local；留空自动根据 API key 决定
     ,
     "swanlab_mode": null

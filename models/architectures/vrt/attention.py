@@ -1,8 +1,8 @@
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
-import math
 from functools import lru_cache
 
 from models.utils.init import trunc_normal_
@@ -51,7 +51,6 @@ class WindowAttention(nn.Module):
             self.qkv_mut = nn.Linear(dim, dim * 3, bias=qkv_bias)
             self.proj = nn.Linear(2 * dim, dim)
 
-        self.softmax = nn.Softmax(dim=-1)
         trunc_normal_(self.relative_position_bias_table, std=.02)
 
     def forward(self, x, mask=None):
@@ -75,22 +74,42 @@ class WindowAttention(nn.Module):
 
     def attention(self, q, k, v, mask, x_shape, relative_position_encoding=True):
         B_, N, C = x_shape
-        attn = (q * self.scale) @ k.transpose(-2, -1)
 
         if relative_position_encoding:
+            # Self-attention: has relative position bias → SDPA mem-efficient backend
             relative_position_bias = self.relative_position_bias_table[
                 self.relative_position_index[:N, :N].reshape(-1)].reshape(N, N, -1)
-            attn = attn + relative_position_bias.permute(2, 0, 1).unsqueeze(0)
+            # shape: (1, num_heads, N, N)
+            attn_bias = relative_position_bias.permute(2, 0, 1).unsqueeze(0)
 
-        if mask is None:
-            attn = self.softmax(attn)
+            if mask is not None:
+                nW = mask.shape[0]
+                # mask: (nW, N, N) → (B_, 1, N, N) for broadcast
+                shift_mask = mask[:, :N, :N].unsqueeze(1)  # (nW, 1, N, N)
+                shift_mask = shift_mask.expand(B_ // nW, nW, 1, N, N).reshape(B_, 1, N, N)
+                attn_bias = attn_bias + shift_mask
+
+            x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias, scale=self.scale)
         else:
-            nW = mask.shape[0]
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask[:, :N, :N].unsqueeze(1).unsqueeze(0)
-            attn = attn.view(-1, self.num_heads, N, N)
-            attn = self.softmax(attn)
+            # Mutual attention: no relative position bias
+            if (self.use_flash_attn
+                    and mask is None
+                    and q.dtype in (torch.float16, torch.bfloat16)):
+                # flash_attn_func expects (batch, seqlen, nheads, headdim)
+                q_ = q.transpose(1, 2)
+                k_ = k.transpose(1, 2)
+                v_ = v.transpose(1, 2)
+                x = flash_attn_func(q_, k_, v_, softmax_scale=self.scale)
+                return x.reshape(B_, N, C)
+            else:
+                attn_mask = None
+                if mask is not None:
+                    nW = mask.shape[0]
+                    shift_mask = mask[:, :N, :N].unsqueeze(1)
+                    attn_mask = shift_mask.expand(B_ // nW, nW, 1, N, N).reshape(B_, 1, N, N)
+                x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, scale=self.scale)
 
-        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        x = x.transpose(1, 2).reshape(B_, N, C)
         return x
 
     def get_position_index(self, window_size):

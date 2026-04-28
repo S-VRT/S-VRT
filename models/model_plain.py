@@ -1,6 +1,7 @@
 from collections import OrderedDict
 from contextlib import nullcontext
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import lr_scheduler
@@ -17,6 +18,11 @@ from utils.utils_timer import Timer
 
 
 _TRAINABLE_NAME_MARKERS = ("fusion_adapter", "fusion_operator", "lora_A", "lora_B")
+_KNOWN_UNUSED_NAME_MARKERS = (
+    "fusion_adapter.spike_upsample.refine",
+    "fusion_adapter.early_adapter.spike_upsample.refine",
+    "pa_deform.dcn.offset_mask",
+)
 
 
 def freeze_backbone(model):
@@ -28,6 +34,19 @@ def freeze_backbone(model):
             param.requires_grad = False
 
 
+def freeze_known_unused_parameters(model):
+    """Freeze parameters that are registered but bypassed by the current graph."""
+    frozen = 0
+    if not hasattr(model, 'named_parameters'):
+        return frozen
+    for name, param in model.named_parameters():
+        if any(marker in name for marker in _KNOWN_UNUSED_NAME_MARKERS):
+            if param.requires_grad:
+                frozen += 1
+            param.requires_grad = False
+    return frozen
+
+
 class ModelPlain(ModelBase):
     """Train with pixel loss"""
     def __init__(self, opt):
@@ -37,7 +56,7 @@ class ModelPlain(ModelBase):
         # ------------------------------------
         self.opt_train = self.opt['train']    # training option
         self.netG = define_G(opt)
-        self.netG = self.model_to_device(self.netG)
+        self.netG = self.netG.to(self.device)
         if self.opt_train['E_decay'] > 0:
             self.netE = define_G(opt).to(self.device).eval()
         self.L_flow_spike = None
@@ -202,21 +221,19 @@ class ModelPlain(ModelBase):
     # initialize training
     # ----------------------------------------
     def init_train(self):
-        self.load()                           # load model
         train_opt = self.opt.get('train', {})
         bare_model = self.get_bare_model(self.netG)
 
-        if train_opt.get('use_lora', False):
-            from models.lora import inject_lora
-            targets = train_opt.get('lora_target_modules', ['qkv', 'proj'])
-            rank = int(train_opt.get('lora_rank', 8))
-            alpha = float(train_opt.get('lora_alpha', 16))
-            replaced = inject_lora(bare_model, targets, rank=rank, alpha=alpha)
-            print(f'[Stage C] Injected LoRA(rank={rank}, alpha={alpha}) into '
-                  f'{len(replaced)} Linear layers; targets={targets}')
-            if train_opt.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
-                bare_e = self.get_bare_model(self.netE)
-                inject_lora(bare_e, targets, rank=rank, alpha=alpha)
+        lora_injected = False
+        structure_changed = False
+        if self._should_inject_lora_before_load(train_opt):
+            structure_changed = self._inject_lora_adapters(train_opt, bare_model)
+            lora_injected = True
+
+        self.load()                           # load model
+
+        if train_opt.get('use_lora', False) and not lora_injected:
+            structure_changed = self._inject_lora_adapters(train_opt, bare_model)
 
         if train_opt.get('freeze_backbone', False):
             freeze_backbone(bare_model)
@@ -228,17 +245,79 @@ class ModelPlain(ModelBase):
             frozen_count = sum(1 for p in bare_model.parameters() if not p.requires_grad)
             trainable_count = sum(1 for p in bare_model.parameters() if p.requires_grad)
             print(f'[Stage A/C] Frozen {frozen_count} params, trainable {trainable_count} params')
+        if train_opt.get('freeze_known_unused_parameters', True):
+            known_unused_count = freeze_known_unused_parameters(bare_model)
+            if known_unused_count:
+                print(f'[DDP] Frozen {known_unused_count} known-unused parameter tensors.')
+        self.compile_fusion_modules_if_enabled(bare_model)
+        self._wrap_netG_after_train_setup(bare_model, structure_changed=structure_changed)
         self.netG.train()                     # set training mode,for BN
         self.define_loss()                    # define loss
         self.define_optimizer()               # define optimizer
         self.load_optimizers()                # load optimizer
         self.define_scheduler()               # define scheduler
         self.log_dict = OrderedDict()         # log
-        # 初始化计时器
-        self.timer = Timer(device=self.device, sync_cuda=True)
+        # Optional timing/profiler instrumentation is off by default for production training.
+        timing_cfg = self.opt_train.get('timing', {}) or {}
+        profiler_cfg = self.opt_train.get('profiler', {}) or {}
+        timing_enabled = bool(timing_cfg.get('enable', False))
+        sync_cuda = bool(timing_cfg.get('sync_cuda', self.opt_train.get('sync_cuda_timing', False)))
+        record_ranges = bool(profiler_cfg.get('record_ranges', False))
+        self.timer = Timer(
+            device=self.device,
+            sync_cuda=sync_cuda,
+            enabled=timing_enabled,
+            record_ranges=record_ranges,
+        )
         # 将计时器传递给网络，以便网络内部模块可以使用
         if hasattr(self.get_bare_model(self.netG), 'set_timer'):
             self.get_bare_model(self.netG).set_timer(self.timer)
+
+    def _inject_lora_adapters(self, train_opt, bare_model):
+        from models.lora import inject_lora
+
+        targets = train_opt.get('lora_target_modules', ['qkv', 'proj'])
+        rank = int(train_opt.get('lora_rank', 8))
+        alpha = float(train_opt.get('lora_alpha', 16))
+        replaced = inject_lora(bare_model, targets, rank=rank, alpha=alpha)
+        print(f'[Stage C] Injected LoRA(rank={rank}, alpha={alpha}) into '
+              f'{len(replaced)} Linear layers; targets={targets}')
+        if train_opt.get('E_decay', 0) > 0 and hasattr(self, 'netE'):
+            bare_e = self.get_bare_model(self.netE)
+            inject_lora(bare_e, targets, rank=rank, alpha=alpha)
+        return bool(replaced)
+
+    def _wrap_netG_after_train_setup(self, bare_model, structure_changed=False):
+        if isinstance(self.netG, (nn.DataParallel, nn.parallel.DistributedDataParallel)):
+            if structure_changed:
+                self._rewrap_distributed_netG_after_structure_change(bare_model, reason='LoRA injection')
+            return
+        self.netG = self.model_to_device(bare_model)
+
+    def _rewrap_distributed_netG_after_structure_change(self, bare_model, reason):
+        if not self.opt.get('dist', False):
+            return
+        print(f'[DDP] Re-wrapping netG after {reason} so DDP registers final trainable parameters.')
+        self.netG = self.model_to_device(bare_model)
+
+    def _should_inject_lora_before_load(self, train_opt):
+        if not train_opt.get('use_lora', False):
+            return False
+        path_opt = self.opt.get('path', {})
+        for path_key, param_key in (('pretrained_netG', 'params'), ('pretrained_netE', 'params_ema')):
+            load_path = path_opt.get(path_key)
+            if load_path is not None and self._checkpoint_contains_lora(load_path, param_key=param_key):
+                return True
+        return False
+
+    @staticmethod
+    def _checkpoint_contains_lora(load_path, param_key='params'):
+        state_dict = torch.load(load_path, map_location='cpu')
+        if isinstance(state_dict, dict) and param_key in state_dict:
+            state_dict = state_dict[param_key]
+        if not isinstance(state_dict, dict):
+            return False
+        return any('.lora_A.' in key or '.lora_B.' in key for key in state_dict.keys())
 
     # ----------------------------------------
     # load pre-trained G model
@@ -342,15 +421,17 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     def define_optimizer(self):
         G_optim_params = []
-        for k, v in self.netG.named_parameters():
-            if v.requires_grad:
-                G_optim_params.append(v)
-            else:
-                print('Params [{:s}] will not optimize.'.format(k))
+        for name, param in self.netG.named_parameters():
+            G_optim_params.append(param)
+            if not param.requires_grad:
+                print(f'Params [{name}] are frozen at optimizer build time but kept for later unfreeze.')
         if self.opt_train['G_optimizer_type'] == 'adam':
-            self.G_optimizer = Adam(G_optim_params, lr=self.opt_train['G_optimizer_lr'],
-                                    betas=self.opt_train['G_optimizer_betas'],
-                                    weight_decay=self.opt_train['G_optimizer_wd'])
+            self.G_optimizer = Adam(
+                G_optim_params,
+                lr=self.opt_train['G_optimizer_lr'],
+                betas=self.opt_train['G_optimizer_betas'],
+                weight_decay=self.opt_train['G_optimizer_wd'],
+            )
         else:
             raise NotImplementedError
 
@@ -389,6 +470,37 @@ class ModelPlain(ModelBase):
             and self.fix_iter > 0
             and current_step < self.fix_iter
         )
+
+    def _fusion_warmup_cfg(self) -> dict:
+        return self.opt_train.get("fusion_warmup", {}) or {}
+
+    def _resolve_fusion_warmup_stage(self, current_step):
+        if not self._is_phase1_step(current_step):
+            return "full"
+        head_only_iters = int(self._fusion_warmup_cfg().get("head_only_iters", 0))
+        if current_step < head_only_iters:
+            return "writeback_only"
+        return "token_mixer"
+
+    def _configure_fusion_warmup_trainability(self, current_step):
+        vrt = self.get_bare_model(self.netG)
+        if not getattr(vrt, "fusion_enabled", False):
+            return "full"
+        operator = getattr(getattr(vrt, "fusion_adapter", None), "operator", None)
+        if operator is None or not hasattr(operator, "set_warmup_stage"):
+            return "full"
+        stage = self._resolve_fusion_warmup_stage(current_step)
+        operator.set_warmup_stage(stage)
+        return stage
+
+    def _record_fusion_diagnostics_to_log(self, fusion_meta) -> None:
+        if not isinstance(fusion_meta, dict):
+            return
+        if "warmup_stage" in fusion_meta:
+            self.log_dict["fusion_warmup_stage"] = fusion_meta["warmup_stage"]
+        for key in ("token_norm", "mamba_norm", "delta_norm", "gate_mean", "effective_update_norm"):
+            if key in fusion_meta:
+                self.log_dict[f"fusion_{key}"] = float(fusion_meta[key])
 
     def feed_data(self, data, need_H=True, current_step=None):
         with self.timer.timer('data_load'):
@@ -429,14 +541,26 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     # compute fusion auxiliary loss
     # ----------------------------------------
-    def _compute_fusion_aux_loss(self, is_phase1: bool) -> torch.Tensor:
+    def _resolve_phase1_passthrough_weight(self, current_step) -> float:
+        warmup_cfg = self._fusion_warmup_cfg()
+        start = float(warmup_cfg.get("passthrough_weight_start", self.opt_train.get("fusion_passthrough_loss_weight", 0.0)))
+        end = float(warmup_cfg.get("passthrough_weight_end", self.opt_train.get("fusion_passthrough_loss_weight", 0.0)))
+        if not hasattr(self, "fix_iter") or self.fix_iter <= 1:
+            return end
+        clamped = min(max(int(current_step or 0), 0), self.fix_iter - 1)
+        progress = clamped / float(self.fix_iter - 1)
+        return start + (end - start) * progress
+
+    def _compute_fusion_aux_loss(self, is_phase1: bool, current_step=None) -> torch.Tensor:
         if is_phase1:
             aux_weight = self.opt_train.get('phase1_fusion_aux_loss_weight', 0.0)
-            pass_weight = self.opt_train.get('fusion_passthrough_loss_weight', 0.0)
+            pass_weight = self._resolve_phase1_passthrough_weight(current_step)
+            update_penalty_weight = float(self._fusion_warmup_cfg().get("update_penalty_weight", 0.0))
         else:
             aux_weight = self.opt_train.get('phase2_fusion_aux_loss_weight', 0.0)
             pass_weight = 0.0
-        if aux_weight == 0.0 and pass_weight == 0.0:
+            update_penalty_weight = 0.0
+        if aux_weight == 0.0 and pass_weight == 0.0 and update_penalty_weight == 0.0:
             return torch.tensor(0.0, device=self.device)
         vrt = self.get_bare_model(self.netG)
         fusion_main = getattr(vrt, "_last_fusion_main", None)
@@ -454,7 +578,16 @@ class ModelPlain(ModelBase):
         if pass_weight > 0.0:
             blur_rgb = self.L[:, :, :3, :, :]
             loss = loss + pass_weight * self.G_lossfn(fusion_center, blur_rgb)
+        if update_penalty_weight > 0.0:
+            effective_update = fusion_center - self.L[:, :, :3, :, :]
+            loss = loss + update_penalty_weight * effective_update.abs().mean()
         return loss
+
+    def _has_nonfinite_loss(self, loss: torch.Tensor) -> bool:
+        is_nonfinite = (~torch.isfinite(loss.detach())).to(dtype=torch.int32)
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(is_nonfinite, op=dist.ReduceOp.MAX)
+        return bool(is_nonfinite.item())
 
     # ----------------------------------------
     # phase1 fast-path: only run fusion_adapter, skip full VRT forward
@@ -480,8 +613,9 @@ class ModelPlain(ModelBase):
     # update parameters and get loss
     # ----------------------------------------
     def optimize_parameters(self, current_step):
-        # 重置当前迭代的计时
-        self.timer.current_timings.clear()
+        self._trace_current_step = current_step
+
+        self._configure_fusion_warmup_trainability(current_step)
 
         is_phase1 = (
             hasattr(self, 'fix_iter')
@@ -499,10 +633,16 @@ class ModelPlain(ModelBase):
 
         with self.timer.timer('loss_compute'):
             if is_phase1:
-                G_loss = self._compute_fusion_aux_loss(is_phase1=True)
+                G_loss = self._compute_fusion_aux_loss(is_phase1=True, current_step=current_step)
             else:
                 G_loss = self.G_lossfn_weight * self.G_lossfn(self.E, self.H)
-                G_loss = G_loss + self._compute_fusion_aux_loss(is_phase1=False)
+                G_loss = G_loss + self._compute_fusion_aux_loss(is_phase1=False, current_step=current_step)
+
+        if self._has_nonfinite_loss(G_loss):
+            self.log_dict['G_loss'] = G_loss.detach().item()
+            self.log_dict['nan_guard_skip'] = 1.0
+            self.log_dict['nan_guard_step'] = float(current_step)
+            return
 
         with self.timer.timer('backward'):
             if self.grad_scaler.is_enabled():
@@ -542,6 +682,10 @@ class ModelPlain(ModelBase):
 
         # self.log_dict['G_loss'] = G_loss.item()/self.E.size()[0]  # if `reduction='sum'`
         self.log_dict['G_loss'] = G_loss.item()
+        self.log_dict['nan_guard_skip'] = 0.0
+
+        vrt = self.get_bare_model(self.netG)
+        self._record_fusion_diagnostics_to_log(getattr(vrt, "_last_fusion_meta", None))
 
         if self.opt_train['E_decay'] > 0:
             with self.timer.timer('update_E'):

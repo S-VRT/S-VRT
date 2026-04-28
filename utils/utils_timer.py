@@ -7,7 +7,7 @@
 import time
 import torch
 from collections import OrderedDict
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 
 class Timer:
@@ -16,7 +16,7 @@ class Timer:
     支持CPU和GPU计时，自动处理GPU同步
     """
     
-    def __init__(self, device=None, sync_cuda=True):
+    def __init__(self, device=None, sync_cuda=True, enabled=True, record_ranges=False):
         """
         初始化计时器
         
@@ -24,8 +24,10 @@ class Timer:
             device: torch.device，用于判断是否需要GPU同步
             sync_cuda: bool，是否在GPU操作后进行同步（确保准确计时）
         """
+        self.enabled = bool(enabled)
+        self.record_ranges = bool(record_ranges)
         self.device = device
-        self.sync_cuda = sync_cuda and (device is not None and device.type == 'cuda')
+        self.sync_cuda = self.enabled and sync_cuda and (device is not None and device.type == 'cuda')
         self.timings = OrderedDict()  # 存储各个模块的耗时列表
         self.counts = OrderedDict()   # 存储各个模块的调用次数
         self.current_timings = {}     # 当前迭代的耗时
@@ -45,6 +47,9 @@ class Timer:
             with timer.timer('forward'):
                 output = model(input)
         """
+        if not self.enabled:
+            yield
+            return
         if self.sync_cuda:
             torch.cuda.synchronize(self.device)
         start_time = time.time()
@@ -63,6 +68,11 @@ class Timer:
             self.timings[name].append(elapsed_time)
             self.counts[name] += 1
             self.current_timings[name] = elapsed_time
+
+    def profile_range(self, name):
+        if self.record_ranges:
+            return torch.profiler.record_function(name)
+        return nullcontext()
     
     def start(self, name):
         """
@@ -71,6 +81,8 @@ class Timer:
         Args:
             name: 计时器名称
         """
+        if not self.enabled:
+            return
         if self.sync_cuda:
             torch.cuda.synchronize(self.device)
         self._start_times = getattr(self, '_start_times', {})
@@ -86,6 +98,8 @@ class Timer:
         Returns:
             float: 耗时（秒）
         """
+        if not self.enabled:
+            return 0.0
         if self.sync_cuda:
             torch.cuda.synchronize(self.device)
         end_time = time.time()
@@ -205,4 +219,3 @@ class Timer:
             parts.append(f"{name}={time:.4f}s")
         
         return " ".join(parts)
-

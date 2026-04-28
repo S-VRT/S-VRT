@@ -124,6 +124,7 @@ class VRT(nn.Module):
                  sgp_reduction=4,
                  sgp_use_partitioned=True,
                  use_flash_attn=True,
+                 pa_fuse_amp_policy='fp32',
                  dcn_config=None,  # DCN configuration dict: {'type': 'DCNv2'/'DCNv4', 'apply_softmax': bool}
                  opt=None):  # Global configuration for initialization
         super().__init__()
@@ -157,6 +158,7 @@ class VRT(nn.Module):
         self.nonblind_denoising = nonblind_denoising
         self.use_sgp = use_sgp
         self.use_flash_attn = use_flash_attn
+        self.pa_fuse_amp_policy = str(pa_fuse_amp_policy).strip().lower()
 
         # Parse DCN configuration
         self.dcn_config = dcn_config or {}
@@ -200,6 +202,21 @@ class VRT(nn.Module):
             early_out_chans = int(early_cfg.get('out_chans', fusion_out_chans))
             middle_out_chans = int(middle_cfg.get('out_chans', fusion_out_chans))
             spike_input_chans = self.in_chans - 3
+            operator_name = fusion_cfg.get('operator', 'concat')
+            normalized_operator_name = str(operator_name).strip().lower()
+            requested_frame_contract = str(early_cfg.get('frame_contract', 'operator_default')).strip().lower()
+            allowed_frame_contracts = {'operator_default', 'collapsed', 'expanded'}
+            if requested_frame_contract not in allowed_frame_contracts:
+                raise ValueError(
+                    f"Unsupported fusion.early.frame_contract={requested_frame_contract!r}; "
+                    "expected one of: operator_default, collapsed, expanded"
+                )
+            operator_default_contract = 'collapsed' if normalized_operator_name == 'mamba' else 'expanded'
+            effective_frame_contract = (
+                operator_default_contract
+                if requested_frame_contract == 'operator_default'
+                else requested_frame_contract
+            )
 
             middle_rgb_chans = None
             middle_spike_chans = None
@@ -270,14 +287,13 @@ class VRT(nn.Module):
                 if str(recon_type).strip().lower() != 'spikecv_tfp':
                     raise ValueError("full-T early fusion requires spikecv_tfp")
 
-            operator_name = fusion_cfg.get('operator', 'concat')
             operator_params = fusion_cfg.get('operator_params', {})
-            if operator_name == 'mamba':
+            if normalized_operator_name == 'mamba':
                 if fusion_placement != 'early':
                     raise ValueError("fusion.operator='mamba' requires fusion.placement='early'.")
                 if early_out_chans != 3:
                     raise ValueError("fusion.operator='mamba' requires fusion.out_chans=3 for early fusion.")
-                if bool(early_cfg.get('expand_to_full_t', False)):
+                if bool(early_cfg.get('expand_to_full_t', False)) and effective_frame_contract == 'collapsed':
                     raise ValueError("fusion.operator='mamba' does not support fusion.early.expand_to_full_t=true.")
             if fusion_placement == 'early':
                 self.fusion_operator = create_fusion_operator(
@@ -293,6 +309,7 @@ class VRT(nn.Module):
                     mode=fusion_mode,
                     inject_stages=inject_stages,
                     spike_chans=spike_input_chans,
+                    frame_contract=requested_frame_contract,
                 )
             elif fusion_placement == 'middle':
                 self.fusion_operator = create_fusion_operator(
@@ -332,6 +349,7 @@ class VRT(nn.Module):
                     mode=fusion_mode,
                     inject_stages=inject_stages,
                     spike_chans=spike_input_chans,
+                    frame_contract=requested_frame_contract,
                 )
 
         if self.fusion_enabled and fusion_placement in {'early', 'hybrid'}:
@@ -416,6 +434,7 @@ class VRT(nn.Module):
                         sgp_reduction=sgp_reduction,
                         sgp_use_partitioned=sgp_use_partitioned,
                         use_flash_attn=use_flash_attn,
+                        pa_fuse_amp_policy=self.pa_fuse_amp_policy,
                         dcn_config={'type': self.dcn_type, 'apply_softmax': self.dcn_apply_softmax})
                     )
 
@@ -492,6 +511,17 @@ class VRT(nn.Module):
     def set_timer(self, timer):
         """Inject a Timer instance for optional timing measurement."""
         self.timer = timer
+        for index in range(1, 12):
+            set_timer = getattr(getattr(self, f'stage{index}', None), 'set_timer', None)
+            if callable(set_timer):
+                set_timer(timer)
+        for target in (
+            getattr(self, 'fusion_operator', None),
+            getattr(getattr(self, 'fusion_adapter', None), 'operator', None),
+        ):
+            set_timer = getattr(target, 'set_timer', None)
+            if callable(set_timer):
+                set_timer(timer)
 
     def set_input_path_marker(self, marker):
         valid = {INPUT_PATH_CONCAT, INPUT_PATH_DUAL, INPUT_PATH_DUAL_FALLBACK}
