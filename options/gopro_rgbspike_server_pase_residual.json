@@ -266,9 +266,8 @@
       "mode": "replace",
       "out_chans": 3,
       "operator_params": {
-        "feature_chans": 48,
+        "body_chans": 48,
         "hidden_chans": 32,
-        "pase_hidden_chans": 32,
         "kernel_size": 3,
         "normalize_kernel": true,
         "alpha_init": 0.05,
@@ -605,7 +604,7 @@
     ,
     "use_wandb": true
     ,
-    "wandb_api_key": "ae83599fc8904d8986df7ba9e6f3328e042dcfb2"
+    "wandb_api_key": null
     ,
     "wandb_project": "Deblur"
     ,
@@ -617,7 +616,7 @@
     ,
     "use_swanlab": true
     ,
-    "swanlab_api_key": "3kZbeukQu2WMZqtP4WWbr"
+    "swanlab_api_key": null
     ,
     "swanlab_project": "S-VRT"
     ,
@@ -631,7 +630,7 @@
     ,
     "use_logfire": true
     ,
-    "logfire_token": "pylf_v1_us_tKLqw6SSVrXQtH7Ts1xDyG2vz2n0pCPRBScS1fbXTwMx"
+    "logfire_token": null
     ,
     "logfire_project_name": "Deblur"
     ,
