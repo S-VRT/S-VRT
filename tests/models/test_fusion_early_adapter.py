@@ -44,16 +44,17 @@ def test_concat_operator_shape():
 
 
 @pytest.mark.parametrize(
-    ("operator_name", "expected_frame_contract"),
+    ("operator_name", "rgb_chans", "spike_chans", "expected_frame_contract"),
     [
-        ("gated", "expanded"),
-        ("concat", "expanded"),
-        ("pase", "expanded"),
-        ("mamba", "collapsed"),
+        ("gated", 3, 1, "expanded"),
+        ("concat", 3, 1, "expanded"),
+        ("pase", 3, 1, "expanded"),
+        ("mamba", 3, 1, "collapsed"),
+        ("pase_residual", 3, 4, "collapsed"),
     ],
 )
-def test_fusion_operator_frame_contract_metadata(operator_name, expected_frame_contract):
-    op = create_fusion_operator(operator_name, 3, 1, 3, {})
+def test_fusion_operator_frame_contract_metadata(operator_name, rgb_chans, spike_chans, expected_frame_contract):
+    op = create_fusion_operator(operator_name, rgb_chans, spike_chans, 3, {})
     assert getattr(op, "frame_contract", None) == expected_frame_contract
 
 
@@ -551,3 +552,68 @@ def test_mamba_operator_token_chunk_size_splits_mixer_work():
 
     assert out.shape == rgb.shape
     assert counter.chunk_shapes == [(10, 4, 8), (10, 4, 8), (10, 4, 8), (2, 4, 8)]
+
+
+def test_pase_residual_operator_shape():
+    op = create_fusion_operator("pase_residual", 3, 4, 3, {})
+    rgb = torch.randn(2, 5, 3, 12, 12)
+    spike = torch.randn(2, 5, 4, 12, 12)
+
+    out = op(rgb, spike)
+
+    assert out.shape == (2, 5, 3, 12, 12)
+
+
+def test_pase_residual_operator_small_output_non_degenerate_init():
+    op = create_fusion_operator(
+        "pase_residual",
+        3,
+        6,
+        3,
+        {
+            "alpha_init": 0.05,
+            "gate_bias_init": -2.0,
+            "enable_diagnostics": True,
+        },
+    )
+    rgb = torch.ones(1, 2, 3, 8, 8) * 0.5
+    spike = torch.zeros(1, 2, 6, 8, 8)
+
+    out = op(rgb, spike)
+
+    max_diff = (out - rgb).abs().max().item()
+    diagnostics = op.diagnostics()
+    assert 1e-7 < max_diff < 1e-2
+    assert 1e-7 < diagnostics["effective_update_norm"] < 1e-2
+
+    loss = (out - rgb).abs().mean()
+    loss.backward()
+
+    delta_grad = op.fusion_writeback_head["delta"].weight.grad
+    gate_grad = op.fusion_writeback_head["gate"].weight.grad
+    assert delta_grad is not None and delta_grad.abs().sum().item() > 0.0
+    assert gate_grad is not None and gate_grad.abs().sum().item() > 0.0
+
+
+def test_pase_residual_operator_writeback_only_stage_freezes_feature_paths():
+    op = create_fusion_operator("pase_residual", 3, 1, 3, {})
+
+    op.set_warmup_stage("writeback_only")
+
+    assert all(not p.requires_grad for p in op.rgb_context_encoder.parameters())
+    assert all(not p.requires_grad for p in op.pase.parameters())
+    assert all(not p.requires_grad for p in op.fusion_body.parameters())
+    assert all(p.requires_grad for p in op.fusion_writeback_head.parameters())
+    assert op.alpha.requires_grad is True
+
+
+def test_pase_residual_operator_token_mixer_stage_unfreezes_all_feature_paths():
+    op = create_fusion_operator("pase_residual", 3, 1, 3, {})
+
+    op.set_warmup_stage("token_mixer")
+
+    assert all(p.requires_grad for p in op.rgb_context_encoder.parameters())
+    assert all(p.requires_grad for p in op.pase.parameters())
+    assert all(p.requires_grad for p in op.fusion_body.parameters())
+    assert all(p.requires_grad for p in op.fusion_writeback_head.parameters())
+    assert op.alpha.requires_grad is True

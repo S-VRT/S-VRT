@@ -28,8 +28,10 @@ from scripts.analysis.fusion_attr.maps import (
     compute_error_map,
     compute_fusion_delta,
     gradient_activation_cam,
+    integrated_gradients_map,
     normalize_map,
 )
+from scripts.analysis.fusion_attr.pca import pca_feature_heatmap, pca_variance_ratio
 from scripts.analysis.fusion_attr.panels import make_six_column_panel
 from scripts.analysis.fusion_attr.probes import FusionProbe, find_fusion_adapter, reduce_operator_explanations
 from scripts.analysis.fusion_attr.targets import build_box_mask, masked_charbonnier_target
@@ -53,6 +55,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--perturb-spike", default="zero", choices=["zero", "shuffle", "noise", "temporal-drop"])
     parser.add_argument("--mask-source", default="manual", choices=["manual", "motion", "error-topk"])
     parser.add_argument("--dry-run", action="store_true", help="Validate inputs and write manifest without loading model")
+    parser.add_argument("--save-ig", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--ig-steps", type=int, default=32)
+    parser.add_argument("--save-pca", action=argparse.BooleanOptionalAction, default=False)
     return parser
 
 
@@ -219,20 +224,66 @@ def main(argv: list[str] | None = None) -> int:
             if "effective_update" in reduced:
                 fusion_specific_path = maps_dir / "effective_update.png"
 
+        metadata: dict = {
+            "sample_id": f"{sample.clip}_{sample.frame}",
+            "frame_index": sample.frame_index,
+            "mask_type": sample.mask_type,
+            "mask_xyxy": list(sample.xyxy),
+            "mask_label": sample.mask_label,
+            "target": args.target,
+            "cam_method": args.cam_method,
+            "checkpoint": args.checkpoint,
+            "opt": args.opt,
+            "probe_module": probe.record.module_name,
+        }
+
+        if args.save_ig:
+            rgb_input = select_center_frame_tensor(lq[:, :, :3]).detach()
+            spike_input = select_center_frame_tensor(lq[:, :, 3:]).detach()
+
+            def rgb_model(rgb_only):
+                fused = torch.cat([rgb_only, spike_input], dim=1)
+                out = model.netG(fused.unsqueeze(1))
+                return select_center_frame_tensor(out if not isinstance(out, (tuple, list)) else out[0])
+
+            def spike_model(spike_only):
+                fused = torch.cat([rgb_input, spike_only], dim=1)
+                out = model.netG(fused.unsqueeze(1))
+                return select_center_frame_tensor(out if not isinstance(out, (tuple, list)) else out[0])
+
+            def target_fn(restored):
+                return masked_charbonnier_target(restored, center_gt, mask)
+
+            ig_rgb = integrated_gradients_map(
+                rgb_model,
+                rgb_input,
+                torch.zeros_like(rgb_input),
+                target_fn,
+                steps=args.ig_steps,
+            )
+            ig_spike = integrated_gradients_map(
+                spike_model,
+                spike_input,
+                torch.zeros_like(spike_input),
+                target_fn,
+                steps=args.ig_steps,
+            )
+            save_gray_map_png(maps_dir / "ig_rgb.png", normalize_map(ig_rgb))
+            save_gray_map_png(maps_dir / "ig_spike.png", normalize_map(ig_spike))
+
+        if args.save_pca and operator is not None and hasattr(operator, "explain"):
+            raw = operator.explain()
+            for name in ("effective_update", "delta", "token_energy"):
+                if name in raw:
+                    pca_map = pca_feature_heatmap(raw[name])
+                    np.save(str(maps_dir / f"{name}_pca.npy"), pca_map.detach().cpu().numpy())
+                    save_gray_map_png(maps_dir / f"{name}_pca.png", normalize_map(pca_map))
+                    variance = pca_variance_ratio(raw[name])[:3].detach().cpu().tolist()
+                    metadata.setdefault("pca_variance_ratio", {})[name] = variance
+
         write_json(
             sample_dir / "metadata.json",
-            {
-                "sample_id": f"{sample.clip}_{sample.frame}",
-                "frame_index": sample.frame_index,
-                "mask_type": sample.mask_type,
-                "mask_xyxy": list(sample.xyxy),
-                "mask_label": sample.mask_label,
-                "target": args.target,
-                "cam_method": args.cam_method,
-                "checkpoint": args.checkpoint,
-                "opt": args.opt,
-                "probe_module": probe.record.module_name,
-            },
+            metadata,
         )
 
         panel_images = {

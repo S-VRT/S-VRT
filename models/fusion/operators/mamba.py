@@ -85,6 +85,7 @@ class MambaFusionOperator(nn.Module):
         self.alpha = nn.Parameter(torch.full((1, 3, 1, 1), alpha_init))
         self._warmup_stage = "full"
         self._last_diagnostics: dict = {"warmup_stage": "full"}
+        self._last_explain: dict[str, torch.Tensor] | None = None
 
         nn.init.normal_(self.fusion_writeback_head["delta"].weight, std=1e-3)
         nn.init.zeros_(self.fusion_writeback_head["delta"].bias)
@@ -238,6 +239,22 @@ class MambaFusionOperator(nn.Module):
         effective_update = self.alpha.view(1, 1, 3, 1, 1) * gate * delta
         out = rgb_feat + effective_update
 
+        token_energy = spike_tokens.detach().float().norm(dim=-1).mean(dim=-1)
+        token_energy = token_energy.reshape(bsz, steps, token_h, token_w)
+        token_energy = F.interpolate(
+            token_energy.reshape(bsz * steps, 1, token_h, token_w),
+            size=(height, width),
+            mode="bilinear",
+            align_corners=False,
+        ).reshape(bsz, steps, 1, height, width)
+
+        self._last_explain = {
+            "gate": gate.detach(),
+            "delta": delta.detach(),
+            "effective_update": effective_update.detach(),
+            "token_energy": token_energy.detach(),
+        }
+
         if self.enable_diagnostics:
             self._last_diagnostics = {
                 "token_norm": float(spike_tokens.detach().float().norm(dim=-1).mean().item()),
@@ -250,6 +267,11 @@ class MambaFusionOperator(nn.Module):
         else:
             self._last_diagnostics = {"warmup_stage": self._warmup_stage}
         return out
+
+    def explain(self) -> dict[str, torch.Tensor]:
+        if self._last_explain is None:
+            return {}
+        return dict(self._last_explain)
 
 
 __all__ = ['MambaFusionOperator']
