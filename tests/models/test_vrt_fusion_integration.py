@@ -1041,9 +1041,10 @@ def test_vrt_rejects_mamba_with_full_t_early_expansion():
 
 
 def test_vrt_builds_with_pase_residual_collapsed_fusion_config():
+    in_chans = 7
     model = VRT(
         upscale=1,
-        in_chans=7,
+        in_chans=in_chans,
         out_chans=3,
         img_size=[2, 8, 8],
         window_size=[2, 4, 4],
@@ -1068,7 +1069,7 @@ def test_vrt_builds_with_pase_residual_collapsed_fusion_config():
     )
 
     assert model.fusion_operator is not None
-    assert model.fusion_operator.spike_chans == 4
+    assert model.fusion_operator.spike_chans == in_chans - 3
     assert model.fusion_adapter.frame_contract == "collapsed"
 
 

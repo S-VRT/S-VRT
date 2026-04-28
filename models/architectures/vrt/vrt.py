@@ -211,7 +211,7 @@ class VRT(nn.Module):
                     f"Unsupported fusion.early.frame_contract={requested_frame_contract!r}; "
                     "expected one of: operator_default, collapsed, expanded"
                 )
-            operator_default_contract = 'collapsed' if normalized_operator_name == 'mamba' else 'expanded'
+            operator_default_contract = 'collapsed' if normalized_operator_name in {'mamba', 'pase_residual'} else 'expanded'
             effective_frame_contract = (
                 operator_default_contract
                 if requested_frame_contract == 'operator_default'
