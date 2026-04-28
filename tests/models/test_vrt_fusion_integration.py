@@ -1040,6 +1040,67 @@ def test_vrt_rejects_mamba_with_full_t_early_expansion():
         )
 
 
+def test_vrt_builds_with_pase_residual_collapsed_fusion_config():
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt={
+            "netG": {
+                "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 7},
+                "fusion": {
+                    "placement": "early",
+                    "operator": "pase_residual",
+                    "out_chans": 3,
+                    "early": {"frame_contract": "collapsed"},
+                },
+            }
+        },
+    )
+
+    assert model.fusion_operator is not None
+    assert model.fusion_operator.spike_chans == 4
+    assert model.fusion_adapter.frame_contract == "collapsed"
+
+
+def test_vrt_rejects_pase_residual_expanded_frame_contract():
+    with pytest.raises(ValueError, match="pase_residual"):
+        VRT(
+            upscale=1,
+            in_chans=11,
+            out_chans=3,
+            img_size=[2, 8, 8],
+            window_size=[2, 4, 4],
+            depths=[1] * 8,
+            indep_reconsts=[],
+            embed_dims=[16] * 8,
+            num_heads=[1] * 8,
+            pa_frames=2,
+            use_flash_attn=False,
+            optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+            opt={
+                "netG": {
+                    "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 11},
+                    "fusion": {
+                        "placement": "early",
+                        "operator": "pase_residual",
+                        "out_chans": 3,
+                        "early": {"frame_contract": "expanded"},
+                    },
+                }
+            },
+        )
+
+
 def test_model_vrt_optimize_parameters_switches_mamba_warmup_stage_and_phase2_unfreezes(monkeypatch):
     from collections import OrderedDict
     from contextlib import nullcontext

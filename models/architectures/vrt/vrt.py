@@ -295,11 +295,20 @@ class VRT(nn.Module):
                     raise ValueError("fusion.operator='mamba' requires fusion.out_chans=3 for early fusion.")
                 if bool(early_cfg.get('expand_to_full_t', False)) and effective_frame_contract == 'collapsed':
                     raise ValueError("fusion.operator='mamba' does not support fusion.early.expand_to_full_t=true.")
+            if normalized_operator_name == 'pase_residual':
+                if fusion_placement != 'early':
+                    raise ValueError("fusion.operator='pase_residual' requires fusion.placement='early'.")
+                if early_out_chans != 3:
+                    raise ValueError("fusion.operator='pase_residual' requires fusion.out_chans=3 for early fusion.")
+                if effective_frame_contract != 'collapsed':
+                    raise ValueError("fusion.operator='pase_residual' requires fusion.early.frame_contract='collapsed'.")
+
+            early_operator_spike_chans = spike_input_chans if normalized_operator_name == 'pase_residual' else 1
             if fusion_placement == 'early':
                 self.fusion_operator = create_fusion_operator(
                     operator_name=operator_name,
                     rgb_chans=3,
-                    spike_chans=1,
+                    spike_chans=early_operator_spike_chans,
                     out_chans=early_out_chans,
                     operator_params=operator_params,
                 )
@@ -329,7 +338,7 @@ class VRT(nn.Module):
                 early_operator = create_fusion_operator(
                     operator_name=operator_name,
                     rgb_chans=3,
-                    spike_chans=1,
+                    spike_chans=early_operator_spike_chans,
                     out_chans=early_out_chans,
                     operator_params=operator_params,
                 )
