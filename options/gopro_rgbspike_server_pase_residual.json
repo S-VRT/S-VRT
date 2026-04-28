@@ -266,7 +266,7 @@
       "mode": "replace",
       "out_chans": 3,
       "operator_params": {
-        "body_chans": 48,
+        "feature_chans": 48,
         "hidden_chans": 32,
         "kernel_size": 3,
         "normalize_kernel": true,

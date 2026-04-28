@@ -23,35 +23,35 @@ class PaseResidualFusionOperator(nn.Module):
         pase_kernel_size = int(operator_params.get("kernel_size", 3))
         pase_hidden_chans = int(operator_params.get("hidden_chans", 32))
         pase_normalize_kernel = bool(operator_params.get("normalize_kernel", True))
-        body_chans = int(operator_params.get("body_chans", 48))
+        feature_chans = int(operator_params.get("feature_chans", operator_params.get("hidden_chans", 48)))
         alpha_init = float(operator_params.get("alpha_init", 0.05))
         gate_bias_init = float(operator_params.get("gate_bias_init", operator_params.get("init_gate_bias", -2.0)))
         enable_diagnostics = bool(operator_params.get("enable_diagnostics", False))
 
         self.enable_diagnostics = enable_diagnostics
         self.rgb_context_encoder = nn.Sequential(
-            nn.Conv2d(3, body_chans, kernel_size=3, padding=1),
+            nn.Conv2d(3, feature_chans, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(body_chans, body_chans, kernel_size=3, padding=1),
+            nn.Conv2d(feature_chans, feature_chans, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
         )
         self.pase = PixelAdaptiveSpikeEncoder(
             in_chans=spike_chans,
-            out_chans=body_chans,
+            out_chans=feature_chans,
             kernel_size=pase_kernel_size,
             hidden_chans=pase_hidden_chans,
             normalize_kernel=pase_normalize_kernel,
         )
         self.fusion_body = nn.Sequential(
-            nn.Conv2d(body_chans, body_chans, kernel_size=3, padding=1),
+            nn.Conv2d(feature_chans, feature_chans, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(body_chans, body_chans, kernel_size=3, padding=1),
+            nn.Conv2d(feature_chans, feature_chans, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
         )
         self.fusion_writeback_head = nn.ModuleDict(
             {
-                "delta": nn.Conv2d(body_chans, 3, kernel_size=1),
-                "gate": nn.Conv2d(body_chans, 3, kernel_size=1),
+                "delta": nn.Conv2d(feature_chans, 3, kernel_size=1),
+                "gate": nn.Conv2d(feature_chans, 3, kernel_size=1),
             }
         )
         self.alpha = nn.Parameter(torch.full((1, 3, 1, 1), alpha_init))
