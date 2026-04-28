@@ -53,3 +53,45 @@ def test_reduce_operator_explanations_converts_tensors_to_2d_maps():
     assert reduced["gate_mean"].shape == (4, 5)
     assert reduced["effective_update"].shape == (4, 5)
     assert reduced["gate_mean"].max().item() == 1.0
+
+
+from models.fusion.operators.mamba import MambaFusionOperator
+
+
+def test_mamba_operator_explain_exports_effective_update_without_ssm_dependency():
+    op = MambaFusionOperator(
+        rgb_chans=3,
+        spike_chans=1,
+        out_chans=3,
+        operator_params={
+            "token_dim": 8,
+            "token_stride": 2,
+            "num_layers": 0,
+            "enable_diagnostics": True,
+        },
+    )
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+
+    _ = op(rgb, spike)
+
+    maps = op.explain()
+    assert set(maps) >= {"gate", "delta", "effective_update", "token_energy"}
+    assert maps["effective_update"].shape == rgb.shape
+    assert maps["gate"].shape == rgb.shape
+
+
+def test_reduce_operator_explanations_accepts_mamba_specific_maps():
+    explanations = {
+        "gate": torch.ones(1, 2, 3, 4, 5),
+        "delta": torch.ones(1, 2, 3, 4, 5) * 2,
+        "effective_update": torch.ones(1, 2, 3, 4, 5) * 3,
+        "token_energy": torch.ones(1, 2, 1, 4, 5) * 4,
+    }
+
+    reduced = reduce_operator_explanations(explanations)
+
+    assert reduced["gate_mean"].shape == (4, 5)
+    assert reduced["delta"].shape == (4, 5)
+    assert reduced["effective_update"].shape == (4, 5)
+    assert reduced["token_energy"].shape == (4, 5)
