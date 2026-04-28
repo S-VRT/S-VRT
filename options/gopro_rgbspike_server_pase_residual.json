@@ -1,0 +1,648 @@
+{
+  // ========================================
+  // 基础配置
+  // ========================================
+  // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
+  "task": "gopro_tfp4_scflow_pase_residual"
+  // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
+  ,
+  "model": "vrt"
+  // ========================================
+  // 分布式训练配置
+  // ========================================
+  ,
+  "gpu_ids": [
+    0,
+    1,
+    2
+  ]
+  // 是否启用分布式训练：true 表示启用，会自动检测环境变量
+  ,
+  "dist": true
+  // 是否查找未使用的参数：false 表示不查找，可以提高训练速度
+  ,
+  "find_unused_parameters": true
+  // 是否使用静态图：true 表示使用静态图优化，可以提高训练效率
+  ,
+  "use_static_graph": false
+  // 图像缩放因子：1 表示不进行缩放（保持原始分辨率）
+  ,
+  "scale": 1
+  // 输出图像通道数：3 表示输出 RGB 三通道图像（GT 图像的通道数）
+  ,
+  "n_channels": 3
+  // ========================================
+  // 路径配置
+  // ========================================
+  ,
+  "path": {
+    // 实验根目录：所有输出文件（模型、日志、图像等）的保存路径
+    "root": "experiments"
+    ,
+    "pretrained_netG": "weights/vrt/006_VRT_videodeblurring_GoPro.pth"
+    ,
+    "pretrained_netE": null
+  }
+  // ========================================
+  // 数据集配置
+  // ========================================
+  ,
+  "datasets": {
+    // 训练数据集配置
+    "train": {
+      // 数据集名称：用于标识数据集
+      "name": "train_dataset"
+      ,
+      "dataset_type": "TrainDatasetRGBSpike"
+      ,
+      "dataroot_gt": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/train_GT"
+      ,
+      "dataroot_lq": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/train_GT_blurred"
+      ,
+      "dataroot_spike": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train"
+      ,
+      "spike_h": 360
+      ,
+      "spike_w": 640
+      ,
+      "spike_config": {
+        "path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/config.yaml",
+        "spike_h": 360,
+        "spike_w": 640,
+        "is_labeled": false,
+        "labeled_data_type": [
+          0
+        ]
+      }
+      ,
+      "spike_channels": 4
+      ,
+      "input_pack_mode": "dual"
+      ,
+      "compat": {
+        "keep_legacy_L": true
+      }
+      ,
+      "keep_legacy_l": true
+      ,
+      "spike": {
+        "reconstruction": {
+          "type": "spikecv_tfp",
+          "num_bins": 4
+        },
+        "precomputed": {
+          "enable": true,
+          "root": "auto",
+          "format": "npy"
+        }
+      }
+      ,
+      "spike_reconstruction": {
+        "type": "spikecv_tfp"
+      }
+      ,
+      "spike_flow": {
+        "representation": "encoding25",
+        "dt": 10,
+        "root": "auto",
+        "subframes": 4
+      }
+      ,
+      "spike_flipud": true
+      ,
+      "tfp_device": "cpu"
+      ,
+      "tfp_devices": ["cuda:0","cuda:1","cuda:2","cuda:3"]
+      ,
+      "rgb_normalize": null
+      ,
+      "spike_normalize": {
+        "mean": [0.0, 0.0, 0.0, 0.0],
+        "std": [1.0, 1.0, 1.0, 1.0]
+      }
+      ,
+      "meta_info_file": "data/meta_info/meta_info_GoPro_train_GT.txt"
+      ,
+      "filename_tmpl": "06d"
+      ,
+      "filename_ext": "png"
+      ,
+      "test_mode": false
+      ,
+      "io_backend": {
+        "type": "lmdb"
+      }
+      ,
+      "scale": 1
+      ,
+      "num_frame": 6
+      ,
+      "gt_size": [192, 128]
+      ,
+      "interval_list": [
+        1
+      ]
+      ,
+      "random_reverse": false
+      ,
+      "use_hflip": true
+      ,
+      "use_rot": true
+      ,
+      "dataloader_shuffle": true
+      ,
+      "dataloader_num_workers": 32
+      ,
+      "dataloader_batch_size": [32, 16]
+      ,
+      "dataloader_prefetch_factor": 2
+      ,
+      "dataloader_persistent_workers": true
+    }
+    ,
+    "test": {
+      "name": "test_dataset"
+      ,
+      "dataset_type": "TrainDatasetRGBSpike"
+      ,
+      "dataroot_gt": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/test_GT"
+      ,
+      "dataroot_lq": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/test_GT_blurred"
+      ,
+      "dataroot_spike": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/test"
+      ,
+      "meta_info_file": "data/meta_info/meta_info_GoPro_test_GT.txt"
+      ,
+      "spike_h": 360
+      ,
+      "spike_w": 640
+      ,
+      "spike_channels": 4
+      ,
+      "input_pack_mode": "dual"
+      ,
+      "compat": {
+        "keep_legacy_L": true
+      }
+      ,
+      "keep_legacy_l": true
+      ,
+      "spike": {
+        "reconstruction": {
+          "type": "spikecv_tfp",
+          "num_bins": 4
+        },
+        "precomputed": {
+          "enable": true,
+          "root": "auto",
+          "format": "npy"
+        }
+      }
+      ,
+      "spike_reconstruction": {
+        "type": "spikecv_tfp"
+      }
+      ,
+      "spike_flow": {
+        "representation": "encoding25",
+        "dt": 10,
+        "root": "auto",
+        "subframes": 4
+      }
+      ,
+      "spike_flipud": true
+      ,
+      "rgb_normalize": null
+      ,
+      "spike_normalize": {
+        "mean": [0.0, 0.0, 0.0, 0.0],
+        "std": [1.0, 1.0, 1.0, 1.0]
+      }
+      ,
+      "tfp_half_win_length": 20
+      ,
+      "tfp_device": "cpu"
+      ,
+      "tfp_devices": ["cuda:0","cuda:1","cuda:2","cuda:3"]
+      ,
+      "spike_folder_name": "spike"
+      ,
+      "spike_filename_ext": "dat"
+      ,
+      "cache_data": false
+      ,
+      "io_backend": {
+        "type": "lmdb"
+      }
+      ,
+      "num_frame": -1
+      ,
+      "dataloader_shuffle": false
+      ,
+      "dataloader_num_workers": 12
+      ,
+      "dataloader_batch_size": 2
+    }
+  }
+  // ========================================
+  // 生成器网络（Generator）配置
+  // ========================================
+  ,
+  "netG": {
+    "net_type": "vrt"
+    ,
+    "input": {
+      "strategy": "fusion",
+      "mode": "dual",
+      "raw_ingress_chans": 7
+    }
+    ,
+    "concat": {}
+    ,
+    "fusion": {
+      "enable": true,
+      "placement": "early",
+      "operator": "pase_residual",
+      "mode": "replace",
+      "out_chans": 3,
+      "operator_params": {
+        "feature_chans": 48,
+        "hidden_chans": 32,
+        "pase_hidden_chans": 32,
+        "kernel_size": 3,
+        "normalize_kernel": true,
+        "alpha_init": 0.05,
+        "gate_bias_init": -2.0,
+        "enable_diagnostics": true
+      },
+      "early": {
+        "frame_contract": "collapsed"
+      }
+    }
+    ,
+    "input_mode": "dual"
+    ,
+    "output_mode": "restoration"
+    ,
+    "restoration_reducer": {
+      "type": "index",
+      "index": 4
+    }
+    ,
+    "spike_encoder": {
+      "enable": false,
+      "type": "pase",
+      "checkpoint": null,
+      "params": {}
+    }
+    ,
+    "in_chans": 7
+    ,
+    "upscale": 1
+    ,
+    "img_size": [
+      6,
+      96,
+      96
+    ]
+    ,
+    "window_size": [
+      6,
+      8,
+      8
+    ]
+    ,
+    "depths": [
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      4,
+      4,
+      4,
+      4
+    ]
+    ,
+    "indep_reconsts": [
+      9,
+      10
+    ]
+    ,
+    "embed_dims": [
+      96,
+      96,
+      96,
+      96,
+      96,
+      96,
+      96,
+      120,
+      120,
+      120,
+      120
+    ]
+    ,
+    "num_heads": [
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6
+    ]
+    ,
+    "optical_flow": {
+      "module": "scflow",
+      "checkpoint": "weights/optical_flow/dt10_e40.pth",
+      "params": {}
+    }
+    ,
+    "pa_frames": 2
+    ,
+    "dcn_type": "DCNv4"
+    ,
+    "dcn_apply_softmax": false
+    ,
+    "deformable_groups": 16
+    ,
+    "pa_fuse_amp_policy": "fp32"
+    ,
+    "nonblind_denoising": false
+    ,
+    "use_checkpoint_attn": true
+    ,
+    "use_checkpoint_ffn": true
+    ,
+    "no_checkpoint_attn_blocks": [
+      2,
+      3,
+      4
+    ]
+    ,
+    "no_checkpoint_ffn_blocks": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      9
+    ],
+    "use_sgp": false
+    ,
+    "sgp_w": 3
+    ,
+    "sgp_k": 3
+    ,
+    "sgp_reduction": 4
+    ,
+    "sgp_use_partitioned": true
+    ,
+    "init_type": "default"
+    ,
+    "init_bn_type": "uniform"
+    ,
+    "init_gain": 0.2
+  }
+  // ========================================
+  // 训练配置
+  // ========================================
+  ,
+  "train": {
+    "G_lossfn_type": "charbonnier"
+    ,
+    "freeze_backbone": true
+    ,
+    "partial_load": true
+    ,
+    "phase2_lora_mode": true
+    ,
+    "use_lora": true
+    ,
+    "lora_rank": 8
+    ,
+    "lora_alpha": 16
+    ,
+    "lora_target_modules": [
+      "qkv",
+      "proj"
+    ]
+    ,
+    "G_lossfn_weight": 1.0
+    ,
+    "phase1_fusion_aux_loss_weight": 1.0
+    ,
+    "phase2_fusion_aux_loss_weight": 0.2
+    ,
+    "fusion_passthrough_loss_weight": 0.2
+    ,
+    "fusion_warmup": {
+      "head_only_iters": 800,
+      "passthrough_weight_start": 0.2,
+      "passthrough_weight_end": 0.0,
+      "update_penalty_weight": 0.01
+    }
+    ,
+    "G_charbonnier_eps": 1e-6
+    ,
+    "amp": {
+      "enable": true,
+      "dtype": "bfloat16"
+    }
+    ,
+    "manual_seed": 19931005
+    ,
+    "E_decay": 0.999
+    ,
+    "G_optimizer_type": "adam"
+    ,
+    "G_optimizer_lr": 2e-4
+    ,
+    "G_optimizer_betas": [
+      0.9,
+      0.99
+    ]
+    ,
+    "G_optimizer_wd": 0
+    ,
+    "G_optimizer_clipgrad": null
+    ,
+    "G_optimizer_reuse": true
+    ,
+    "fix_iter": 4000
+    ,
+    "fix_lr_mul": 0.1
+    ,
+    "fix_keys": [
+      "spynet",
+      "pa_deform"
+    ]
+    ,
+    "total_iter": 10000
+    ,
+    "G_scheduler_type": "CosineAnnealingWarmRestarts"
+    ,
+    "G_scheduler_periods": 10000
+    ,
+    "G_scheduler_eta_min": 1e-7
+    ,
+    "G_regularizer_orthstep": null
+    ,
+    "G_regularizer_clipstep": null
+    ,
+    "G_param_strict": true
+    ,
+    "E_param_strict": true
+    ,
+    "checkpoint_test": [4000, 6000, 8000, 10000]
+    ,
+    "checkpoint_save": 2000
+    ,
+    "checkpoint_print": 100
+    ,
+    "timing": {
+      "enable": false,
+      "sync_cuda": false
+    }
+    ,
+    "profiler": {
+      "enable": false,
+      "record_ranges": false,
+      "start_iter": 100,
+      "wait": 1,
+      "warmup": 1,
+      "active": 2,
+      "repeat": 1,
+      "ranks": [0],
+      "record_shapes": true,
+      "with_stack": false,
+      "profile_memory": true
+    }
+    ,
+    "compile": {
+      "enable": false,
+      "scope": "fusion_only",
+      "mode": "reduce-overhead",
+      "fullgraph": false,
+      "dynamic": true,
+      "backend": "inductor",
+      "fallback_on_error": true,
+      "checkpoint_compat": {
+        "enable": true,
+        "disable_ffn_blocks": [
+          0
+        ],
+        "disable_attn_blocks": []
+      }
+    }
+  }
+  // ========================================
+  // 运行时 CPU/Inductor 配置
+  // ========================================
+  ,
+  "runtime": {
+    "cpu": {
+      "torch_num_threads": 8,
+      "torch_num_interop_threads": 4,
+      "inductor_compile_threads": 16,
+      "omp_num_threads": 8,
+      "mkl_num_threads": 8,
+      "tmpdir": "/root/autodl-tmp/svrt_compile_tmp",
+      "inductor_cache_dir": "/root/autodl-tmp/svrt_inductor_cache"
+    }
+  }
+  // ========================================
+  // 验证（测试）配置
+  // ========================================
+  ,
+  "val": {
+    "save_img": true
+    ,
+    "pad_seq": false
+    ,
+    "flip_seq": false
+    ,
+    "center_frame_only": false
+    ,
+    "num_frame_testing": 12
+    ,
+    "num_frame_overlapping": 2
+    ,
+    "size_patch_testing": 96
+    ,
+    "size_patch_overlapping": 24
+    ,
+    "patch_batch_size": 1
+    ,
+    "distributed_patch_testing": true
+    ,
+    "lazy_flow_cache_mode": "gpu_clip"
+    ,
+    "cache_flow_patches_cpu": false
+    ,
+    "disable_checkpoint_during_validation": true
+    ,
+    "profile_patch_timing": true
+    ,
+    "amp": {
+      "enable": true,
+      "dtype": "float16"
+    }
+  }
+  // ========================================
+  // 日志记录配置
+  // ========================================
+  ,
+  "logging": {
+    "use_tensorboard": true
+    ,
+    "use_wandb": true
+    ,
+    "wandb_api_key": "ae83599fc8904d8986df7ba9e6f3328e042dcfb2"
+    ,
+    "wandb_project": "Deblur"
+    ,
+    "wandb_entity": null
+    ,
+    "wandb_name": "gopro_tfp4_scflow_pase_residual"
+    ,
+    "wandb_mode": "online"
+    ,
+    "use_swanlab": true
+    ,
+    "swanlab_api_key": "3kZbeukQu2WMZqtP4WWbr"
+    ,
+    "swanlab_project": "S-VRT"
+    ,
+    "swanlab_workspace": null
+    ,
+    "swanlab_name": "gopro_tfp4_scflow_pase_residual"
+    ,
+    "swanlab_description": "early fusion pase_residual + scflow"
+    ,
+    "swanlab_mode": null
+    ,
+    "use_logfire": true
+    ,
+    "logfire_token": "pylf_v1_us_tKLqw6SSVrXQtH7Ts1xDyG2vz2n0pCPRBScS1fbXTwMx"
+    ,
+    "logfire_project_name": "Deblur"
+    ,
+    "logfire_service_name": "s-vrt"
+    ,
+    "logfire_environment": "server"
+    ,
+    "logfire_log_text": true
+    ,
+    "logfire_log_metrics": true
+    ,
+    "logfire_log_timings": true
+  }
+}
