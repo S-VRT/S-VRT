@@ -1334,3 +1334,141 @@ def test_full_t_hybrid_rejects_non_spikecv_tfp_from_test_dataset():
             optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
             opt=opt,
         )
+
+
+def test_vrt_allows_attention_expanded_frame_contract_config():
+    opt = {
+        "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "attention",
+                "out_chans": 3,
+                "early": {
+                    "frame_contract": "expanded",
+                    "expand_to_full_t": True,
+                },
+                "operator_params": {
+                    "token_dim": 8,
+                    "token_stride": 2,
+                    "num_layers": 1,
+                    "num_heads": 2,
+                },
+            },
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.fusion_adapter.requested_frame_contract == "expanded"
+    assert model.fusion_adapter.frame_contract == "expanded"
+
+
+def test_vrt_attention_operator_name_is_case_insensitive_for_default_contract():
+    opt = {
+        "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "Attention",
+                "out_chans": 3,
+                "operator_params": {
+                    "token_dim": 8,
+                    "token_stride": 2,
+                    "num_layers": 1,
+                    "num_heads": 2,
+                },
+            },
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.fusion_adapter.requested_frame_contract == "operator_default"
+    assert model.fusion_adapter.frame_contract == "collapsed"
+
+
+def test_vrt_rejects_attention_with_full_t_early_expansion():
+    import pytest
+    opt = {
+        "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "attention",
+                "out_chans": 3,
+                "early": {
+                    "expand_to_full_t": True,
+                },
+                "operator_params": {
+                    "token_dim": 8,
+                    "token_stride": 2,
+                    "num_layers": 1,
+                    "num_heads": 2,
+                },
+            },
+        }
+    }
+
+    with pytest.raises(ValueError, match="attention.*expand_to_full_t"):
+        VRT(
+            upscale=1,
+            in_chans=7,
+            out_chans=3,
+            img_size=[2, 8, 8],
+            window_size=[2, 4, 4],
+            depths=[1] * 8,
+            indep_reconsts=[],
+            embed_dims=[16] * 8,
+            num_heads=[1] * 8,
+            pa_frames=2,
+            use_flash_attn=False,
+            optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+            opt=opt,
+        )
