@@ -125,3 +125,15 @@ def test_pca_feature_heatmap_returns_spatial_map():
     feat = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
     heatmap = pca_feature_heatmap(feat)
     assert heatmap.shape == (3, 4)
+
+
+def test_fusion_attribution_cli_help_mentions_ig_and_pca():
+    result = subprocess.run(
+        [sys.executable, "scripts/analysis/fusion_attribution.py", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "--ig-steps" in result.stdout
+    assert "--save-ig" in result.stdout
+    assert "--save-pca" in result.stdout
