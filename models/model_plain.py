@@ -498,7 +498,7 @@ class ModelPlain(ModelBase):
             return
         if "warmup_stage" in fusion_meta:
             self.log_dict["fusion_warmup_stage"] = fusion_meta["warmup_stage"]
-        for key in ("token_norm", "mamba_norm", "pase_norm", "fusion_body_norm", "delta_norm", "gate_mean", "effective_update_norm"):
+        for key in ("token_norm", "mamba_norm", "pase_norm", "body_norm", "delta_norm", "gate_mean", "effective_update_norm"):
             if key in fusion_meta:
                 self.log_dict[f"fusion_{key}"] = float(fusion_meta[key])
 

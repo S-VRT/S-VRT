@@ -301,7 +301,7 @@ def test_model_plain_current_log_includes_selected_pase_residual_diagnostics():
     model._record_fusion_diagnostics_to_log(
         {
             "pase_norm": 1.25,
-            "fusion_body_norm": 0.8,
+            "body_norm": 0.8,
             "delta_norm": 0.05,
             "gate_mean": 0.3,
             "effective_update_norm": 0.07,
@@ -311,6 +311,6 @@ def test_model_plain_current_log_includes_selected_pase_residual_diagnostics():
 
     log = model.current_log()
     assert log["fusion_pase_norm"] == 1.25
-    assert log["fusion_fusion_body_norm"] == 0.8
+    assert log["fusion_body_norm"] == 0.8
     assert log["fusion_gate_mean"] == 0.3
     assert log["fusion_warmup_stage"] == "token_mixer"

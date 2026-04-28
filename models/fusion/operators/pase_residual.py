@@ -116,7 +116,7 @@ class PaseResidualFusionOperator(nn.Module):
         if self.enable_diagnostics:
             self._last_diagnostics = {
                 "pase_norm": float(pase_feat.detach().float().norm(dim=1).mean().item()),
-                "fusion_body_norm": float(fused.detach().float().norm(dim=1).mean().item()),
+                "body_norm": float(fused.detach().float().norm(dim=1).mean().item()),
                 "delta_norm": float(delta.detach().float().abs().mean().item()),
                 "gate_mean": float(gate.detach().float().mean().item()),
                 "effective_update_norm": float(effective_update.detach().float().abs().mean().item()),
