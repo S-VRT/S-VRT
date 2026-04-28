@@ -18,6 +18,7 @@ class PaseResidualFusionOperator(nn.Module):
             raise ValueError("PaseResidualFusionOperator requires out_chans=3.")
         if spike_chans <= 0:
             raise ValueError("PaseResidualFusionOperator requires spike_chans>0.")
+        self.expected_spike_chans = spike_chans
 
         pase_kernel_size = int(operator_params.get("kernel_size", 3))
         pase_hidden_chans = int(operator_params.get("hidden_chans", 32))
@@ -92,8 +93,11 @@ class PaseResidualFusionOperator(nn.Module):
             raise ValueError("rgb and spike must share batch, time, height, and width dimensions")
         if rgb_chans != 3:
             raise ValueError(f"Expected rgb channels=3, got {rgb_chans}")
-        if spike_chans <= 0:
-            raise ValueError("Expected spike channels > 0 at runtime")
+        if spike_chans != self.expected_spike_chans:
+            raise ValueError(
+                "Expected spike channels="
+                f"{self.expected_spike_chans} at runtime, got {spike_chans}"
+            )
 
         rgb_flat = rgb_feat.reshape(bsz * steps, 3, height, width)
         spike_flat = spike_feat.reshape(bsz * steps, spike_chans, height, width)
