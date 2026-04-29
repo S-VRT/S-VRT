@@ -837,6 +837,51 @@ class VRT(nn.Module):
             flows_forward = flows_forward_2frames + flows_forward_4frames + flows_forward_6frames
         return flows_backward, flows_forward
 
+    def _compose_subframe_flow_sequence(self, flow_spike, frame_steps, spike_bins, h, w):
+        bsz, sub_steps, c_flow, _, _ = flow_spike.shape
+        if spike_bins <= 1:
+            raise ValueError("compose_subframes requires spike_bins > 1.")
+        if sub_steps != frame_steps * spike_bins:
+            raise ValueError(
+                "compose_subframes requires flow_spike temporal length to equal "
+                f"frames*spike_bins, got flow_spike={tuple(flow_spike.shape)}, "
+                f"frames={frame_steps}, spike_bins={spike_bins}."
+            )
+
+        x_1 = flow_spike[:, :-1, ...].reshape(-1, c_flow, h, w)
+        x_2 = flow_spike[:, 1:, ...].reshape(-1, c_flow, h, w)
+
+        flows_backward_raw = self.spynet(x_1, x_2)
+        flows_forward_raw = self.spynet(x_2, x_1)
+
+        if not isinstance(flows_backward_raw, (list, tuple)):
+            flows_backward_raw = [flows_backward_raw]
+        if not isinstance(flows_forward_raw, (list, tuple)):
+            flows_forward_raw = [flows_forward_raw]
+
+        anchor = spike_bins // 2
+        flows_backward = []
+        flows_forward = []
+
+        for scale_idx, (flow_b, flow_f) in enumerate(zip(flows_backward_raw, flows_forward_raw)):
+            h_i = max(h // (2 ** scale_idx), 1)
+            w_i = max(w // (2 ** scale_idx), 1)
+            flow_b = flow_b.view(bsz, sub_steps - 1, 2, h_i, w_i)
+            flow_f = flow_f.view(bsz, sub_steps - 1, 2, h_i, w_i)
+
+            composed_b = []
+            composed_f = []
+            for frame_idx in range(frame_steps - 1):
+                start = frame_idx * spike_bins + anchor
+                end = (frame_idx + 1) * spike_bins + anchor
+                composed_b.append(self._compose_adjacent_flows(flow_b, start, end))
+                composed_f.append(self._compose_adjacent_flows(flow_f, start, end))
+
+            flows_backward.append(torch.stack(composed_b, dim=1))
+            flows_forward.append(torch.stack(composed_f, dim=1))
+
+        return flows_backward, flows_forward
+
     def get_flow_2frames(self, x, flow_spike=None):
         b, n, c, h, w = x.size()
         
@@ -846,18 +891,31 @@ class VRT(nn.Module):
                 raise ValueError("SCFlow requires flow_spike input [B,T,25,H,W].")
             if flow_spike.ndim != 5:
                 raise ValueError(f"SCFlow requires flow_spike ndim=5 [B,T,25,H,W], got {tuple(flow_spike.shape)}")
+            if flow_spike.size(2) != 25:
+                raise ValueError(f"SCFlow requires flow_spike channels=25, got {flow_spike.size(2)}")
+            if flow_spike.size(3) != h or flow_spike.size(4) != w:
+                raise ValueError(
+                    f"SCFlow requires flow_spike spatial size {(h, w)}, got {(flow_spike.size(3), flow_spike.size(4))}"
+                )
+            spike_bins = int(getattr(self, "_last_spike_bins", 1) or 1)
+            if (
+                getattr(self, "spike_flow_collapse_policy", "mean_windows") == "compose_subframes"
+                and spike_bins > 1
+                and flow_spike.size(1) == n * spike_bins
+            ):
+                return self._compose_subframe_flow_sequence(
+                    flow_spike=flow_spike,
+                    frame_steps=n,
+                    spike_bins=spike_bins,
+                    h=h,
+                    w=w,
+                )
             if flow_spike.size(0) != b or flow_spike.size(1) != n:
                 raise ValueError(
                     f"SCFlow flow_spike temporal dim mismatch: "
                     f"flow_spike.shape={tuple(flow_spike.shape)}, x.shape={tuple(x.shape)}. "
                     f"After early fusion, x has {n} temporal steps. "
                     f"Ensure spike_flow.subframes matches spike_channels."
-                )
-            if flow_spike.size(2) != 25:
-                raise ValueError(f"SCFlow requires flow_spike channels=25, got {flow_spike.size(2)}")
-            if flow_spike.size(3) != h or flow_spike.size(4) != w:
-                raise ValueError(
-                    f"SCFlow requires flow_spike spatial size {(h, w)}, got {(flow_spike.size(3), flow_spike.size(4))}"
                 )
             x_flow = flow_spike
             c_flow = x_flow.size(2)
