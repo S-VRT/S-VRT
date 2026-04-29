@@ -358,7 +358,12 @@ class ModelVRT(ModelPlain):
 
             for d_idx in d_idx_list:
                 lq_clip = lq[:, d_idx:d_idx+num_frame_testing, ...]
-                flow_spike_clip = None if flow_spike is None else flow_spike[:, d_idx:d_idx+num_frame_testing, ...]
+                flow_spike_clip = None
+                if flow_spike is not None:
+                    spike_bins = self._infer_eager_flow_spike_bins(flow_spike, d)
+                    flow_start = d_idx * spike_bins
+                    flow_end = (d_idx + num_frame_testing) * spike_bins
+                    flow_spike_clip = flow_spike[:, flow_start:flow_end, ...]
                 out_clip = self._test_clip(
                     lq_clip,
                     flow_spike=flow_spike_clip,
@@ -396,11 +401,22 @@ class ModelVRT(ModelPlain):
             d_pad = (d_old// window_size[0]+1)*window_size[0] - d_old
             lq = torch.cat([lq, torch.flip(lq[:, -d_pad:, ...], [1])], 1)
             if flow_spike is not None:
-                flow_spike = torch.cat([flow_spike, torch.flip(flow_spike[:, -d_pad:, ...], [1])], 1)
+                spike_bins = self._infer_eager_flow_spike_bins(flow_spike, d_old)
+                flow_d_pad = d_pad * spike_bins
+                flow_spike = torch.cat([flow_spike, torch.flip(flow_spike[:, -flow_d_pad:, ...], [1])], 1)
             output = self._test_clip(lq, flow_spike=flow_spike, flow_spike_meta=flow_spike_meta)
             output = output[:, :d_old, :, :, :]
 
         return output
+
+    @staticmethod
+    def _infer_eager_flow_spike_bins(flow_spike, frame_steps):
+        if flow_spike is None or frame_steps <= 0:
+            return 1
+        flow_steps = flow_spike.size(1)
+        if flow_steps > frame_steps and flow_steps % frame_steps == 0:
+            return flow_steps // frame_steps
+        return 1
 
     def _test_clip(self, lq, flow_spike=None, flow_spike_meta=None, temporal_offset=0, full_h=None, full_w=None):
         ''' test the clip as a whole or as patches. '''

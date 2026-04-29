@@ -1278,6 +1278,65 @@ def test_vrt_structured_early_mamba_compose_subframes_keeps_expanded_flow_spike(
     assert captured["flow_spike_shape"] == (1, 24, 25, 8, 8)
 
 
+def test_model_vrt_test_video_slices_eager_subframe_flow_spike_by_subframes():
+    from models.model_vrt import ModelVRT
+
+    model = ModelVRT.__new__(ModelVRT)
+    model.opt = {
+        "scale": 1,
+        "val": {"num_frame_testing": 3, "num_frame_overlapping": 1},
+        "netG": {"out_chans": 3},
+    }
+    model._assert_lq_channels = lambda *_args, **_kwargs: None
+    captured = []
+
+    def _fake_test_clip(lq_clip, flow_spike=None, **_kwargs):
+        captured.append(flow_spike.detach().clone())
+        return torch.zeros(lq_clip.size(0), lq_clip.size(1), 3, lq_clip.size(3), lq_clip.size(4))
+
+    model._test_clip = _fake_test_clip
+
+    lq = torch.zeros(1, 5, 3, 4, 4)
+    flow_spike = torch.arange(1 * 20 * 25 * 4 * 4, dtype=torch.float32).reshape(1, 20, 25, 4, 4)
+    _ = model._test_video(lq, flow_spike=flow_spike)
+
+    assert [tuple(item.shape) for item in captured] == [
+        (1, 12, 25, 4, 4),
+        (1, 12, 25, 4, 4),
+    ]
+    assert torch.equal(captured[0], flow_spike[:, 0:12])
+    assert torch.equal(captured[1], flow_spike[:, 8:20])
+
+
+def test_model_vrt_test_video_pads_eager_subframe_flow_spike_by_subframes():
+    from models.model_vrt import ModelVRT
+
+    model = ModelVRT.__new__(ModelVRT)
+    model.opt = {
+        "scale": 1,
+        "val": {"num_frame_testing": 0},
+        "netG": {"window_size": [6, 4, 4], "out_chans": 3},
+    }
+    model._assert_lq_channels = lambda *_args, **_kwargs: None
+    captured = {}
+
+    def _fake_test_clip(lq_clip, flow_spike=None, **_kwargs):
+        captured["lq_shape"] = tuple(lq_clip.shape)
+        captured["flow_spike"] = flow_spike.detach().clone()
+        return torch.zeros(lq_clip.size(0), lq_clip.size(1), 3, lq_clip.size(3), lq_clip.size(4))
+
+    model._test_clip = _fake_test_clip
+
+    lq = torch.zeros(1, 5, 3, 4, 4)
+    flow_spike = torch.arange(1 * 20 * 25 * 4 * 4, dtype=torch.float32).reshape(1, 20, 25, 4, 4)
+    _ = model._test_video(lq, flow_spike=flow_spike)
+
+    assert captured["lq_shape"] == (1, 6, 3, 4, 4)
+    assert tuple(captured["flow_spike"].shape) == (1, 24, 25, 4, 4)
+    assert torch.equal(captured["flow_spike"][:, :20], flow_spike)
+    assert torch.equal(captured["flow_spike"][:, 20:], torch.flip(flow_spike[:, -4:], [1]))
+
+
 def test_vrt_flow_alignment_uses_execution_steps_not_main_steps(monkeypatch):
     model = VRT(
         upscale=1,
