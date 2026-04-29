@@ -206,6 +206,17 @@ def test_vrt_compose_adjacent_flows_accumulates_constant_translation():
     assert torch.allclose(composed[:, 1], torch.zeros(1, 6, 6))
 
 
+def test_vrt_compose_adjacent_flows_rejects_invalid_inputs():
+    with pytest.raises(ValueError, match="Expected flows \\[B,T,2,H,W\\]"):
+        VRT._compose_adjacent_flows(torch.zeros(1, 4, 3, 6, 6), start=0, end=1)
+
+    flows = torch.zeros(1, 4, 2, 6, 6)
+    with pytest.raises(ValueError, match="Invalid flow composition range"):
+        VRT._compose_adjacent_flows(flows, start=-1, end=1)
+    with pytest.raises(ValueError, match="Invalid flow composition range"):
+        VRT._compose_adjacent_flows(flows, start=0, end=5)
+
+
 def test_vrt_rejects_conflicting_scflow_collapse_policies():
     opt = {
         "datasets": {

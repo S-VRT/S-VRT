@@ -798,10 +798,12 @@ class VRT(nn.Module):
 
     @staticmethod
     def _compose_adjacent_flows(flows, start, end):
-        if end <= start:
-            raise ValueError(f"Cannot compose empty flow range start={start}, end={end}.")
-        if flows.ndim != 5:
+        if flows.ndim != 5 or flows.size(2) != 2:
             raise ValueError(f"Expected flows [B,T,2,H,W], got {tuple(flows.shape)}.")
+        if start < 0 or end <= start or end > flows.size(1):
+            raise ValueError(
+                f"Invalid flow composition range start={start}, end={end}, temporal length={flows.size(1)}."
+            )
 
         composed = flows[:, start, :, :, :]
         for idx in range(start + 1, end):
