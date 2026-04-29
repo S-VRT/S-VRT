@@ -22,6 +22,19 @@ def _detach_tensor(value: Any) -> Any:
     return value
 
 
+def _extract_tensor_output(output: Any) -> torch.Tensor | None:
+    if isinstance(output, torch.Tensor):
+        return output
+    if isinstance(output, (tuple, list)) and output:
+        return _extract_tensor_output(output[0])
+    if isinstance(output, dict):
+        for key in ("backbone_view", "fused_main", "output"):
+            value = output.get(key)
+            if isinstance(value, torch.Tensor):
+                return value
+    return None
+
+
 def find_fusion_adapter(model: nn.Module) -> nn.Module:
     if hasattr(model, "fusion_adapter"):
         return getattr(model, "fusion_adapter")
@@ -58,8 +71,8 @@ class FusionProbe:
         self.close()
 
     def _hook(self, module: nn.Module, inputs: tuple[Any, ...], output: Any) -> None:
-        tensor_output = output[0] if isinstance(output, (tuple, list)) else output
-        if not isinstance(tensor_output, torch.Tensor):
+        tensor_output = _extract_tensor_output(output)
+        if tensor_output is None:
             return
         if tensor_output.requires_grad:
             tensor_output.retain_grad()

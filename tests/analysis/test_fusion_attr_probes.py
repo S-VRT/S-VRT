@@ -33,6 +33,22 @@ def test_fusion_probe_captures_inputs_and_output():
     assert record.module_name == "Identity"
 
 
+def test_fusion_probe_captures_structured_adapter_output():
+    class DictAdapter(nn.Module):
+        def forward(self, x):
+            return {"fused_main": x + 1, "backbone_view": x + 2}
+
+    module = DictAdapter()
+    probe = FusionProbe(module)
+    probe.attach()
+    x = torch.randn(1, 2, 3, 4, 4)
+    y = module(x)
+    probe.close()
+
+    assert probe.record is not None
+    assert torch.equal(probe.record.output, y["backbone_view"])
+
+
 def test_gated_operator_explain_exports_effective_update():
     op = GatedFusionOperator(rgb_chans=3, spike_chans=2, out_chans=3, operator_params={"hidden_chans": 4})
     rgb = torch.randn(1, 3, 6, 6)
