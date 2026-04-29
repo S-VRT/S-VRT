@@ -622,11 +622,18 @@ class VRT(nn.Module):
                 self._last_fusion_meta = meta
                 self._last_spike_bins = spike_bins
                 x = backbone_view
-                flow_spike = self._align_flow_spike_to_fused_time_axis(
-                    flow_spike=flow_spike,
-                    fused_steps=backbone_view.size(1),
-                    spike_bins=spike_bins,
-                )
+                if not (
+                    self.spike_flow_collapse_policy == "compose_subframes"
+                    and flow_spike is not None
+                    and flow_spike.ndim == 5
+                    and flow_spike.size(1) == backbone_view.size(1) * spike_bins
+                    and backbone_view.size(1) == fused_main.size(1)
+                ):
+                    flow_spike = self._align_flow_spike_to_fused_time_axis(
+                        flow_spike=flow_spike,
+                        fused_steps=backbone_view.size(1),
+                        spike_bins=spike_bins,
+                    )
                 output_spike_bins = spike_bins if backbone_view.size(1) != fused_main.size(1) else 1
 
             if timer is not None:
