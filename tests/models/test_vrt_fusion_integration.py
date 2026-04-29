@@ -875,7 +875,7 @@ def test_vrt_collapsed_operator_keeps_main_and_exec_equal(monkeypatch):
     assert model._last_fusion_meta["frame_contract"] == "collapsed"
 
 
-def test_vrt_structured_early_mamba_collapses_subframe_flow_spike(monkeypatch):
+def test_vrt_structured_early_mamba_mean_windows_collapses_subframe_flow_spike(monkeypatch):
     model = VRT(
         upscale=1,
         in_chans=7,
