@@ -796,6 +796,22 @@ class VRT(nn.Module):
             width,
         ).mean(dim=2)
 
+    @staticmethod
+    def _compose_adjacent_flows(flows, start, end):
+        if end <= start:
+            raise ValueError(f"Cannot compose empty flow range start={start}, end={end}.")
+        if flows.ndim != 5:
+            raise ValueError(f"Expected flows [B,T,2,H,W], got {tuple(flows.shape)}.")
+
+        composed = flows[:, start, :, :, :]
+        for idx in range(start + 1, end):
+            composed = composed + flow_warp(
+                flows[:, idx, :, :, :],
+                composed.permute(0, 2, 3, 1),
+                padding_mode='border',
+            )
+        return composed
+
     def get_flows(self, x, flow_spike=None):
         if self.pa_frames == 2:
             flows_backward, flows_forward = self.get_flow_2frames(x, flow_spike=flow_spike)

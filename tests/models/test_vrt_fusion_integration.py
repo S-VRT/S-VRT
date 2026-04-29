@@ -180,6 +180,32 @@ def test_vrt_parses_scflow_collapse_policy_from_dataset_config():
     assert model.spike_flow_collapse_policy == "compose_subframes"
 
 
+def test_vrt_compose_adjacent_flows_accumulates_constant_translation():
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "scflow", "checkpoint": None, "params": {}},
+        opt={"netG": {"input": {"strategy": "concat", "mode": "concat", "raw_ingress_chans": 7}}},
+    )
+
+    flows = torch.zeros(1, 8, 2, 6, 6)
+    flows[:, :, 0, :, :] = 1.0
+    composed = model._compose_adjacent_flows(flows, start=2, end=6)
+
+    assert composed.shape == (1, 2, 6, 6)
+    assert torch.allclose(composed[:, 0], torch.full((1, 6, 6), 4.0))
+    assert torch.allclose(composed[:, 1], torch.zeros(1, 6, 6))
+
+
 def test_vrt_rejects_conflicting_scflow_collapse_policies():
     opt = {
         "datasets": {
