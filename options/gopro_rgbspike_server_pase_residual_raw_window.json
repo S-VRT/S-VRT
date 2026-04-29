@@ -75,7 +75,7 @@
         ]
       }
       ,
-      "spike_channels": 4
+      "spike_channels": 41
       ,
       "input_pack_mode": "dual"
       ,
@@ -93,7 +93,7 @@
           "num_bins": 4
         },
         "precomputed": {
-          "enable": true,
+          "enable": false,
           "root": "auto",
           "format": "npy"
         }
@@ -179,7 +179,7 @@
       ,
       "spike_w": 640
       ,
-      "spike_channels": 4
+      "spike_channels": 41
       ,
       "input_pack_mode": "dual"
       ,
@@ -197,7 +197,7 @@
           "num_bins": 4
         },
         "precomputed": {
-          "enable": true,
+          "enable": false,
           "root": "auto",
           "format": "npy"
         }
