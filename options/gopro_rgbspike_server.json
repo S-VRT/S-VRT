@@ -147,7 +147,8 @@
         "representation": "encoding25",
         "dt": 10,
         "root": "auto",
-        "subframes": 4
+        "subframes": 4,
+        "collapse_policy": "compose_subframes"
       }
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
@@ -282,7 +283,8 @@
         "representation": "encoding25",
         "dt": 10,
         "root": "auto",
-        "subframes": 4
+        "subframes": 4,
+        "collapse_policy": "compose_subframes"
       }
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
