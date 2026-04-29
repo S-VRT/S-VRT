@@ -3,7 +3,7 @@
   // 基础配置
   // ========================================
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
-  "task": "gopro_tfp4_scflow_mamba_collapsed_dcn4"
+  "task": "gopro_tfp4_scflow_pase_residual_dcn4"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
   ,
   "model": "vrt"
@@ -36,7 +36,8 @@
   "gpu_ids": [
     0,
     1,
-    2
+    2,
+    3
   ]
   // 是否启用分布式训练：true 表示启用，会自动检测环境变量
   ,
@@ -189,7 +190,7 @@
       "num_frame": 6
       // 真实标签图像尺寸：支持单值或 [phase1, phase2]
       ,
-      "gt_size": [192, 128]
+      "gt_size": [128, 128]
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -215,7 +216,7 @@
       "dataloader_num_workers": 32
       // 批次大小：支持单值或 [phase1, phase2]
       ,
-      "dataloader_batch_size": [32, 16]
+      "dataloader_batch_size": [16, 16]
       // 预取因子：每个工作进程预取的批次数量
       ,
       "dataloader_prefetch_factor": 2
@@ -356,20 +357,17 @@
     "fusion": {
       "enable": true,
       "placement": "early",
-      "operator": "mamba",
+      "operator": "pase_residual",
       "mode": "replace",
       "out_chans": 3,
       "early": {
         "frame_contract": "collapsed"
       },
       "operator_params": {
-        "token_dim": 48,
-        "token_stride": 4,
-        "d_state": 32,
-        "d_conv": 4,
-        "expand": 2,
-        "num_layers": 3,
-        "mamba_amp_policy": "fp32",
+        "feature_chans": 48,
+        "hidden_chans": 32,
+        "kernel_size": 3,
+        "normalize_kernel": true,
         "alpha_init": 0.05,
         "gate_bias_init": -2.0,
         "enable_diagnostics": false
@@ -381,7 +379,7 @@
         "source": "train_batch",
         "subdir": "fusion_phase1_last_train",
         "max_batches": 1,
-        "max_frames": 24
+        "max_frames": 6
       }
     }
     ,
@@ -411,8 +409,8 @@
     ,
     "img_size": [
       6,
-      96,
-      96
+      128,
+      128
     ]
     // 窗口大小：[时间, 高度, 宽度]，[4,8,8] 表示 4 帧时间窗口，8x8 空间窗口
     ,
@@ -775,7 +773,7 @@
     "size_patch_overlapping": 24
     // 测试时将多个空间补丁合并为一个 batch 推理；不改变补丁划分、重叠或指标计算
     ,
-    "patch_batch_size": 1
+    "patch_batch_size": 2
     // DDP 验证时把同一个样本的空间补丁分配到各 rank 推理，再 all-reduce 合并；rank0 负责保存和计分
     ,
     "distributed_patch_testing": true
@@ -819,7 +817,7 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_tfp4_scflow_mamba_collapsed_dcn4"
+    "wandb_name": "gopro_tfp4_scflow_pase_residual_dcn4"
     // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
     ,
     "wandb_mode": "online"
@@ -837,10 +835,10 @@
     "swanlab_workspace": null
     // SwanLab 运行名称：用于区分不同实验
     ,
-    "swanlab_name": "gopro_tfp4_scflow_mamba_collapsed_dcn4"
+    "swanlab_name": "gopro_tfp4_scflow_pase_residual_dcn4"
     // SwanLab 实验描述：可选文本信息
     ,
-    "swanlab_description": "early fusion mamba_tokenized + scflow"
+    "swanlab_description": "early fusion pase_residual + scflow"
     // SwanLab 运行模式：可设置 cloud/offline/local；留空自动根据 API key 决定
     ,
     "swanlab_mode": null
