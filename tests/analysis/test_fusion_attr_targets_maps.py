@@ -95,3 +95,47 @@ def test_perturb_spike_zero_and_temporal_drop():
     dropped = perturb_spike(spike, "temporal-drop")
     assert dropped[:, 2].sum().item() == 0.0
     assert dropped[:, 0].sum().item() > 0.0
+
+
+from scripts.analysis.fusion_attr.maps import integrated_gradients_map
+
+
+def test_integrated_gradients_map_returns_2d_heatmap_for_4d_input():
+    class SumModel(torch.nn.Module):
+        def forward(self, x):
+            return x
+
+    model = SumModel()
+    inp = torch.ones(1, 3, 4, 4, requires_grad=True)
+    baseline = torch.zeros_like(inp)
+
+    def target_fn(output):
+        return output[:, :, :2, :2].sum()
+
+    heatmap = integrated_gradients_map(model, inp, baseline, target_fn, steps=8)
+    assert heatmap.shape == (4, 4)
+    assert heatmap.max().item() > 0.0
+
+
+def test_integrated_gradients_map_supports_tuple_inputs_and_input_index():
+    class DualModel(torch.nn.Module):
+        def forward(self, rgb, spike):
+            return rgb + spike[:, :, : rgb.size(-2), : rgb.size(-1)]
+
+    model = DualModel()
+    rgb = torch.ones(1, 3, 4, 4, requires_grad=True)
+    spike = torch.ones(1, 3, 4, 4, requires_grad=True)
+
+    def target_fn(output):
+        return output.sum()
+
+    heatmap = integrated_gradients_map(
+        model,
+        (rgb, spike),
+        (torch.zeros_like(rgb), torch.zeros_like(spike)),
+        target_fn,
+        steps=4,
+        input_index=1,
+    )
+    assert heatmap.shape == (4, 4)
+    assert heatmap.mean().item() > 0.0

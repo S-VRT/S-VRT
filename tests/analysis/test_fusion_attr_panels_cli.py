@@ -99,3 +99,41 @@ def test_select_center_frame_tensor_handles_5d_and_4d():
     image = torch.ones(1, 3, 4, 4)
     assert select_center_frame_tensor(video).max().item() == 7
     assert select_center_frame_tensor(image).max().item() == 1
+
+
+import pytest
+
+from scripts.analysis.fusion_attr.pca import (
+    pca_feature_heatmap,
+    pca_variance_ratio,
+)
+
+
+def test_pca_variance_ratio_sums_to_one_for_non_degenerate_input():
+    feat = torch.tensor(
+        [
+            [[1.0, 0.0], [0.0, 1.0]],
+            [[0.0, 1.0], [1.0, 0.0]],
+        ]
+    )
+    ratio = pca_variance_ratio(feat)
+    assert ratio.ndim == 1
+    assert ratio.sum().item() == pytest.approx(1.0, rel=1e-5)
+
+
+def test_pca_feature_heatmap_returns_spatial_map():
+    feat = torch.arange(2 * 3 * 4, dtype=torch.float32).reshape(2, 3, 4)
+    heatmap = pca_feature_heatmap(feat)
+    assert heatmap.shape == (3, 4)
+
+
+def test_fusion_attribution_cli_help_mentions_ig_and_pca():
+    result = subprocess.run(
+        [sys.executable, "scripts/analysis/fusion_attribution.py", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "--ig-steps" in result.stdout
+    assert "--save-ig" in result.stdout
+    assert "--save-pca" in result.stdout

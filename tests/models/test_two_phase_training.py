@@ -288,3 +288,29 @@ def test_model_plain_current_log_includes_selected_fusion_diagnostics():
     assert log["fusion_effective_update_norm"] == 0.01
     assert log["fusion_delta_norm"] == 0.02
     assert log["fusion_warmup_stage"] == "token_mixer"
+
+
+def test_model_plain_current_log_includes_selected_pase_residual_diagnostics():
+    from collections import OrderedDict
+    from models.model_plain import ModelPlain
+
+    model = ModelPlain.__new__(ModelPlain)
+    model.log_dict = OrderedDict([("G_loss", 1.0)])
+    model.timer = type("TimerStub", (), {"get_current_timings": staticmethod(lambda: {})})()
+
+    model._record_fusion_diagnostics_to_log(
+        {
+            "pase_norm": 1.25,
+            "body_norm": 0.8,
+            "delta_norm": 0.05,
+            "gate_mean": 0.3,
+            "effective_update_norm": 0.07,
+            "warmup_stage": "token_mixer",
+        }
+    )
+
+    log = model.current_log()
+    assert log["fusion_pase_norm"] == 1.25
+    assert log["fusion_body_norm"] == 0.8
+    assert log["fusion_gate_mean"] == 0.3
+    assert log["fusion_warmup_stage"] == "token_mixer"

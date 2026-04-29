@@ -66,3 +66,51 @@ def gradient_activation_cam(activation: torch.Tensor, target: torch.Tensor) -> t
     else:
         raise ValueError(f"Expected 4D or 5D activation, got {tuple(act.shape)}")
     return torch.relu(cam.detach())
+
+
+def _clone_with_grad(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.detach().clone().requires_grad_(True)
+
+
+def integrated_gradients_map(
+    model,
+    inputs,
+    baselines,
+    target_fn,
+    steps: int = 32,
+    input_index: int = 0,
+) -> torch.Tensor:
+    if steps <= 0:
+        raise ValueError("steps must be positive")
+
+    tuple_input = isinstance(inputs, (tuple, list))
+    if not tuple_input:
+        inputs = (inputs,)
+        baselines = (baselines,)
+
+    if len(inputs) != len(baselines):
+        raise ValueError("inputs and baselines must have the same arity")
+
+    total_grad = None
+    alphas = torch.linspace(0.0, 1.0, steps + 1, device=inputs[input_index].device)[1:]
+
+    for alpha in alphas:
+        scaled_inputs = []
+        tracked_tensor = None
+        for idx, (inp, base) in enumerate(zip(inputs, baselines)):
+            scaled = base + alpha * (inp - base)
+            if idx == input_index:
+                tracked_tensor = _clone_with_grad(scaled)
+                scaled_inputs.append(tracked_tensor)
+            else:
+                scaled_inputs.append(scaled.detach())
+        output = model(*scaled_inputs)
+        target = target_fn(output)
+        if target.ndim != 0:
+            raise ValueError("target_fn must return a scalar tensor")
+        grad = torch.autograd.grad(target, tracked_tensor, retain_graph=False, create_graph=False)[0]
+        total_grad = grad if total_grad is None else total_grad + grad
+
+    avg_grad = total_grad / float(steps)
+    attr = (inputs[input_index] - baselines[input_index]).detach() * avg_grad.detach()
+    return reduce_to_2d(attr.abs())
