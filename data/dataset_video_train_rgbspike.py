@@ -614,6 +614,9 @@ class TrainDatasetRGBSpike(data.Dataset):
     def _load_encoded_flow_spike(self, clip_name, frame_idx):
         flow_root = self.spike_root if str(self.spike_flow_root).strip().lower() == 'auto' else Path(self.spike_flow_root)
         frame_name = f'{frame_idx:{self.filename_tmpl}}'
+        spike_flow_format = getattr(self, 'spike_flow_format', 'auto')
+        spike_h = getattr(self, 'spike_h', 360)
+        spike_w = getattr(self, 'spike_w', 640)
 
         if self.spike_flow_subframes > 1:
             dir_name = f'encoding25_dt{self.spike_flow_dt}_s{self.spike_flow_subframes}'
@@ -621,10 +624,10 @@ class TrainDatasetRGBSpike(data.Dataset):
             try:
                 arr = load_encoding25_artifact_with_shape(
                     base_path,
-                    artifact_format=self.spike_flow_format,
+                    artifact_format=spike_flow_format,
                     num_subframes=self.spike_flow_subframes,
-                    spike_h=self.spike_h,
-                    spike_w=self.spike_w,
+                    spike_h=spike_h,
+                    spike_w=spike_w,
                 )
             except FileNotFoundError as exc:
                 raise ValueError(
@@ -638,10 +641,10 @@ class TrainDatasetRGBSpike(data.Dataset):
             try:
                 arr = load_encoding25_artifact_with_shape(
                     base_path,
-                    artifact_format=self.spike_flow_format,
+                    artifact_format=spike_flow_format,
                     num_subframes=1,
-                    spike_h=self.spike_h,
-                    spike_w=self.spike_w,
+                    spike_h=spike_h,
+                    spike_w=spike_w,
                 )
             except FileNotFoundError as exc:
                 raise ValueError(
