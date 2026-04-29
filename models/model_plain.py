@@ -532,7 +532,9 @@ class ModelPlain(ModelBase):
     # ----------------------------------------
     def netG_forward(self):
         with self.timer.timer('forward'):
-            with self._autocast_context(enabled=self.amp_train_enabled, dtype=self.amp_train_dtype):
+            amp_enabled = getattr(self, 'amp_train_enabled', False)
+            amp_dtype = getattr(self, 'amp_train_dtype', torch.float16)
+            with self._autocast_context(enabled=amp_enabled, dtype=amp_dtype):
                 if self.L_flow_spike is not None:
                     self.E = self.netG(self.L, flow_spike=self.L_flow_spike)
                 else:

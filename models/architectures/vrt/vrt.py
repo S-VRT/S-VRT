@@ -192,6 +192,7 @@ class VRT(nn.Module):
         self._last_fusion_aux = None
         self._last_fusion_meta = None
         self._last_spike_bins = None
+        self.spike_flow_collapse_policy = self._resolve_spike_flow_collapse_policy(opt)
         if self.fusion_enabled:
             fusion_placement = str(fusion_cfg.get('placement', 'early'))
             fusion_mode = fusion_cfg.get('mode', 'replace')
@@ -546,6 +547,35 @@ class VRT(nn.Module):
             return marker
         return INPUT_PATH_DUAL if self.input_mode == "dual" else INPUT_PATH_CONCAT
 
+    @staticmethod
+    def _resolve_spike_flow_collapse_policy(opt):
+        aliases = {
+            "mean": "mean_windows",
+            "mean_window": "mean_windows",
+            "mean_windows": "mean_windows",
+            "compose": "compose_subframes",
+            "compose_subframes": "compose_subframes",
+        }
+        datasets_cfg = (opt or {}).get("datasets", {}) if isinstance(opt, dict) else {}
+        policies = {}
+        for split_name in ("train", "test"):
+            split_cfg = datasets_cfg.get(split_name, {}) if isinstance(datasets_cfg, dict) else {}
+            spike_flow_cfg = split_cfg.get("spike_flow", {}) if isinstance(split_cfg, dict) else {}
+            if isinstance(spike_flow_cfg, dict) and "collapse_policy" in spike_flow_cfg:
+                policy = str(spike_flow_cfg.get("collapse_policy", "mean_windows")).strip().lower()
+                if policy not in aliases:
+                    raise ValueError(
+                        "Unsupported spike_flow.collapse_policy="
+                        f"{policy!r}; expected one of {sorted(set(aliases.values()))}."
+                    )
+                policies[split_name] = aliases[policy]
+
+        if len(set(policies.values())) > 1:
+            raise ValueError(f"Conflicting spike_flow.collapse_policy values across dataset splits: {policies}.")
+        if policies:
+            return next(iter(policies.values()))
+        return "mean_windows"
+
     def forward(self, x, flow_spike=None):
         # x: (N, D, C, H, W)
         timer = getattr(self, 'timer', None)
@@ -592,11 +622,18 @@ class VRT(nn.Module):
                 self._last_fusion_meta = meta
                 self._last_spike_bins = spike_bins
                 x = backbone_view
-                flow_spike = self._align_flow_spike_to_fused_time_axis(
-                    flow_spike=flow_spike,
-                    fused_steps=backbone_view.size(1),
-                    spike_bins=spike_bins,
-                )
+                if not (
+                    self.spike_flow_collapse_policy == "compose_subframes"
+                    and flow_spike is not None
+                    and flow_spike.ndim == 5
+                    and flow_spike.size(1) == backbone_view.size(1) * spike_bins
+                    and backbone_view.size(1) == fused_main.size(1)
+                ):
+                    flow_spike = self._align_flow_spike_to_fused_time_axis(
+                        flow_spike=flow_spike,
+                        fused_steps=backbone_view.size(1),
+                        spike_bins=spike_bins,
+                    )
                 output_spike_bins = spike_bins if backbone_view.size(1) != fused_main.size(1) else 1
 
             if timer is not None:
@@ -766,6 +803,42 @@ class VRT(nn.Module):
             width,
         ).mean(dim=2)
 
+    @staticmethod
+    def _compose_adjacent_flows(flows, start, end):
+        if flows.ndim != 5 or flows.size(2) != 2:
+            raise ValueError(f"Expected flows [B,T,2,H,W], got {tuple(flows.shape)}.")
+        if start < 0 or end <= start or end > flows.size(1):
+            raise ValueError(
+                f"Invalid flow composition range start={start}, end={end}, temporal length={flows.size(1)}."
+            )
+
+        composed = flows[:, start, :, :, :]
+        for idx in range(start + 1, end):
+            composed = composed + flow_warp(
+                flows[:, idx, :, :, :],
+                composed.permute(0, 2, 3, 1),
+                padding_mode='border',
+            )
+        return composed
+
+    @staticmethod
+    def _compose_adjacent_flows_reverse(flows, start, end):
+        if flows.ndim != 5 or flows.size(2) != 2:
+            raise ValueError(f"Expected flows [B,T,2,H,W], got {tuple(flows.shape)}.")
+        if start < 0 or end <= start or end > flows.size(1):
+            raise ValueError(
+                f"Invalid flow composition range start={start}, end={end}, temporal length={flows.size(1)}."
+            )
+
+        composed = flows[:, end - 1, :, :, :]
+        for idx in range(end - 2, start - 1, -1):
+            composed = composed + flow_warp(
+                flows[:, idx, :, :, :],
+                composed.permute(0, 2, 3, 1),
+                padding_mode='border',
+            )
+        return composed
+
     def get_flows(self, x, flow_spike=None):
         if self.pa_frames == 2:
             flows_backward, flows_forward = self.get_flow_2frames(x, flow_spike=flow_spike)
@@ -782,6 +855,61 @@ class VRT(nn.Module):
             flows_forward = flows_forward_2frames + flows_forward_4frames + flows_forward_6frames
         return flows_backward, flows_forward
 
+    def _compose_subframe_flow_sequence(self, flow_spike, frame_steps, spike_bins, h, w):
+        bsz, sub_steps, c_flow, _, _ = flow_spike.shape
+        if spike_bins <= 1:
+            raise ValueError("compose_subframes requires spike_bins > 1.")
+        if sub_steps != frame_steps * spike_bins:
+            raise ValueError(
+                "compose_subframes requires flow_spike temporal length to equal "
+                f"frames*spike_bins, got flow_spike={tuple(flow_spike.shape)}, "
+                f"frames={frame_steps}, spike_bins={spike_bins}."
+            )
+
+        x_1 = flow_spike[:, :-1, ...].reshape(-1, c_flow, h, w)
+        x_2 = flow_spike[:, 1:, ...].reshape(-1, c_flow, h, w)
+
+        flows_backward_raw = self.spynet(x_1, x_2)
+        flows_forward_raw = self.spynet(x_2, x_1)
+
+        if not isinstance(flows_backward_raw, (list, tuple)):
+            flows_backward_raw = [flows_backward_raw]
+        if not isinstance(flows_forward_raw, (list, tuple)):
+            flows_forward_raw = [flows_forward_raw]
+
+        anchor = spike_bins // 2
+        flows_backward = []
+        flows_forward = []
+
+        if len(flows_backward_raw) != len(flows_forward_raw):
+            raise ValueError(
+                "SCFlow returned mismatched backward/forward scale counts: "
+                f"{len(flows_backward_raw)} vs {len(flows_forward_raw)}."
+            )
+
+        for flow_b, flow_f in zip(flows_backward_raw, flows_forward_raw):
+            h_i, w_i = flow_b.shape[-2:]
+            if flow_f.shape[-2:] != (h_i, w_i):
+                raise ValueError(
+                    "SCFlow returned mismatched backward/forward flow spatial sizes: "
+                    f"{tuple(flow_b.shape)} vs {tuple(flow_f.shape)}."
+                )
+            flow_b = flow_b.view(bsz, sub_steps - 1, 2, h_i, w_i)
+            flow_f = flow_f.view(bsz, sub_steps - 1, 2, h_i, w_i)
+
+            composed_b = []
+            composed_f = []
+            for frame_idx in range(frame_steps - 1):
+                start = frame_idx * spike_bins + anchor
+                end = (frame_idx + 1) * spike_bins + anchor
+                composed_b.append(self._compose_adjacent_flows(flow_b, start, end))
+                composed_f.append(self._compose_adjacent_flows_reverse(flow_f, start, end))
+
+            flows_backward.append(torch.stack(composed_b, dim=1))
+            flows_forward.append(torch.stack(composed_f, dim=1))
+
+        return flows_backward, flows_forward
+
     def get_flow_2frames(self, x, flow_spike=None):
         b, n, c, h, w = x.size()
         
@@ -791,18 +919,32 @@ class VRT(nn.Module):
                 raise ValueError("SCFlow requires flow_spike input [B,T,25,H,W].")
             if flow_spike.ndim != 5:
                 raise ValueError(f"SCFlow requires flow_spike ndim=5 [B,T,25,H,W], got {tuple(flow_spike.shape)}")
+            if flow_spike.size(2) != 25:
+                raise ValueError(f"SCFlow requires flow_spike channels=25, got {flow_spike.size(2)}")
+            if flow_spike.size(3) != h or flow_spike.size(4) != w:
+                raise ValueError(
+                    f"SCFlow requires flow_spike spatial size {(h, w)}, got {(flow_spike.size(3), flow_spike.size(4))}"
+                )
+            spike_bins = int(getattr(self, "_last_spike_bins", 1) or 1)
+            if (
+                getattr(self, "spike_flow_collapse_policy", "mean_windows") == "compose_subframes"
+                and spike_bins > 1
+                and flow_spike.size(0) == b
+                and flow_spike.size(1) == n * spike_bins
+            ):
+                return self._compose_subframe_flow_sequence(
+                    flow_spike=flow_spike,
+                    frame_steps=n,
+                    spike_bins=spike_bins,
+                    h=h,
+                    w=w,
+                )
             if flow_spike.size(0) != b or flow_spike.size(1) != n:
                 raise ValueError(
                     f"SCFlow flow_spike temporal dim mismatch: "
                     f"flow_spike.shape={tuple(flow_spike.shape)}, x.shape={tuple(x.shape)}. "
                     f"After early fusion, x has {n} temporal steps. "
                     f"Ensure spike_flow.subframes matches spike_channels."
-                )
-            if flow_spike.size(2) != 25:
-                raise ValueError(f"SCFlow requires flow_spike channels=25, got {flow_spike.size(2)}")
-            if flow_spike.size(3) != h or flow_spike.size(4) != w:
-                raise ValueError(
-                    f"SCFlow requires flow_spike spatial size {(h, w)}, got {(flow_spike.size(3), flow_spike.size(4))}"
                 )
             x_flow = flow_spike
             c_flow = x_flow.size(2)
