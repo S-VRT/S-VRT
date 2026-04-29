@@ -821,6 +821,24 @@ class VRT(nn.Module):
             )
         return composed
 
+    @staticmethod
+    def _compose_adjacent_flows_reverse(flows, start, end):
+        if flows.ndim != 5 or flows.size(2) != 2:
+            raise ValueError(f"Expected flows [B,T,2,H,W], got {tuple(flows.shape)}.")
+        if start < 0 or end <= start or end > flows.size(1):
+            raise ValueError(
+                f"Invalid flow composition range start={start}, end={end}, temporal length={flows.size(1)}."
+            )
+
+        composed = flows[:, end - 1, :, :, :]
+        for idx in range(end - 2, start - 1, -1):
+            composed = composed + flow_warp(
+                flows[:, idx, :, :, :],
+                composed.permute(0, 2, 3, 1),
+                padding_mode='border',
+            )
+        return composed
+
     def get_flows(self, x, flow_spike=None):
         if self.pa_frames == 2:
             flows_backward, flows_forward = self.get_flow_2frames(x, flow_spike=flow_spike)
@@ -863,9 +881,19 @@ class VRT(nn.Module):
         flows_backward = []
         flows_forward = []
 
-        for scale_idx, (flow_b, flow_f) in enumerate(zip(flows_backward_raw, flows_forward_raw)):
-            h_i = max(h // (2 ** scale_idx), 1)
-            w_i = max(w // (2 ** scale_idx), 1)
+        if len(flows_backward_raw) != len(flows_forward_raw):
+            raise ValueError(
+                "SCFlow returned mismatched backward/forward scale counts: "
+                f"{len(flows_backward_raw)} vs {len(flows_forward_raw)}."
+            )
+
+        for flow_b, flow_f in zip(flows_backward_raw, flows_forward_raw):
+            h_i, w_i = flow_b.shape[-2:]
+            if flow_f.shape[-2:] != (h_i, w_i):
+                raise ValueError(
+                    "SCFlow returned mismatched backward/forward flow spatial sizes: "
+                    f"{tuple(flow_b.shape)} vs {tuple(flow_f.shape)}."
+                )
             flow_b = flow_b.view(bsz, sub_steps - 1, 2, h_i, w_i)
             flow_f = flow_f.view(bsz, sub_steps - 1, 2, h_i, w_i)
 
@@ -875,7 +903,7 @@ class VRT(nn.Module):
                 start = frame_idx * spike_bins + anchor
                 end = (frame_idx + 1) * spike_bins + anchor
                 composed_b.append(self._compose_adjacent_flows(flow_b, start, end))
-                composed_f.append(self._compose_adjacent_flows(flow_f, start, end))
+                composed_f.append(self._compose_adjacent_flows_reverse(flow_f, start, end))
 
             flows_backward.append(torch.stack(composed_b, dim=1))
             flows_forward.append(torch.stack(composed_f, dim=1))
@@ -901,6 +929,7 @@ class VRT(nn.Module):
             if (
                 getattr(self, "spike_flow_collapse_policy", "mean_windows") == "compose_subframes"
                 and spike_bins > 1
+                and flow_spike.size(0) == b
                 and flow_spike.size(1) == n * spike_bins
             ):
                 return self._compose_subframe_flow_sequence(

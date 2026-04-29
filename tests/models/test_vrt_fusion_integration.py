@@ -267,6 +267,111 @@ def test_vrt_get_flow_2frames_compose_subframes_returns_frame_level_flows(monkey
     assert torch.allclose(flows_forward[0][:, :, 0], torch.full((1, 2, 8, 8), 4.0))
 
 
+def test_vrt_get_flow_2frames_compose_subframes_reverses_forward_flow_order():
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[3, 8, 8],
+        window_size=[3, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "scflow", "checkpoint": None, "params": {}},
+        opt={
+            "datasets": {
+                "train": {
+                    "spike_flow": {
+                        "representation": "encoding25",
+                        "subframes": 4,
+                        "collapse_policy": "compose_subframes",
+                    }
+                }
+            },
+            "netG": {"input": {"strategy": "concat", "mode": "concat", "raw_ingress_chans": 7}},
+        },
+    )
+    model._last_spike_bins = 4
+
+    calls = []
+
+    class FakeSpikeFlow(torch.nn.Module):
+        input_type = "spike"
+
+        def forward(self, a, b):
+            calls.append((tuple(a.shape), tuple(b.shape)))
+            steps = a.shape[0]
+            height, width = a.shape[-2:]
+            full = torch.zeros(steps, 2, height, width)
+            if len(calls) == 2:
+                x_coords = torch.arange(width, dtype=full.dtype).view(1, width).expand(height, width)
+                full[2, 0] = x_coords
+                full[3, 0] = 1.0
+                full[4, 0] = 2.0
+                full[5, 0] = 3.0
+            return [
+                full,
+                torch.zeros(steps, 2, height // 2, width // 2),
+                torch.zeros(steps, 2, height // 4, width // 4),
+                torch.zeros(steps, 2, height // 8, width // 8),
+            ]
+
+    model.spynet = FakeSpikeFlow()
+
+    x = torch.zeros(1, 3, 3, 8, 8)
+    flow_spike = torch.zeros(1, 12, 25, 8, 8)
+    _flows_backward, flows_forward = model.get_flow_2frames(x, flow_spike=flow_spike)
+
+    expected_row = torch.tensor([12.0, 13.0, 13.0, 13.0, 13.0, 13.0, 13.0, 13.0])
+    assert torch.allclose(flows_forward[0][0, 0, 0, 0], expected_row)
+
+
+def test_vrt_get_flow_2frames_compose_subframes_rejects_batch_mismatch():
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[3, 8, 8],
+        window_size=[3, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "scflow", "checkpoint": None, "params": {}},
+        opt={
+            "datasets": {
+                "train": {
+                    "spike_flow": {
+                        "representation": "encoding25",
+                        "subframes": 4,
+                        "collapse_policy": "compose_subframes",
+                    }
+                }
+            },
+            "netG": {"input": {"strategy": "concat", "mode": "concat", "raw_ingress_chans": 7}},
+        },
+    )
+    model._last_spike_bins = 4
+
+    class FakeSpikeFlow(torch.nn.Module):
+        input_type = "spike"
+
+        def forward(self, _a, _b):
+            raise AssertionError("spynet should not be called when batch sizes mismatch")
+
+    model.spynet = FakeSpikeFlow()
+
+    x = torch.zeros(1, 3, 3, 8, 8)
+    flow_spike = torch.zeros(2, 12, 25, 8, 8)
+    with pytest.raises(ValueError, match="SCFlow flow_spike temporal dim mismatch"):
+        model.get_flow_2frames(x, flow_spike=flow_spike)
+
+
 def test_vrt_compose_adjacent_flows_rejects_invalid_inputs():
     with pytest.raises(ValueError, match="Expected flows \\[B,T,2,H,W\\]"):
         VRT._compose_adjacent_flows(torch.zeros(1, 4, 3, 6, 6), start=0, end=1)
