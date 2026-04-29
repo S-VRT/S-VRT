@@ -192,6 +192,7 @@ class VRT(nn.Module):
         self._last_fusion_aux = None
         self._last_fusion_meta = None
         self._last_spike_bins = None
+        self.spike_flow_collapse_policy = self._resolve_spike_flow_collapse_policy(opt)
         if self.fusion_enabled:
             fusion_placement = str(fusion_cfg.get('placement', 'early'))
             fusion_mode = fusion_cfg.get('mode', 'replace')
@@ -545,6 +546,32 @@ class VRT(nn.Module):
         if marker in {INPUT_PATH_CONCAT, INPUT_PATH_DUAL, INPUT_PATH_DUAL_FALLBACK}:
             return marker
         return INPUT_PATH_DUAL if self.input_mode == "dual" else INPUT_PATH_CONCAT
+
+    @staticmethod
+    def _resolve_spike_flow_collapse_policy(opt):
+        datasets_cfg = (opt or {}).get("datasets", {}) if isinstance(opt, dict) else {}
+        for split_name in ("train", "test"):
+            split_cfg = datasets_cfg.get(split_name, {}) if isinstance(datasets_cfg, dict) else {}
+            spike_flow_cfg = split_cfg.get("spike_flow", {}) if isinstance(split_cfg, dict) else {}
+            if isinstance(spike_flow_cfg, dict) and "collapse_policy" in spike_flow_cfg:
+                policy = str(spike_flow_cfg.get("collapse_policy", "mean_windows")).strip().lower()
+                break
+        else:
+            policy = "mean_windows"
+
+        aliases = {
+            "mean": "mean_windows",
+            "mean_window": "mean_windows",
+            "mean_windows": "mean_windows",
+            "compose": "compose_subframes",
+            "compose_subframes": "compose_subframes",
+        }
+        if policy not in aliases:
+            raise ValueError(
+                "Unsupported spike_flow.collapse_policy="
+                f"{policy!r}; expected one of {sorted(set(aliases.values()))}."
+            )
+        return aliases[policy]
 
     def forward(self, x, flow_spike=None):
         # x: (N, D, C, H, W)

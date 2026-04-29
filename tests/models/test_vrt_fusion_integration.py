@@ -139,6 +139,47 @@ def test_vrt_mamba_operator_name_is_case_insensitive_for_default_contract():
     assert model.fusion_adapter.frame_contract == "collapsed"
 
 
+def test_vrt_parses_scflow_collapse_policy_from_dataset_config():
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "scflow", "checkpoint": None, "params": {}},
+        opt={
+            "datasets": {
+                "train": {
+                    "spike_flow": {
+                        "representation": "encoding25",
+                        "subframes": 4,
+                        "collapse_policy": "compose_subframes",
+                    }
+                }
+            },
+            "netG": {
+                "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 7},
+                "fusion": {
+                    "placement": "early",
+                    "operator": "mamba",
+                    "out_chans": 3,
+                    "operator_params": {"model_dim": 8, "num_layers": 1},
+                    "early": {"frame_contract": "collapsed"},
+                },
+                "output_mode": "restoration",
+            },
+        },
+    )
+
+    assert model.spike_flow_collapse_policy == "compose_subframes"
+
+
 def test_vrt_forward_triggers_early_fusion(monkeypatch):
     opt = {
         "netG": {
