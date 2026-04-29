@@ -1862,3 +1862,134 @@ def test_vrt_rejects_attention_with_full_t_early_expansion():
             optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
             opt=opt,
         )
+
+
+def _pase_residual_raw_window_opt(in_chans=11, raw_window_length=None):
+    return {
+        "netG": {
+            "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": in_chans},
+            "fusion": {
+                "placement": "early",
+                "operator": "pase_residual",
+                "out_chans": 3,
+                "early": {"frame_contract": "collapsed"},
+            },
+        },
+        "datasets": {
+            "train": {
+                "spike": {
+                    "representation": "raw_window",
+                    "reconstruction": {"type": "spikecv_tfp", "num_bins": 4},
+                    "raw_window_length": raw_window_length,
+                },
+                "tfp_half_win_length": 5,
+            }
+        },
+    }
+
+
+def test_vrt_builds_with_pase_residual_raw_window_config():
+    in_chans = 11
+    model = VRT(
+        upscale=1,
+        in_chans=in_chans,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=_pase_residual_raw_window_opt(in_chans=in_chans),
+    )
+
+    assert model.fusion_operator is not None
+    assert model._fusion_spike_representation == "raw_window"
+    assert model._fusion_raw_window_length == 11
+
+
+def test_vrt_rejects_raw_window_with_non_pase_residual_operator():
+    with pytest.raises(ValueError, match="raw_window.*pase_residual"):
+        VRT(
+            upscale=1,
+            in_chans=11,
+            out_chans=3,
+            img_size=[2, 8, 8],
+            window_size=[2, 4, 4],
+            depths=[1] * 8,
+            indep_reconsts=[],
+            embed_dims=[16] * 8,
+            num_heads=[1] * 8,
+            pa_frames=2,
+            use_flash_attn=False,
+            optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+            opt={
+                "netG": {
+                    "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 11},
+                    "fusion": {
+                        "placement": "early",
+                        "operator": "gated",
+                        "out_chans": 3,
+                    },
+                },
+                "datasets": {
+                    "train": {
+                        "spike": {
+                            "representation": "raw_window",
+                            "reconstruction": {"type": "spikecv_tfp", "num_bins": 4},
+                            "raw_window_length": 11,
+                        },
+                        "tfp_half_win_length": 5,
+                    }
+                },
+            },
+        )
+
+
+def test_vrt_forward_records_raw_window_representation_metadata(monkeypatch):
+    in_chans = 11
+    model = VRT(
+        upscale=1,
+        in_chans=in_chans,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=_pase_residual_raw_window_opt(in_chans=in_chans),
+    )
+
+    dummy_flows = [
+        torch.zeros(1, 1, 2, 8, 8),
+        torch.zeros(1, 1, 2, 4, 4),
+        torch.zeros(1, 1, 2, 2, 2),
+        torch.zeros(1, 1, 2, 1, 1),
+    ]
+
+    monkeypatch.setattr(model, "get_flows", lambda _x, flow_spike=None: (dummy_flows, dummy_flows))
+    monkeypatch.setattr(
+        model,
+        "get_aligned_image_2frames",
+        lambda _x, _fb, _ff: [
+            torch.zeros(1, 2, model.backbone_in_chans * 4, 8, 8),
+            torch.zeros(1, 2, model.backbone_in_chans * 4, 8, 8),
+        ],
+    )
+    monkeypatch.setattr(model, "forward_features", lambda _x, *_args, **_kwargs: torch.zeros_like(_x))
+
+    x = torch.randn(1, 2, in_chans, 8, 8)
+    with torch.no_grad():
+        _ = model(x)
+
+    assert model._last_fusion_meta is not None
+    assert model._last_fusion_meta.get("spike_representation") == "raw_window"
+    assert model._last_fusion_meta.get("effective_spike_channels") == in_chans - 3
+    assert model._last_fusion_meta.get("spike_window_length") == 11

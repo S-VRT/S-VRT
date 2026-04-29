@@ -11,7 +11,7 @@ from PIL import Image
 import cv2
 
 import utils.utils_video as utils_video
-from data.spike_recc import SpikeStream, voxelize_spikes_tfp
+from data.spike_recc import SpikeStream, extract_centered_raw_window, voxelize_spikes_tfp
 from data.spike_recc.middle_tfp.reconstructor import MiddleTFPReconstructor
 from data.spike_recc.snn.reconstructor import SNNReconstructor
 from data.spike_recc.encoding25 import (
@@ -164,8 +164,41 @@ class TrainDatasetRGBSpike(data.Dataset):
         if not isinstance(recon_cfg, dict):
             recon_cfg = {}
         nested_num_bins = recon_cfg.get('num_bins', None)
-        self.spike_channels = int(opt.get('spike_channels', nested_num_bins if nested_num_bins is not None else 4))
-        if nested_num_bins is not None and 'spike_channels' in opt and int(opt['spike_channels']) != int(nested_num_bins):
+
+        # Parse spike representation (tfp or raw_window)
+        self.spike_representation = str(spike_cfg.get('representation', 'tfp')).strip().lower()
+        if self.spike_representation not in {'tfp', 'raw_window'}:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] spike.representation must be one of {{'tfp', 'raw_window'}}, "
+                f"got {self.spike_representation!r}."
+            )
+
+        if self.spike_representation == 'raw_window':
+            raw_window_length_cfg = spike_cfg.get('raw_window_length', None)
+            if raw_window_length_cfg is None:
+                raw_window_length_cfg = 2 * int(opt.get('tfp_half_win_length', 20)) + 1
+            self.raw_window_length = int(raw_window_length_cfg)
+            if self.raw_window_length <= 0 or self.raw_window_length % 2 == 0:
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] raw_window_length must be a positive odd integer, "
+                    f"got {self.raw_window_length}."
+                )
+        else:
+            self.raw_window_length = None
+
+        if self.spike_representation == 'raw_window':
+            default_spike_channels = self.raw_window_length
+        else:
+            default_spike_channels = int(nested_num_bins) if nested_num_bins is not None else 4
+
+        self.spike_channels = int(opt.get('spike_channels', default_spike_channels))
+        if self.spike_representation == 'raw_window':
+            if 'spike_channels' in opt and int(opt['spike_channels']) != self.raw_window_length:
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] Conflicting channel settings for raw_window: "
+                    f"spike_channels={int(opt['spike_channels'])} vs raw_window_length={self.raw_window_length}."
+                )
+        elif nested_num_bins is not None and 'spike_channels' in opt and int(opt['spike_channels']) != int(nested_num_bins):
             raise ValueError(
                 f"[TrainDatasetRGBSpike] Conflicting channel settings: spike_channels={int(opt['spike_channels'])} "
                 f"vs spike.reconstruction.num_bins={int(nested_num_bins)}."
@@ -195,7 +228,17 @@ class TrainDatasetRGBSpike(data.Dataset):
         else:
             self.spike_reconstruction = str(spike_reconstruction_cfg).strip().lower()
             self.middle_tfp_center = int(opt.get('middle_tfp_center', 44))
-        
+
+        if self.spike_representation == 'raw_window':
+            if self.use_precomputed_spike:
+                raise ValueError(
+                    "[TrainDatasetRGBSpike] raw_window representation does not support precomputed spike artifacts."
+                )
+            if self.spike_reconstruction != 'spikecv_tfp':
+                raise ValueError(
+                    "[TrainDatasetRGBSpike] raw_window representation requires spike.reconstruction.type='spikecv_tfp'."
+                )
+
         requested_tfp_device = str(opt.get('tfp_device', 'cpu'))
         if requested_tfp_device.startswith('cuda') and not torch.cuda.is_available():
             print("Requested CUDA device for TFP but CUDA is unavailable. Falling back to CPU.")
@@ -508,6 +551,11 @@ class TrainDatasetRGBSpike(data.Dataset):
                 elif self.spike_reconstruction == 'snn':
                     spike_frame = self._snn_reconstructor(spike_matrix)  # (H, W)
                     spike_voxel = spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+                elif self.spike_representation == 'raw_window':
+                    spike_voxel = extract_centered_raw_window(
+                        spike_matrix,
+                        window_length=self.raw_window_length,
+                    )  # (raw_window_length, H, W)
                 else:
                     spike_voxel = voxelize_spikes_tfp(
                         spike_matrix,

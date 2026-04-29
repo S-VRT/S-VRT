@@ -193,6 +193,8 @@ class VRT(nn.Module):
         self._last_fusion_meta = None
         self._last_spike_bins = None
         self.spike_flow_collapse_policy = self._resolve_spike_flow_collapse_policy(opt)
+        self._fusion_spike_representation = None
+        self._fusion_raw_window_length = None
         if self.fusion_enabled:
             fusion_placement = str(fusion_cfg.get('placement', 'early'))
             fusion_mode = fusion_cfg.get('mode', 'replace')
@@ -305,6 +307,18 @@ class VRT(nn.Module):
                     raise ValueError("fusion.operator='pase_residual' requires fusion.out_chans=3 for early fusion.")
                 if effective_frame_contract != 'collapsed':
                     raise ValueError("fusion.operator='pase_residual' requires fusion.early.frame_contract='collapsed'.")
+
+            # Resolve spike representation from dataset configs
+            spike_repr, raw_win_len = self._resolve_fusion_spike_representation(opt)
+            self._fusion_spike_representation = spike_repr
+            self._fusion_raw_window_length = raw_win_len
+
+            # Guard: raw_window is only allowed with pase_residual operator
+            if spike_repr == 'raw_window' and normalized_operator_name != 'pase_residual':
+                raise ValueError(
+                    f"raw_window spike representation is only allowed with fusion.operator='pase_residual', "
+                    f"got operator={operator_name!r}."
+                )
 
             early_operator_spike_chans = spike_input_chans if normalized_operator_name == 'pase_residual' else 1
             if fusion_placement == 'early':
@@ -499,6 +513,48 @@ class VRT(nn.Module):
             self.linear_fuse = nn.Conv2d(embed_dims[0]*img_size[0], num_feat, kernel_size=1 , stride=1)
             self.conv_last = nn.Conv2d(num_feat, out_chans , kernel_size=7 , stride=1, padding=0)
 
+    def _resolve_fusion_spike_representation(self, opt) -> tuple:
+        """Resolve spike representation from datasets train/test configs.
+
+        Returns (representation, raw_window_length) where raw_window_length is
+        None for tfp representation.
+        """
+        datasets_cfg = ((opt or {}).get('datasets', {}) or {})
+        train_cfg = (datasets_cfg.get('train', {}) or {})
+        test_cfg = (datasets_cfg.get('test', {}) or {})
+
+        def _get_repr(ds_cfg):
+            spike_cfg = ds_cfg.get('spike', {}) if isinstance(ds_cfg.get('spike', {}), dict) else {}
+            return str(spike_cfg.get('representation', 'tfp')).strip().lower() if spike_cfg else None
+
+        def _get_raw_win_len(ds_cfg):
+            spike_cfg = ds_cfg.get('spike', {}) if isinstance(ds_cfg.get('spike', {}), dict) else {}
+            if not spike_cfg:
+                return None
+            raw_window_length_cfg = spike_cfg.get('raw_window_length', None)
+            if raw_window_length_cfg is None:
+                tfp_half = int(ds_cfg.get('tfp_half_win_length', 20))
+                raw_window_length_cfg = 2 * tfp_half + 1
+            return int(raw_window_length_cfg)
+
+        train_repr = _get_repr(train_cfg)
+        test_repr = _get_repr(test_cfg)
+
+        # Resolve representation: prefer train, fall back to test, default to tfp
+        if train_repr and test_repr and train_repr != test_repr:
+            raise ValueError(
+                f"[VRT] Conflicting spike representations in train ({train_repr!r}) "
+                f"and test ({test_repr!r}) dataset configs."
+            )
+        representation = train_repr or test_repr or 'tfp'
+
+        if representation == 'raw_window':
+            raw_window_length = _get_raw_win_len(train_cfg) if train_repr == 'raw_window' else _get_raw_win_len(test_cfg)
+        else:
+            raw_window_length = None
+
+        return representation, raw_window_length
+
     def reflection_pad2d(self, x, pad=1):
         x = torch.cat([torch.flip(x[:, :, 1:pad+1, :], [2]), x, torch.flip(x[:, :, -pad-1:-1, :], [2])], 2)
         x = torch.cat([torch.flip(x[:, :, :, 1:pad+1], [3]), x, torch.flip(x[:, :, :, -pad-1:-1], [3])], 3)
@@ -620,6 +676,13 @@ class VRT(nn.Module):
                 self._last_fusion_exec = backbone_view
                 self._last_fusion_aux = aux_view
                 self._last_fusion_meta = meta
+                # Augment meta with spike representation info
+                if self._fusion_spike_representation is not None:
+                    self._last_fusion_meta = dict(meta)
+                    self._last_fusion_meta['spike_representation'] = self._fusion_spike_representation
+                    self._last_fusion_meta['effective_spike_channels'] = spike_bins
+                    if self._fusion_spike_representation == 'raw_window':
+                        self._last_fusion_meta['spike_window_length'] = self._fusion_raw_window_length
                 self._last_spike_bins = spike_bins
                 x = backbone_view
                 if not (
