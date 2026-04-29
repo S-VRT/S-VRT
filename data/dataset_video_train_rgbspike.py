@@ -140,15 +140,18 @@ class TrainDatasetRGBSpike(data.Dataset):
                 f"got {self.spike_representation!r}."
             )
 
-        raw_window_length_cfg = spike_cfg.get('raw_window_length', None)
-        if raw_window_length_cfg is None:
-            raw_window_length_cfg = 2 * int(opt.get('tfp_half_win_length', 20)) + 1
-        self.raw_window_length = int(raw_window_length_cfg)
-        if self.raw_window_length <= 0 or self.raw_window_length % 2 == 0:
-            raise ValueError(
-                f"[TrainDatasetRGBSpike] raw_window_length must be a positive odd integer, "
-                f"got {self.raw_window_length}."
-            )
+        if self.spike_representation == 'raw_window':
+            raw_window_length_cfg = spike_cfg.get('raw_window_length', None)
+            if raw_window_length_cfg is None:
+                raw_window_length_cfg = 2 * int(opt.get('tfp_half_win_length', 20)) + 1
+            self.raw_window_length = int(raw_window_length_cfg)
+            if self.raw_window_length <= 0 or self.raw_window_length % 2 == 0:
+                raise ValueError(
+                    f"[TrainDatasetRGBSpike] raw_window_length must be a positive odd integer, "
+                    f"got {self.raw_window_length}."
+                )
+        else:
+            self.raw_window_length = None
 
         if self.spike_representation == 'raw_window':
             default_spike_channels = self.raw_window_length

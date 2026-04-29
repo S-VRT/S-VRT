@@ -1,7 +1,6 @@
 import numpy as np
 import pytest
 
-from data.dataset_video_test import TestDataset
 from data.dataset_video_train_rgbspike import TrainDatasetRGBSpike
 
 
@@ -104,3 +103,20 @@ def test_train_dataset_rejects_precomputed_raw_window_mode(tmp_path):
 
     with pytest.raises(ValueError, match="precomputed spike artifacts"):
         TrainDatasetRGBSpike(opt)
+
+
+def test_train_dataset_tfp_ignores_invalid_raw_window_length(tmp_path):
+    dataset = TrainDatasetRGBSpike(
+        _train_opt(
+            tmp_path,
+            spike={
+                "representation": "tfp",
+                "reconstruction": {"type": "spikecv_tfp", "num_bins": 4},
+                "raw_window_length": 10,
+            },
+        )
+    )
+
+    assert dataset.spike_representation == "tfp"
+    assert dataset.raw_window_length is None
+    assert dataset.spike_channels == 4
