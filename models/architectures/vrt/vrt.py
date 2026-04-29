@@ -549,16 +549,6 @@ class VRT(nn.Module):
 
     @staticmethod
     def _resolve_spike_flow_collapse_policy(opt):
-        datasets_cfg = (opt or {}).get("datasets", {}) if isinstance(opt, dict) else {}
-        for split_name in ("train", "test"):
-            split_cfg = datasets_cfg.get(split_name, {}) if isinstance(datasets_cfg, dict) else {}
-            spike_flow_cfg = split_cfg.get("spike_flow", {}) if isinstance(split_cfg, dict) else {}
-            if isinstance(spike_flow_cfg, dict) and "collapse_policy" in spike_flow_cfg:
-                policy = str(spike_flow_cfg.get("collapse_policy", "mean_windows")).strip().lower()
-                break
-        else:
-            policy = "mean_windows"
-
         aliases = {
             "mean": "mean_windows",
             "mean_window": "mean_windows",
@@ -566,12 +556,25 @@ class VRT(nn.Module):
             "compose": "compose_subframes",
             "compose_subframes": "compose_subframes",
         }
-        if policy not in aliases:
-            raise ValueError(
-                "Unsupported spike_flow.collapse_policy="
-                f"{policy!r}; expected one of {sorted(set(aliases.values()))}."
-            )
-        return aliases[policy]
+        datasets_cfg = (opt or {}).get("datasets", {}) if isinstance(opt, dict) else {}
+        policies = {}
+        for split_name in ("train", "test"):
+            split_cfg = datasets_cfg.get(split_name, {}) if isinstance(datasets_cfg, dict) else {}
+            spike_flow_cfg = split_cfg.get("spike_flow", {}) if isinstance(split_cfg, dict) else {}
+            if isinstance(spike_flow_cfg, dict) and "collapse_policy" in spike_flow_cfg:
+                policy = str(spike_flow_cfg.get("collapse_policy", "mean_windows")).strip().lower()
+                if policy not in aliases:
+                    raise ValueError(
+                        "Unsupported spike_flow.collapse_policy="
+                        f"{policy!r}; expected one of {sorted(set(aliases.values()))}."
+                    )
+                policies[split_name] = aliases[policy]
+
+        if len(set(policies.values())) > 1:
+            raise ValueError(f"Conflicting spike_flow.collapse_policy values across dataset splits: {policies}.")
+        if policies:
+            return next(iter(policies.values()))
+        return "mean_windows"
 
     def forward(self, x, flow_spike=None):
         # x: (N, D, C, H, W)

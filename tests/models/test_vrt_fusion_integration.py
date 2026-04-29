@@ -180,6 +180,18 @@ def test_vrt_parses_scflow_collapse_policy_from_dataset_config():
     assert model.spike_flow_collapse_policy == "compose_subframes"
 
 
+def test_vrt_rejects_conflicting_scflow_collapse_policies():
+    opt = {
+        "datasets": {
+            "train": {"spike_flow": {"collapse_policy": "compose_subframes"}},
+            "test": {"spike_flow": {"collapse_policy": "mean_windows"}},
+        }
+    }
+
+    with pytest.raises(ValueError, match="Conflicting spike_flow.collapse_policy"):
+        VRT._resolve_spike_flow_collapse_policy(opt)
+
+
 def test_vrt_forward_triggers_early_fusion(monkeypatch):
     opt = {
         "netG": {
