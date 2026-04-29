@@ -211,7 +211,7 @@ class VRT(nn.Module):
                     f"Unsupported fusion.early.frame_contract={requested_frame_contract!r}; "
                     "expected one of: operator_default, collapsed, expanded"
                 )
-            operator_default_contract = 'collapsed' if normalized_operator_name in {'mamba', 'pase_residual'} else 'expanded'
+            operator_default_contract = 'collapsed' if normalized_operator_name in {'mamba', 'attention'} else 'expanded'
             effective_frame_contract = (
                 operator_default_contract
                 if requested_frame_contract == 'operator_default'
@@ -288,13 +288,15 @@ class VRT(nn.Module):
                     raise ValueError("full-T early fusion requires spikecv_tfp")
 
             operator_params = fusion_cfg.get('operator_params', {})
-            if normalized_operator_name == 'mamba':
+            if normalized_operator_name in {'mamba', 'attention'}:
                 if fusion_placement != 'early':
-                    raise ValueError("fusion.operator='mamba' requires fusion.placement='early'.")
+                    raise ValueError(f"fusion.operator='{normalized_operator_name}' requires fusion.placement='early'.")
                 if early_out_chans != 3:
-                    raise ValueError("fusion.operator='mamba' requires fusion.out_chans=3 for early fusion.")
+                    raise ValueError(f"fusion.operator='{normalized_operator_name}' requires fusion.out_chans=3 for early fusion.")
                 if bool(early_cfg.get('expand_to_full_t', False)) and effective_frame_contract == 'collapsed':
-                    raise ValueError("fusion.operator='mamba' does not support fusion.early.expand_to_full_t=true.")
+                    raise ValueError(
+                        f"fusion.operator='{normalized_operator_name}' does not support fusion.early.expand_to_full_t=true."
+                    )
             if normalized_operator_name == 'pase_residual':
                 if fusion_placement != 'early':
                     raise ValueError("fusion.operator='pase_residual' requires fusion.placement='early'.")

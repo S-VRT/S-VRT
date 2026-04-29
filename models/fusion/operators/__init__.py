@@ -1,5 +1,6 @@
 from typing import Any
 
+from .attention import AttentionFusionOperator
 from .concat import ConcatFusionOperator
 from .gated import GatedFusionOperator
 from .mamba import MambaFusionOperator
@@ -43,6 +44,13 @@ def build_operator(
             out_chans=out_chans,
             operator_params=operator_params,
         )
+    if normalized_name == 'attention':
+        return AttentionFusionOperator(
+            rgb_chans=rgb_chans,
+            spike_chans=spike_chans,
+            out_chans=out_chans,
+            operator_params=operator_params,
+        )
     if normalized_name == 'pase_residual':
         return PaseResidualFusionOperator(
             rgb_chans=rgb_chans,
@@ -55,6 +63,7 @@ def build_operator(
 
 __all__ = [
     'build_operator',
+    'AttentionFusionOperator',
     'ConcatFusionOperator',
     'GatedFusionOperator',
     'MambaFusionOperator',
