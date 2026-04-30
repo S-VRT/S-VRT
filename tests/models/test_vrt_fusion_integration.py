@@ -1993,3 +1993,120 @@ def test_vrt_forward_records_raw_window_representation_metadata(monkeypatch):
     assert model._last_fusion_meta.get("spike_representation") == "raw_window"
     assert model._last_fusion_meta.get("effective_spike_channels") == in_chans - 3
     assert model._last_fusion_meta.get("spike_window_length") == 11
+
+
+def _dual_scale_raw_window_opt(in_chans=21 + 3, raw_window_length=21):
+    return {
+        "netG": {
+            "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": in_chans},
+            "fusion": {
+                "placement": "early",
+                "operator": "dual_scale_temporal_mamba",
+                "out_chans": 3,
+                "operator_params": {
+                    "token_dim": 8,
+                    "patch_stride": 4,
+                    "local_layers": 1,
+                    "global_layers": 1,
+                },
+            },
+            "output_mode": "restoration",
+        },
+        "datasets": {
+            "train": {
+                "spike": {
+                    "representation": "raw_window",
+                    "raw_window_length": raw_window_length,
+                    "reconstruction": {"type": "spikecv_tfp", "num_bins": 4},
+                }
+            }
+        },
+    }
+
+
+def test_vrt_builds_with_dual_scale_temporal_mamba_raw_window_config():
+    model = VRT(
+        upscale=1,
+        in_chans=24,
+        out_chans=3,
+        img_size=[6, 16, 16],
+        window_size=[6, 8, 8],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=_dual_scale_raw_window_opt(),
+    )
+
+    assert model.fusion_operator is not None
+    assert model.fusion_operator.spike_chans == 21
+    assert model._fusion_spike_representation == "raw_window"
+    assert model._fusion_raw_window_length == 21
+    assert model.fusion_adapter.frame_contract == "collapsed"
+
+
+def test_vrt_rejects_dual_scale_temporal_mamba_without_raw_window():
+    bad_opt = _dual_scale_raw_window_opt()
+    bad_opt["datasets"]["train"]["spike"]["representation"] = "tfp"
+
+    with pytest.raises(ValueError, match="raw_window"):
+        VRT(
+            upscale=1,
+            in_chans=7,
+            out_chans=3,
+            img_size=[6, 16, 16],
+            window_size=[6, 8, 8],
+            depths=[1] * 8,
+            indep_reconsts=[],
+            embed_dims=[16] * 8,
+            num_heads=[1] * 8,
+            pa_frames=2,
+            use_flash_attn=False,
+            optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+            opt=bad_opt,
+        )
+
+
+def test_vrt_dual_scale_temporal_mamba_records_representation_metadata(monkeypatch):
+    model = VRT(
+        upscale=1,
+        in_chans=24,
+        out_chans=3,
+        img_size=[6, 8, 8],
+        window_size=[6, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=_dual_scale_raw_window_opt(),
+    )
+
+    monkeypatch.setattr(model.fusion_adapter.operator, "forward", lambda rgb, spike: rgb)
+    monkeypatch.setattr(
+        model.fusion_adapter.operator,
+        "diagnostics",
+        lambda: {"local_norm": 1.0, "global_norm": 2.0, "summary_gate_mean": 0.5, "warmup_stage": "full"},
+    )
+    dummy_flows = [torch.zeros(1, 5, 2, 8, 8)] * 4
+    monkeypatch.setattr(model, "get_flows", lambda _x, flow_spike=None: (dummy_flows, dummy_flows))
+    monkeypatch.setattr(
+        model,
+        "get_aligned_image_2frames",
+        lambda _x, _fb, _ff: [torch.zeros(1, 6, model.backbone_in_chans * 4, 8, 8)] * 2,
+    )
+    monkeypatch.setattr(model, "forward_features", lambda _x, *_args, **_kwargs: torch.zeros_like(_x))
+
+    x = torch.randn(1, 6, 24, 8, 8)
+    with torch.no_grad():
+        _ = model(x)
+
+    assert model._last_fusion_meta["spike_representation"] == "raw_window"
+    assert model._last_fusion_meta["spike_window_length"] == 21
+    assert model._last_fusion_meta["local_norm"] == 1.0
+    assert model._last_fusion_meta["global_norm"] == 2.0
