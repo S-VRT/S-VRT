@@ -48,24 +48,48 @@ def compute_error_map(output: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
     return data.mean(dim=0)
 
 
-def gradient_activation_cam(activation: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def _select_activation_slice(tensor: torch.Tensor, time_index: int | None) -> torch.Tensor:
+    if tensor.ndim == 5:
+        index = tensor.shape[1] // 2 if time_index is None else int(time_index)
+        return tensor[0, index]
+    if tensor.ndim == 4:
+        return tensor[0]
+    raise ValueError(f"Expected 4D or 5D activation, got {tuple(tensor.shape)}")
+
+
+def gradcam_from_activation(
+    activation: torch.Tensor,
+    target: torch.Tensor,
+    time_index: int | None = None,
+) -> torch.Tensor:
     if activation.grad is not None:
         activation.grad.zero_()
     target.backward(retain_graph=True)
     if activation.grad is None:
         raise RuntimeError("Activation gradient was not retained")
-    grad = activation.grad.detach()
-    act = activation.detach()
-    if act.ndim == 5:
-        weights = grad.mean(dim=(-1, -2), keepdim=True)
-        cam = (weights * act).sum(dim=2)
-        cam = cam[0, cam.shape[1] // 2]
-    elif act.ndim == 4:
-        weights = grad.mean(dim=(-1, -2), keepdim=True)
-        cam = (weights * act).sum(dim=1)[0]
-    else:
-        raise ValueError(f"Expected 4D or 5D activation, got {tuple(act.shape)}")
-    return torch.relu(cam.detach())
+    grad = _select_activation_slice(activation.grad.detach(), time_index)
+    act = _select_activation_slice(activation.detach(), time_index)
+    weights = grad.mean(dim=(-1, -2), keepdim=True)
+    return torch.relu((weights * act).sum(dim=0).detach())
+
+
+def hirescam_from_activation(
+    activation: torch.Tensor,
+    target: torch.Tensor,
+    time_index: int | None = None,
+) -> torch.Tensor:
+    if activation.grad is not None:
+        activation.grad.zero_()
+    target.backward(retain_graph=True)
+    if activation.grad is None:
+        raise RuntimeError("Activation gradient was not retained")
+    grad = _select_activation_slice(activation.grad.detach(), time_index)
+    act = _select_activation_slice(activation.detach(), time_index)
+    return torch.relu((grad * act).sum(dim=0).detach())
+
+
+def gradient_activation_cam(activation: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    return gradcam_from_activation(activation, target, time_index=None)
 
 
 def _clone_with_grad(tensor: torch.Tensor) -> torch.Tensor:

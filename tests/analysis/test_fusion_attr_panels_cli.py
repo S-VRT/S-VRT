@@ -90,7 +90,7 @@ def test_fusion_attribution_cli_dry_run_writes_manifest(tmp_path: Path):
     assert manifest["num_samples"] == 1
 
 
-from scripts.analysis.fusion_attribution import select_center_frame_tensor
+from scripts.analysis.fusion_attribution import resolve_cam_default_scope, resolve_tile_stride, select_center_frame_tensor
 
 
 def test_select_center_frame_tensor_handles_5d_and_4d():
@@ -99,6 +99,16 @@ def test_select_center_frame_tensor_handles_5d_and_4d():
     image = torch.ones(1, 3, 4, 4)
     assert select_center_frame_tensor(video).max().item() == 7
     assert select_center_frame_tensor(image).max().item() == 1
+
+
+def test_resolve_tile_stride_only_defaults_when_omitted():
+    assert resolve_tile_stride(256, None) == 128
+    assert resolve_tile_stride(256, 0) == 0
+
+
+def test_resolve_cam_default_scope_uses_exported_scope():
+    assert resolve_cam_default_scope(["fullframe", "roi"]) == "fullframe"
+    assert resolve_cam_default_scope(["roi"]) == "roi"
 
 
 import pytest
@@ -137,3 +147,52 @@ def test_fusion_attribution_cli_help_mentions_ig_and_pca():
     assert "--ig-steps" in result.stdout
     assert "--save-ig" in result.stdout
     assert "--save-pca" in result.stdout
+
+
+def test_fusion_attribution_cli_help_mentions_cam_scopes():
+    result = subprocess.run(
+        ["uv", "run", "python", "scripts/analysis/fusion_attribution.py", "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "--cam-scopes" in result.stdout
+    assert "--stitch-weight" in result.stdout
+
+
+def test_fusion_attribution_cli_dry_run_manifest_keeps_requested_cam_method(tmp_path: Path):
+    opt = tmp_path / "opt.json"
+    samples = tmp_path / "samples.json"
+    out = tmp_path / "out"
+    opt.write_text('{"model":"vrt","netG":{"fusion":{"operator":"gated","placement":"early","mode":"replace"}}}', encoding="utf-8")
+    samples.write_text(
+        '{"samples":[{"clip":"clip","frame":"000001","frame_index":0,"mask":{"type":"box","xyxy":[0,0,2,2]},"reason":"unit"}]}',
+        encoding="utf-8",
+    )
+    subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "scripts/analysis/fusion_attribution.py",
+            "--opt",
+            str(opt),
+            "--checkpoint",
+            "missing.pth",
+            "--samples",
+            str(samples),
+            "--out",
+            str(out),
+            "--cam-method",
+            "hirescam",
+            "--dry-run",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["target"] == "masked_charbonnier"
+    assert manifest["cam_method"] == "hirescam"
+    assert manifest["cam_method"] in {"gradcam", "hirescam", "fallback"}
+    assert manifest["num_samples"] == 1
