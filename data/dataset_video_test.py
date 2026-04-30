@@ -230,10 +230,6 @@ class TrainDatasetRGBSpike(data.Dataset):
             self.middle_tfp_center = int(opt.get('middle_tfp_center', 44))
 
         if self.spike_representation == 'raw_window':
-            if self.use_precomputed_spike:
-                raise ValueError(
-                    "[TrainDatasetRGBSpike] raw_window representation does not support precomputed spike artifacts."
-                )
             if self.spike_reconstruction != 'spikecv_tfp':
                 raise ValueError(
                     "[TrainDatasetRGBSpike] raw_window representation requires spike.reconstruction.type='spikecv_tfp'."
@@ -576,7 +572,10 @@ class TrainDatasetRGBSpike(data.Dataset):
         spike_path = Path(spike_path)
         clip_name = spike_path.parent.parent.name
         frame_name = spike_path.stem
-        dir_name = f'tfp_b{self.spike_channels}_hw{self.tfp_half_win_length}'
+        if self.spike_representation == 'raw_window':
+            dir_name = f'raw_window_l{self.raw_window_length}'
+        else:
+            dir_name = f'tfp_b{self.spike_channels}_hw{self.tfp_half_win_length}'
         return self.precomputed_spike_root / clip_name / dir_name / frame_name
 
     def _load_precomputed_spike_voxel(self, spike_path):
@@ -614,7 +613,9 @@ class TrainDatasetRGBSpike(data.Dataset):
             raise ValueError(f"Unsupported precomputed spike format: {self.precomputed_spike_format!r}")
 
         spike_voxel_arr = np.asarray(spike_voxel)
-        if np.issubdtype(spike_voxel_arr.dtype, np.integer):
+        if self.spike_representation == 'raw_window':
+            spike_voxel = spike_voxel_arr.astype(np.float32)
+        elif np.issubdtype(spike_voxel_arr.dtype, np.integer):
             # Precomputed uint8 artifacts store the original 0..255 TFP output losslessly.
             spike_voxel = spike_voxel_arr.astype(np.float32) / 255.0
         else:

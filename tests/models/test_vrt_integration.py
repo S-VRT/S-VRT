@@ -115,6 +115,37 @@ class TestVRTIntegration:
             assert flow_f_reshaped.shape == expected_shape, \
                 f"Forward flow scale {i} shape mismatch: expected {expected_shape}, got {flow_f_reshaped.shape}"
 
+    def test_vrt_spynet_flow_path_matches_kair_spynet_core(self, device):
+        """VRT's pluggable SpyNet path should preserve KAIR SpyNet behavior."""
+        from models.optical_flow import create_optical_flow
+        from models.optical_flow.spynet import SpyNet
+
+        torch.manual_seed(17)
+        b, n, h, w = 1, 4, 64, 64
+        x = torch.rand(b, n, 3, h, w, device=device)
+        x_1 = x[:, :-1].reshape(-1, 3, h, w)
+        x_2 = x[:, 1:].reshape(-1, 3, h, w)
+
+        wrapper = create_optical_flow(
+            "spynet",
+            checkpoint=None,
+            device=device,
+            return_levels=[2, 3, 4, 5],
+        )
+        core = SpyNet(load_path=None, return_levels=[2, 3, 4, 5]).to(device).eval()
+        core.load_state_dict(wrapper.model.state_dict())
+
+        with torch.no_grad():
+            expected = core(x_1, x_2)
+            actual = wrapper(x_1, x_2)
+
+        max_abs = max(float((exp - got).abs().max()) for exp, got in zip(expected, actual))
+        mean_abs = sum(float((exp - got).abs().mean()) for exp, got in zip(expected, actual)) / len(expected)
+        assert max_abs <= 1e-6 and mean_abs <= 1e-7, (
+            "VRT create_optical_flow('spynet') path does not match the KAIR-derived SpyNet core "
+            f"for RGB [0,1] inputs; observed max_abs={max_abs:.6f}, mean_abs={mean_abs:.6f}."
+        )
+
     @pytest.mark.skip(reason="SeaRAFT integration needs format alignment with VRT reshape logic")
     def test_vrt_with_sea_raft_integration(self, device):
         """Test VRT integration with SeaRAFT optical flow - currently skipped due to format mismatch."""

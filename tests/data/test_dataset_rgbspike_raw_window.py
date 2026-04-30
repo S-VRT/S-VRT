@@ -91,19 +91,57 @@ def test_train_dataset_load_spike_voxel_returns_centered_raw_window(tmp_path, mo
     assert np.array_equal(spike, spike_matrix[2:7])
 
 
-def test_train_dataset_rejects_precomputed_raw_window_mode(tmp_path):
+def test_train_dataset_loads_precomputed_raw_window_artifact(tmp_path, monkeypatch):
     opt = _train_opt(
         tmp_path,
         spike={
             "representation": "raw_window",
-            "raw_window_length": 11,
+            "raw_window_length": 5,
             "precomputed": {"enable": True, "format": "npy", "root": "auto"},
             "reconstruction": {"type": "spikecv_tfp", "num_bins": 4},
         },
     )
+    artifact_dir = tmp_path / "spike" / "clipA" / "raw_window_l5"
+    artifact_dir.mkdir(parents=True)
+    expected = (np.arange(5 * 2 * 2, dtype=np.uint8).reshape(5, 2, 2) % 2)
+    np.save(artifact_dir / "00000000.npy", expected)
 
-    with pytest.raises(ValueError, match="precomputed spike artifacts"):
-        TrainDatasetRGBSpike(opt)
+    dataset = TrainDatasetRGBSpike(opt)
+    monkeypatch.setattr(
+        "data.dataset_video_train_rgbspike.SpikeStream",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("SpikeStream should not be used")),
+    )
+
+    spike = dataset._load_spike_voxel("clipA", 0, tmp_path / "unused.dat")
+
+    assert spike.dtype == np.float32
+    assert np.array_equal(spike, expected.astype(np.float32))
+
+
+def test_train_dataset_loads_precomputed_raw_window_crop_without_full_array_cast(tmp_path):
+    opt = _train_opt(
+        tmp_path,
+        spike={
+            "representation": "raw_window",
+            "raw_window_length": 5,
+            "precomputed": {"enable": True, "format": "npy", "root": "auto"},
+            "reconstruction": {"type": "spikecv_tfp", "num_bins": 4},
+        },
+    )
+    artifact_dir = tmp_path / "spike" / "clipA" / "raw_window_l5"
+    artifact_dir.mkdir(parents=True)
+    source = np.arange(5 * 8 * 8, dtype=np.uint8).reshape(5, 8, 8)
+    np.save(artifact_dir / "00000000.npy", source)
+
+    dataset = TrainDatasetRGBSpike(opt)
+    cropped = dataset._load_precomputed_spike_voxel(
+        "clipA",
+        0,
+        crop={"top": 2, "left": 3, "height": 4, "width": 3},
+    )
+
+    assert cropped.dtype == np.float32
+    assert np.array_equal(cropped, source[:, 2:6, 3:6].astype(np.float32))
 
 
 def test_train_dataset_tfp_ignores_invalid_raw_window_length(tmp_path):
@@ -188,3 +226,30 @@ def test_test_dataset_load_spike_voxel_returns_centered_raw_window(tmp_path, mon
 
     assert spike.shape == (5, 2, 2)
     assert np.array_equal(spike, spike_matrix[2:7])
+
+
+def test_test_dataset_loads_precomputed_raw_window_artifact(tmp_path, monkeypatch):
+    opt = _test_opt(
+        tmp_path,
+        spike={
+            "representation": "raw_window",
+            "raw_window_length": 5,
+            "precomputed": {"enable": True, "format": "npy", "root": "auto"},
+            "reconstruction": {"type": "spikecv_tfp", "num_bins": 4},
+        },
+    )
+    artifact_dir = tmp_path / "spike" / "clipA" / "raw_window_l5"
+    artifact_dir.mkdir(parents=True)
+    expected = (np.arange(5 * 2 * 2, dtype=np.uint8).reshape(5, 2, 2) % 2)
+    np.save(artifact_dir / "00000000.npy", expected)
+
+    dataset = TestDatasetRGBSpike(opt)
+    monkeypatch.setattr(
+        "data.dataset_video_test.SpikeStream",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("SpikeStream should not be used")),
+    )
+
+    spike = dataset._load_spike_voxel(tmp_path / "spike" / "clipA" / "spike" / "00000000.dat")
+
+    assert spike.dtype == np.float32
+    assert np.array_equal(spike, expected.astype(np.float32))

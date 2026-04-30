@@ -197,10 +197,6 @@ class TrainDatasetRGBSpike(data.Dataset):
             self.middle_tfp_center = int(opt.get('middle_tfp_center', 44))
 
         if self.spike_representation == 'raw_window':
-            if self.use_precomputed_spike:
-                raise ValueError(
-                    "[TrainDatasetRGBSpike] raw_window representation does not support precomputed spike artifacts."
-                )
             if self.spike_reconstruction != 'spikecv_tfp':
                 raise ValueError(
                     "[TrainDatasetRGBSpike] raw_window representation requires spike.reconstruction.type='spikecv_tfp'."
@@ -362,14 +358,20 @@ class TrainDatasetRGBSpike(data.Dataset):
         img_gts = []
         spike_voxels = []
         flow_spikes = []
+        defer_precomputed_raw_window_crop = (
+            self.use_precomputed_spike
+            and self.spike_representation == 'raw_window'
+            and self.precomputed_spike_format == 'npy'
+        )
 
         img_gt_path_reference = None
         for neighbor in neighbor_list:
             neighbor_key = f'{clip_name}/{neighbor:{self.filename_tmpl}}'
-            sample = self._load_raw_frame(neighbor_key)
+            sample = self._load_rgb_frame(neighbor_key) if defer_precomputed_raw_window_crop else self._load_raw_frame(neighbor_key)
             img_lqs.append(sample['lq'])
             img_gts.append(sample['gt'])
-            spike_voxels.append(sample['spike'])
+            if not defer_precomputed_raw_window_crop:
+                spike_voxels.append(sample['spike'])
             if self.use_encoding25_flow:
                 flow_spikes.append(self._load_encoded_flow_spike(clip_name, neighbor))
             img_gt_path_reference = sample['gt_path']
@@ -384,34 +386,29 @@ class TrainDatasetRGBSpike(data.Dataset):
         cropped_h, cropped_w = img_lqs[0].shape[:2]
 
         def _crop_resize_chw(arr_chw, expected_channels, name):
-            if arr_chw.ndim != 3:
-                raise ValueError(
-                    f"[TrainDatasetRGBSpike] {name} must be [C,H,W], got shape {arr_chw.shape}."
-                )
-            if expected_channels is not None and arr_chw.shape[0] != expected_channels:
-                label = "Spike" if name == "Spike voxel" else name
-                raise ValueError(
-                    f"[TrainDatasetRGBSpike] {label} channels mismatch before resize: "
-                    f"expected {expected_channels}, got {arr_chw.shape[0]}."
-                )
-
-            src_h, src_w = arr_chw.shape[1:]
-            ratio_h = src_h / lq_h_orig
-            ratio_w = src_w / lq_w_orig
-            src_top = round(crop_params['top'] * ratio_h)
-            src_left = round(crop_params['left'] * ratio_w)
-            src_crop_h = max(round(crop_params['lq_patch_size'] * ratio_h), 1)
-            src_crop_w = max(round(crop_params['lq_patch_size'] * ratio_w), 1)
-            src_top = max(min(src_top, src_h - src_crop_h), 0)
-            src_left = max(min(src_left, src_w - src_crop_w), 0)
-            arr_cropped = arr_chw[:, src_top:src_top + src_crop_h, src_left:src_left + src_crop_w]
-
+            crop = self._resolve_chw_crop(arr_chw.shape, crop_params, lq_h_orig, lq_w_orig, expected_channels, name)
+            arr_cropped = self._apply_chw_crop(arr_chw, crop)
             return resize_chw_image(arr_cropped, (cropped_w, cropped_h))
 
         # Crop spike voxels to the RGB-corresponding region, then resize to the RGB crop size.
         spike_voxels_resized = []
-        for spike_voxel in spike_voxels:
-            spike_voxels_resized.append(_crop_resize_chw(spike_voxel, self.spike_channels, "Spike voxel"))
+        if defer_precomputed_raw_window_crop:
+            spike_shape = (self.spike_channels, self.spike_h, self.spike_w)
+            spike_crop = self._resolve_chw_crop(
+                spike_shape,
+                crop_params,
+                lq_h_orig,
+                lq_w_orig,
+                self.spike_channels,
+                "Spike voxel",
+            )
+            for neighbor in neighbor_list:
+                spike_file = self.spike_root / clip_name / 'spike' / f'{neighbor:{self.filename_tmpl}}.dat'
+                spike_voxel = self._load_spike_voxel(clip_name, neighbor, spike_file, crop=spike_crop)
+                spike_voxels_resized.append(resize_chw_image(spike_voxel, (cropped_w, cropped_h)))
+        else:
+            for spike_voxel in spike_voxels:
+                spike_voxels_resized.append(_crop_resize_chw(spike_voxel, self.spike_channels, "Spike voxel"))
 
         flow_spikes_resized = []
         if self.use_encoding25_flow:
@@ -496,9 +493,46 @@ class TrainDatasetRGBSpike(data.Dataset):
         """Create an isolated FileClient instance (for threaded cache warmup)."""
         return utils_video.FileClient(self.io_backend_type, **self.io_backend_opt)
 
+    def _resolve_chw_crop(self, arr_shape, crop_params, lq_h_orig, lq_w_orig, expected_channels, name):
+        if len(arr_shape) != 3:
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] {name} must be [C,H,W], got shape {arr_shape}."
+            )
+        if expected_channels is not None and arr_shape[0] != expected_channels:
+            label = "Spike" if name == "Spike voxel" else name
+            raise ValueError(
+                f"[TrainDatasetRGBSpike] {label} channels mismatch before resize: "
+                f"expected {expected_channels}, got {arr_shape[0]}."
+            )
 
-    def _load_raw_frame(self, key, file_client=None):
-        """Load a single raw RGB+Spike frame triplet from disk/LMDB without augmentation."""
+        src_h, src_w = arr_shape[1:]
+        ratio_h = src_h / lq_h_orig
+        ratio_w = src_w / lq_w_orig
+        src_crop_h = max(round(crop_params['lq_patch_size'] * ratio_h), 1)
+        src_crop_w = max(round(crop_params['lq_patch_size'] * ratio_w), 1)
+        src_crop_h = min(src_crop_h, src_h)
+        src_crop_w = min(src_crop_w, src_w)
+        src_top = round(crop_params['top'] * ratio_h)
+        src_left = round(crop_params['left'] * ratio_w)
+        src_top = max(min(src_top, src_h - src_crop_h), 0)
+        src_left = max(min(src_left, src_w - src_crop_w), 0)
+        return {
+            'top': src_top,
+            'left': src_left,
+            'height': src_crop_h,
+            'width': src_crop_w,
+        }
+
+    @staticmethod
+    def _apply_chw_crop(arr_chw, crop):
+        return arr_chw[
+            :,
+            crop['top']:crop['top'] + crop['height'],
+            crop['left']:crop['left'] + crop['width'],
+        ]
+
+    def _load_rgb_frame(self, key, file_client=None):
+        """Load only RGB LQ/GT frames, leaving spike IO to the crop-aware path."""
         fc = file_client if file_client is not None else self._ensure_file_client()
         clip_name, frame_name = key.split('/')
         neighbor = int(frame_name)
@@ -509,15 +543,25 @@ class TrainDatasetRGBSpike(data.Dataset):
             img_lq_path = self.lq_root / clip_name / f'{neighbor:{self.filename_tmpl}}.{self.filename_ext}'
             img_gt_path = self.gt_root / clip_name / f'{neighbor:{self.filename_tmpl}}.{self.filename_ext}'
 
-        # get LQ
         img_bytes = fc.get(img_lq_path, 'lq')
         img_lq = utils_video.imfrombytes(img_bytes, float32=True)
-        img_lq = cv2.cvtColor(img_lq, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
+        img_lq = cv2.cvtColor(img_lq, cv2.COLOR_BGR2RGB)
 
-        # get GT
         img_bytes = fc.get(img_gt_path, 'gt')
         img_gt = utils_video.imfrombytes(img_bytes, float32=True)
-        img_gt = cv2.cvtColor(img_gt, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
+        img_gt = cv2.cvtColor(img_gt, cv2.COLOR_BGR2RGB)
+
+        return {
+            'lq': img_lq,
+            'gt': img_gt,
+            'gt_path': img_gt_path,
+        }
+
+    def _load_raw_frame(self, key, file_client=None):
+        """Load a single raw RGB+Spike frame triplet from disk/LMDB without augmentation."""
+        clip_name, frame_name = key.split('/')
+        neighbor = int(frame_name)
+        sample = self._load_rgb_frame(key, file_client=file_client)
 
         # get Spike data
         spike_file = self.spike_root / clip_name / 'spike' / f'{neighbor:{self.filename_tmpl}}.dat'
@@ -527,18 +571,17 @@ class TrainDatasetRGBSpike(data.Dataset):
             # If spike file doesn't exist, create zeros
             spike_voxel = np.zeros((self.spike_channels, self.spike_h, self.spike_w), dtype=np.float32)
 
-        return {
-            'lq': img_lq,
-            'gt': img_gt,
-            'spike': spike_voxel,
-            'gt_path': img_gt_path,
-        }
+        sample['spike'] = spike_voxel
+        return sample
 
-    def _load_spike_voxel(self, clip_name, neighbor, spike_file):
+    def _load_spike_voxel(self, clip_name, neighbor, spike_file, crop=None):
         if self.use_precomputed_spike:
-            precomputed = self._load_precomputed_spike_voxel(clip_name, neighbor)
+            precomputed = self._load_precomputed_spike_voxel(clip_name, neighbor, crop=crop)
             if precomputed is not None:
                 return precomputed
+
+        if crop is not None and not spike_file.exists():
+            return np.zeros((self.spike_channels, crop['height'], crop['width']), dtype=np.float32)
 
         spike_stream = SpikeStream(
             offline=True,
@@ -555,10 +598,13 @@ class TrainDatasetRGBSpike(data.Dataset):
             spike_frame = self._snn_reconstructor(spike_matrix)  # (H, W)
             return spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
         if self.spike_representation == 'raw_window':
-            return extract_centered_raw_window(
+            raw_window = extract_centered_raw_window(
                 spike_matrix,
                 window_length=self.raw_window_length,
             )
+            if crop is not None:
+                raw_window = self._apply_chw_crop(raw_window, crop)
+            return raw_window
         return voxelize_spikes_tfp(
             spike_matrix,
             num_channels=self.spike_channels,
@@ -567,11 +613,14 @@ class TrainDatasetRGBSpike(data.Dataset):
         )  # (S, H, W)
 
     def _build_precomputed_spike_base_path(self, clip_name, frame_idx):
-        dir_name = f'tfp_b{self.spike_channels}_hw{self.tfp_half_win_length}'
+        if self.spike_representation == 'raw_window':
+            dir_name = f'raw_window_l{self.raw_window_length}'
+        else:
+            dir_name = f'tfp_b{self.spike_channels}_hw{self.tfp_half_win_length}'
         frame_name = f'{frame_idx:{self.filename_tmpl}}'
         return self.precomputed_spike_root / clip_name / dir_name / frame_name
 
-    def _load_precomputed_spike_voxel(self, clip_name, frame_idx):
+    def _load_precomputed_spike_voxel(self, clip_name, frame_idx, crop=None):
         base_path = self._build_precomputed_spike_base_path(clip_name, frame_idx)
         if self.precomputed_spike_format == 'npy':
             path = base_path.with_suffix('.npy')
@@ -585,7 +634,10 @@ class TrainDatasetRGBSpike(data.Dataset):
                         flush=True,
                     )
                 return None
-            spike_voxel = np.load(path)
+            if crop is not None and self.spike_representation == 'raw_window':
+                spike_voxel = self._apply_chw_crop(np.load(path, mmap_mode='r'), crop)
+            else:
+                spike_voxel = np.load(path)
         elif self.precomputed_spike_format == 'npz':
             path = base_path.with_suffix('.npz')
             if not path.exists():
@@ -604,7 +656,9 @@ class TrainDatasetRGBSpike(data.Dataset):
             raise ValueError(f"Unsupported precomputed spike format: {self.precomputed_spike_format!r}")
 
         spike_voxel_arr = np.asarray(spike_voxel)
-        if np.issubdtype(spike_voxel_arr.dtype, np.integer):
+        if self.spike_representation == 'raw_window':
+            spike_voxel = spike_voxel_arr.astype(np.float32)
+        elif np.issubdtype(spike_voxel_arr.dtype, np.integer):
             # Precomputed uint8 artifacts store the original 0..255 TFP output losslessly.
             spike_voxel = spike_voxel_arr.astype(np.float32) / 255.0
         else:
