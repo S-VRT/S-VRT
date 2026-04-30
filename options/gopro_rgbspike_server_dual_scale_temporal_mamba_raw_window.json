@@ -107,7 +107,7 @@
         "representation": "encoding25",
         "dt": 10,
         "root": "auto",
-        "subframes": 4
+        "subframes": 21
       }
       ,
       "spike_flipud": true
@@ -208,7 +208,7 @@
         "representation": "encoding25",
         "dt": 10,
         "root": "auto",
-        "subframes": 4
+        "subframes": 21
       }
       ,
       "spike_flipud": true
