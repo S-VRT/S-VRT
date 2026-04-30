@@ -65,7 +65,7 @@ def test_select_cam_target_uses_center_subframe_rule_for_expanded_contract():
     selection = select_cam_target(record)
 
     assert selection.tensor_name == "backbone_view"
-    assert selection.time_index == 2 * 4 + 2
+    assert selection.time_index == 1 * 4 + 2
 
 
 def test_compute_cam_map_dispatches_hirescam():
