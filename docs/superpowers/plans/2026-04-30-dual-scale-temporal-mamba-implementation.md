@@ -32,7 +32,7 @@
 **Files:**
 - Create: `tests/models/test_dual_scale_temporal_mamba.py`
 
-- [ ] **Step 1: Write the failing operator tests**
+- [x] **Step 1: Write the failing operator tests**
 
 Create `tests/models/test_dual_scale_temporal_mamba.py` with the following tests:
 
@@ -128,7 +128,7 @@ def test_dual_scale_temporal_mamba_exposes_diagnostics_or_missing_dep():
         assert "effective_update_norm" in diagnostics
 ```
 
-- [ ] **Step 2: Run the focused operator tests and confirm they fail**
+- [x] **Step 2: Run the focused operator tests and confirm they fail**
 
 Run:
 
@@ -138,7 +138,7 @@ python -m pytest tests/models/test_dual_scale_temporal_mamba.py -v
 
 Expected: FAIL with `Unknown fusion operator: dual_scale_temporal_mamba`.
 
-- [ ] **Step 3: Commit the failing test file**
+- [x] **Step 3: Commit the failing test file**
 
 ```bash
 git add tests/models/test_dual_scale_temporal_mamba.py
@@ -151,7 +151,7 @@ git commit -m "test(fusion): define dual-scale temporal mamba contract"
 - Create: `models/fusion/operators/dual_scale_temporal_mamba.py`
 - Modify: `models/fusion/operators/__init__.py`
 
-- [ ] **Step 1: Implement the operator module**
+- [x] **Step 1: Implement the operator module**
 
 Create `models/fusion/operators/dual_scale_temporal_mamba.py` with this implementation:
 
@@ -340,7 +340,7 @@ class DualScaleTemporalMambaFusionOperator(nn.Module):
 __all__ = ["DualScaleTemporalMambaFusionOperator"]
 ```
 
-- [ ] **Step 2: Register the operator in the factory**
+- [x] **Step 2: Register the operator in the factory**
 
 Update `models/fusion/operators/__init__.py` with these edits:
 
@@ -362,7 +362,7 @@ from .dual_scale_temporal_mamba import DualScaleTemporalMambaFusionOperator
     'DualScaleTemporalMambaFusionOperator',
 ```
 
-- [ ] **Step 3: Re-run the focused operator tests and confirm they pass**
+- [x] **Step 3: Re-run the focused operator tests and confirm they pass**
 
 Run:
 
@@ -372,7 +372,7 @@ python -m pytest tests/models/test_dual_scale_temporal_mamba.py -v
 
 Expected: PASS on constructor/factory tests, and either PASS on forward tests or PASS via the existing `"mamba_ssm is required"` guard branch.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add models/fusion/operators/dual_scale_temporal_mamba.py models/fusion/operators/__init__.py tests/models/test_dual_scale_temporal_mamba.py
@@ -385,7 +385,7 @@ git commit -m "feat(fusion): add dual-scale temporal mamba operator"
 - Modify: `models/architectures/vrt/vrt.py`
 - Modify: `tests/models/test_vrt_fusion_integration.py`
 
-- [ ] **Step 1: Write the failing VRT integration tests**
+- [x] **Step 1: Write the failing VRT integration tests**
 
 Append these tests to `tests/models/test_vrt_fusion_integration.py`:
 
@@ -507,7 +507,7 @@ def test_vrt_dual_scale_temporal_mamba_records_representation_metadata(monkeypat
     assert model._last_fusion_meta["global_norm"] == 2.0
 ```
 
-- [ ] **Step 2: Run the focused VRT tests and confirm they fail**
+- [x] **Step 2: Run the focused VRT tests and confirm they fail**
 
 Run:
 
@@ -517,7 +517,7 @@ python -m pytest tests/models/test_vrt_fusion_integration.py -k "dual_scale_temp
 
 Expected: FAIL because VRT does not yet allow raw-window input for the new operator and still constructs non-`pase_residual` Mamba-family operators with `spike_chans=1`.
 
-- [ ] **Step 3: Update VRT legality and spike-channel resolution**
+- [x] **Step 3: Update VRT legality and spike-channel resolution**
 
 Apply these focused edits to `models/architectures/vrt/vrt.py`:
 
@@ -561,7 +561,7 @@ Apply these focused edits to `models/architectures/vrt/vrt.py`:
 
 Keep the existing metadata merge path intact so operator diagnostics continue to flow through `EarlyFusionAdapter._attach_operator_diagnostics()`.
 
-- [ ] **Step 4: Re-run the focused VRT tests and confirm they pass**
+- [x] **Step 4: Re-run the focused VRT tests and confirm they pass**
 
 Run:
 
@@ -571,7 +571,7 @@ python -m pytest tests/models/test_vrt_fusion_integration.py -k "dual_scale_temp
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add models/architectures/vrt/vrt.py tests/models/test_vrt_fusion_integration.py
@@ -584,7 +584,7 @@ git commit -m "feat(vrt): wire dual-scale temporal mamba fusion"
 - Create: `options/gopro_rgbspike_server_dual_scale_temporal_mamba_raw_window.json`
 - Modify: `tests/e2e/test_gopro_rgbspike_server_e2e.py`
 
-- [ ] **Step 1: Write the failing config test**
+- [x] **Step 1: Write the failing config test**
 
 Append this test to `tests/e2e/test_gopro_rgbspike_server_e2e.py`:
 
@@ -602,7 +602,7 @@ def test_dual_scale_temporal_mamba_raw_window_config_parses():
     assert opt["netG"]["input"]["raw_ingress_chans"] == 24
 ```
 
-- [ ] **Step 2: Run the config test and confirm it fails**
+- [x] **Step 2: Run the config test and confirm it fails**
 
 Run:
 
@@ -612,7 +612,7 @@ python -m pytest tests/e2e/test_gopro_rgbspike_server_e2e.py -k "dual_scale_temp
 
 Expected: FAIL with `No such file or directory` for the new option file.
 
-- [ ] **Step 3: Create the first runnable config**
+- [x] **Step 3: Create the first runnable config**
 
 Create `options/gopro_rgbspike_server_dual_scale_temporal_mamba_raw_window.json` by copying `options/gopro_rgbspike_server_pase_residual_raw_window.json` and applying these targeted edits:
 
@@ -663,7 +663,7 @@ Create `options/gopro_rgbspike_server_dual_scale_temporal_mamba_raw_window.json`
 "swanlab_description": "early fusion dual-scale temporal mamba + raw_window + scflow"
 ```
 
-- [ ] **Step 4: Re-run the config test and confirm it passes**
+- [x] **Step 4: Re-run the config test and confirm it passes**
 
 Run:
 
@@ -673,7 +673,7 @@ python -m pytest tests/e2e/test_gopro_rgbspike_server_e2e.py -k "dual_scale_temp
 
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add options/gopro_rgbspike_server_dual_scale_temporal_mamba_raw_window.json tests/e2e/test_gopro_rgbspike_server_e2e.py
@@ -685,7 +685,7 @@ git commit -m "chore(options): add dual-scale temporal mamba raw-window config"
 **Files:**
 - Modify: `docs/superpowers/plans/2026-04-30-dual-scale-temporal-mamba-implementation.md`
 
-- [ ] **Step 1: Run the focused regression suite**
+- [x] **Step 1: Run the focused regression suite**
 
 Run:
 
@@ -703,7 +703,7 @@ python -m pytest tests/data/test_spike_raw_window.py tests/data/test_dataset_rgb
 
 Expected: PASS
 
-- [ ] **Step 2: Smoke-check the parsed option file**
+- [x] **Step 2: Smoke-check the parsed option file**
 
 Run:
 
@@ -720,7 +720,7 @@ dual_scale_temporal_mamba
 24
 ```
 
-- [ ] **Step 3: Commit the verified implementation batch**
+- [x] **Step 3: Commit the verified implementation batch**
 
 ```bash
 git add models/fusion/operators/dual_scale_temporal_mamba.py models/fusion/operators/__init__.py models/architectures/vrt/vrt.py tests/models/test_dual_scale_temporal_mamba.py tests/models/test_vrt_fusion_integration.py options/gopro_rgbspike_server_dual_scale_temporal_mamba_raw_window.json tests/e2e/test_gopro_rgbspike_server_e2e.py

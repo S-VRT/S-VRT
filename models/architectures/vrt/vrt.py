@@ -214,7 +214,11 @@ class VRT(nn.Module):
                     f"Unsupported fusion.early.frame_contract={requested_frame_contract!r}; "
                     "expected one of: operator_default, collapsed, expanded"
                 )
-            operator_default_contract = 'collapsed' if normalized_operator_name in {'mamba', 'attention'} else 'expanded'
+            operator_default_contract = (
+                'collapsed'
+                if normalized_operator_name in {'mamba', 'attention', 'dual_scale_temporal_mamba'}
+                else 'expanded'
+            )
             effective_frame_contract = (
                 operator_default_contract
                 if requested_frame_contract == 'operator_default'
@@ -313,14 +317,31 @@ class VRT(nn.Module):
             self._fusion_spike_representation = spike_repr
             self._fusion_raw_window_length = raw_win_len
 
-            # Guard: raw_window is only allowed with pase_residual operator
-            if spike_repr == 'raw_window' and normalized_operator_name != 'pase_residual':
+            if normalized_operator_name == 'dual_scale_temporal_mamba':
+                if fusion_placement != 'early':
+                    raise ValueError("fusion.operator='dual_scale_temporal_mamba' requires fusion.placement='early'.")
+                if early_out_chans != 3:
+                    raise ValueError("fusion.operator='dual_scale_temporal_mamba' requires fusion.out_chans=3 for early fusion.")
+                if effective_frame_contract != 'collapsed':
+                    raise ValueError("fusion.operator='dual_scale_temporal_mamba' requires fusion.early.frame_contract='collapsed'.")
+                if spike_repr != 'raw_window':
+                    raise ValueError(
+                        "fusion.operator='dual_scale_temporal_mamba' requires spike.representation='raw_window'."
+                    )
+
+            # Guard: raw_window is only allowed with operators that consume raw temporal windows directly.
+            if spike_repr == 'raw_window' and normalized_operator_name not in {'pase_residual', 'dual_scale_temporal_mamba'}:
                 raise ValueError(
-                    f"raw_window spike representation is only allowed with fusion.operator='pase_residual', "
+                    "raw_window spike representation is only allowed with "
+                    "fusion.operator='pase_residual' or fusion.operator='dual_scale_temporal_mamba', "
                     f"got operator={operator_name!r}."
                 )
 
-            early_operator_spike_chans = spike_input_chans if normalized_operator_name == 'pase_residual' else 1
+            early_operator_spike_chans = (
+                spike_input_chans
+                if normalized_operator_name in {'pase_residual', 'dual_scale_temporal_mamba'}
+                else 1
+            )
             if fusion_placement == 'early':
                 self.fusion_operator = create_fusion_operator(
                     operator_name=operator_name,
