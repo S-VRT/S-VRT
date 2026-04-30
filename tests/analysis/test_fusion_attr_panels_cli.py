@@ -192,4 +192,7 @@ def test_fusion_attribution_cli_dry_run_manifest_keeps_requested_cam_method(tmp_
         text=True,
     )
     manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["target"] == "masked_charbonnier"
     assert manifest["cam_method"] == "hirescam"
+    assert manifest["cam_method"] in {"gradcam", "hirescam", "fallback"}
+    assert manifest["num_samples"] == 1
