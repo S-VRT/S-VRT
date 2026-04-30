@@ -27,17 +27,17 @@ from scripts.analysis.fusion_attr.io import (
     strip_json_comments,
     write_json,
 )
+from scripts.analysis.fusion_attr.cam import build_cam_metadata, build_cam_scope_targets, compute_cam_map, select_cam_target
 from scripts.analysis.fusion_attr.maps import (
     compute_error_map,
     compute_fusion_delta,
-    gradient_activation_cam,
     integrated_gradients_map,
     normalize_map,
 )
 from scripts.analysis.fusion_attr.pca import pca_feature_heatmap, pca_variance_ratio
 from scripts.analysis.fusion_attr.panels import make_six_column_panel
 from scripts.analysis.fusion_attr.probes import FusionProbe, find_fusion_adapter, reduce_operator_explanations
-from scripts.analysis.fusion_attr.targets import build_box_mask, masked_charbonnier_target
+from scripts.analysis.fusion_attr.stitching import TileBox, crop_box_to_tile, mask_intersects_tile, stitch_weighted_tiles
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -64,6 +64,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--analysis-num-frames", type=int, default=12)
     parser.add_argument("--analysis-crop-size", type=int, default=256)
     parser.add_argument("--analysis-tile-stride", type=int, default=None)
+    parser.add_argument("--cam-scopes", nargs="+", default=["fullframe", "roi"], choices=["fullframe", "roi"])
+    parser.add_argument("--stitch-weight", default="hann", choices=["hann"])
     return parser
 
 
@@ -361,6 +363,18 @@ def _spatial_tiles(height: int, width: int, tile_size: int, stride: int) -> list
     return tiles
 
 
+def resolve_tile_stride(tile_size: int, requested_stride: int | None) -> int:
+    return max(1, tile_size // 2) if requested_stride is None else int(requested_stride)
+
+
+def resolve_cam_default_scope(scopes_exported: list[str]) -> str:
+    if "fullframe" in scopes_exported:
+        return "fullframe"
+    if scopes_exported:
+        return scopes_exported[0]
+    return "fullframe"
+
+
 def _accumulate_tile(accum: torch.Tensor, weight: torch.Tensor, tile: torch.Tensor, top: int, left: int) -> None:
     bottom = top + tile.shape[-2]
     right = left + tile.shape[-1]
@@ -458,19 +472,22 @@ def main(argv: list[str] | None = None) -> int:
         num_frames = min(args.analysis_num_frames, full_lq.shape[1])
         height, width = full_lq.shape[-2:]
         tile_size = int(args.analysis_crop_size)
-        tile_stride = int(args.analysis_tile_stride or tile_size)
+        tile_stride = resolve_tile_stride(tile_size, args.analysis_tile_stride)
         tiles = _spatial_tiles(height, width, tile_size, tile_stride)
         device = next(model.netG.parameters()).device
 
         adapter = find_fusion_adapter(model.netG)
         restored_accum = torch.zeros(1, 3, height, width, dtype=torch.float32)
-        cam_accum = torch.zeros(1, 1, height, width, dtype=torch.float32)
         error_accum = torch.zeros(1, 1, height, width, dtype=torch.float32)
         fusion_accum = torch.zeros(1, 1, height, width, dtype=torch.float32)
         weight = torch.zeros(1, 1, height, width, dtype=torch.float32)
         fusion_weight = torch.zeros_like(weight)
+        requested_scopes = set(args.cam_scopes)
+        cam_tiles: dict[str, list[tuple[torch.Tensor, TileBox]]] = {scope: [] for scope in args.cam_scopes}
+        selection_meta = None
 
         for top, left, bottom, right in tiles:
+            tile_box = TileBox(top=top, left=left, bottom=bottom, right=right)
             tile_batch = _prepare_tile_batch(batch, temporal_start, num_frames, top, left, bottom, right)
             lq = tile_batch["L"].to(device)
             gt = tile_batch["H"].to(device)
@@ -487,17 +504,33 @@ def main(argv: list[str] | None = None) -> int:
 
             center_output = select_center_frame_tensor(output)
             center_gt = select_center_frame_tensor(gt)
-            tile_sample = replace(sample, xyxy=(0, 0, center_output.shape[-1], center_output.shape[-2]))
-            mask = build_box_mask(tile_sample, center_output.shape[-2], center_output.shape[-1], center_output.device)
-            activation = probe.record.output
-            if activation.requires_grad:
-                activation.retain_grad()
-            target = masked_charbonnier_target(center_output, center_gt, mask)
-            cam = gradient_activation_cam(activation, target)
+            structured = probe.record.structured_output or {
+                "fused_main": probe.record.output,
+                "backbone_view": probe.record.output,
+                "meta": {},
+            }
+            selection = select_cam_target(structured)
+            if selection_meta is None:
+                selection_meta = selection
+            local_roi_xyxy = crop_box_to_tile(sample.xyxy, tile_box)
+            scope_targets = build_cam_scope_targets(output=center_output, gt=center_gt, roi_xyxy=local_roi_xyxy)
+
+            for scope_name, scope_target in scope_targets.items():
+                if scope_name not in requested_scopes:
+                    continue
+                if scope_name == "roi" and not mask_intersects_tile(sample.xyxy, tile_box):
+                    continue
+                cam_tile = compute_cam_map(
+                    activation=selection.activation,
+                    target=scope_target,
+                    method=args.cam_method,
+                    time_index=selection.time_index,
+                ).detach().cpu().unsqueeze(0).unsqueeze(0)
+                cam_tiles.setdefault(scope_name, []).append((cam_tile, tile_box))
+
             error_tile = compute_error_map(center_output, center_gt)
 
             _accumulate_tile(restored_accum, weight, center_output.detach().cpu(), top, left)
-            _accumulate_tile(cam_accum, torch.zeros_like(weight), cam.detach().cpu().unsqueeze(0).unsqueeze(0), top, left)
             _accumulate_tile(error_accum, torch.zeros_like(weight), error_tile.detach().cpu().unsqueeze(0).unsqueeze(0), top, left)
 
             operator = getattr(adapter, "operator", None)
@@ -512,14 +545,21 @@ def main(argv: list[str] | None = None) -> int:
                         left,
                     )
 
-            del lq, gt, flow_spike, output, center_output, center_gt, activation, target, cam
+            del lq, gt, flow_spike, output, center_output, center_gt, selection, scope_targets
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
         restored_full = _normalize_accumulated(restored_accum, weight)
-        cam_full = _normalize_accumulated(cam_accum, weight)
         error_full_map = _normalize_accumulated(error_accum, weight)
         fusion_full = _normalize_accumulated(fusion_accum, fusion_weight) if fusion_weight.max() > 0 else None
+        stitched_cams = {
+            scope: stitch_weighted_tiles(
+                canvas_shape=(1, 1, height, width),
+                tiles=scope_tiles,
+            )
+            for scope, scope_tiles in cam_tiles.items()
+            if scope_tiles
+        }
 
         sample_dir = build_sample_output_dir(args.out, sample)
         inputs_dir = sample_dir / "inputs"
@@ -533,16 +573,31 @@ def main(argv: list[str] | None = None) -> int:
         save_rgb_tensor_png(inputs_dir / "gt.png", full_gt_center)
         save_rgb_tensor_png(outputs_dir / "restored.png", restored_full)
         save_gray_map_png(maps_dir / "error_full.png", normalize_map(error_full_map[0, 0]))
-        save_gray_map_png(maps_dir / "cam_gray.png", normalize_map(cam_full[0, 0]))
-        np.save(str(maps_dir / "cam_raw.npy"), cam_full[0, 0].numpy())
 
         blurry_bgr = _tensor_to_bgr(full_lq_center[:, :, :3])
         restored_bgr = _tensor_to_bgr(restored_full)
-        cam_color = _save_color_map(maps_dir / "cam.png", cam_full[0, 0])
-        _save_color_map(maps_dir / "cam_color.png", cam_full[0, 0])
         error_color = _save_color_map(maps_dir / "error_color.png", error_full_map[0, 0])
-        cam_overlay = _save_overlay(overlays_dir / "cam_on_blurry.png", blurry_bgr, cam_color)
-        _save_overlay(overlays_dir / "cam_on_restored.png", restored_bgr, cam_color)
+        cam_overlay = None
+        cam_color = None
+        for scope_name, cam_map in stitched_cams.items():
+            stem = f"cam_{scope_name}"
+            np.save(str(maps_dir / f"{stem}_raw.npy"), cam_map[0, 0].numpy())
+            save_gray_map_png(maps_dir / f"{stem}_gray.png", normalize_map(cam_map[0, 0]))
+            scope_color = _save_color_map(maps_dir / f"{stem}_color.png", cam_map[0, 0])
+            _save_overlay(overlays_dir / f"{stem}_on_blurry.png", blurry_bgr, scope_color)
+            _save_overlay(overlays_dir / f"{stem}_on_restored.png", restored_bgr, scope_color)
+            if scope_name == "fullframe":
+                cam_color = scope_color
+                cam_overlay = _save_overlay(overlays_dir / "cam_on_blurry.png", blurry_bgr, scope_color)
+        if cam_color is None and stitched_cams:
+            first_scope = next(iter(stitched_cams))
+            first_map = stitched_cams[first_scope]
+            cam_color = _save_color_map(maps_dir / "cam_color.png", first_map[0, 0])
+            cam_overlay = _save_overlay(overlays_dir / "cam_on_blurry.png", blurry_bgr, cam_color)
+        if cam_overlay is None:
+            cam_overlay = np.zeros_like(blurry_bgr)
+        if cam_color is None:
+            cam_color = np.zeros_like(blurry_bgr)
         error_overlay = _save_overlay(overlays_dir / "error_on_restored.png", restored_bgr, error_color)
         fusion_specific_image = cam_color
         if fusion_full is not None:
@@ -566,6 +621,22 @@ def main(argv: list[str] | None = None) -> int:
             "analysis_tile_stride": tile_stride,
             "tile_count": len(tiles),
         }
+        if selection_meta is None:
+            raise RuntimeError("No CAM target selection was captured")
+        metadata.update(
+            build_cam_metadata(
+                requested_method=args.cam_method,
+                effective_method=args.cam_method,
+                scopes_exported=sorted(stitched_cams.keys()),
+                default_scope=resolve_cam_default_scope(sorted(stitched_cams.keys())),
+                selection=selection_meta,
+                analysis_crop_size=tile_size,
+                analysis_tile_stride=tile_stride,
+                stitch_weight=args.stitch_weight,
+                roi_xyxy=sample.xyxy,
+            )
+        )
+        metadata["cam_target_module"] = probe.record.module_name
 
         if args.save_ig:
             metadata["ig_skipped"] = "Integrated gradients is disabled for tiled full-frame stitching."
