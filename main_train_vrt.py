@@ -29,6 +29,18 @@ from utils import utils_option as option  # 配置文件解析工具
 from utils.utils_dist import get_dist_info, init_dist, barrier_safe, setup_distributed, get_rank, is_main_process  # 分布式训练工具
 from utils.utils_profiler import TrainProfiler, TrainProfilerConfig
 from utils.utils_runtime import apply_runtime_cpu_config
+from utils.utils_two_run import (
+    build_initial_two_run_state,
+    dump_resolved_two_run_opts,
+    load_two_run_state,
+    mark_phase1_completed,
+    mark_phase2_started,
+    resolve_resume_phase,
+    resolve_two_run_phase_opts,
+    save_two_run_state,
+    two_run_state_path,
+    update_last_successful_step,
+)
 
 # 数据集和模型定义
 from data.select_dataset import define_Dataset  # 数据集工厂函数
@@ -255,6 +267,207 @@ def maybe_dump_full_frame_fusion_debug_from_batch(model, batch, current_step, ba
     return model.dump_full_frame_fusion_only_from_batch(batch, current_step)
 
 
+def compute_global_step(global_step_offset, phase_step):
+    return int(global_step_offset) + int(phase_step)
+
+
+def should_finish_phase(current_phase_step, total_iter):
+    return int(current_phase_step) >= int(total_iter)
+
+
+def build_phase_runtime(phase_opt, seed, logger, phase_name):
+    train_dataset_opt_base = phase_opt["datasets"]["train"]
+    is_phase1 = phase_name == "phase1"
+    bundle = build_train_loader_bundle(phase_opt, train_dataset_opt_base, is_phase1, seed, logger)
+    model = define_Model(phase_opt)
+    model.init_train()
+    return {
+        "model": model,
+        "train_loader": bundle["train_loader"],
+        "train_sampler": bundle["train_sampler"],
+        "train_set": bundle["train_set"],
+        "active_train_dataset_opt": bundle["dataset_opt"],
+    }
+
+
+def execute_training_iteration(*, model, train_data, phase_step, global_step):
+    model.timer.current_timings.clear()
+    model.update_learning_rate(phase_step)
+    model.feed_data(train_data, current_step=phase_step)
+    model.optimize_parameters(phase_step)
+    logs = model.current_log()
+    logs["phase_step"] = float(phase_step)
+    logs["global_step"] = float(global_step)
+    return logs
+
+
+def finalize_phase(*, model, phase_opt, phase_name, last_phase_step, last_global_step, shared_runtime):
+    rank = phase_opt.get("rank", 0)
+    if rank == 0:
+        model.save(last_global_step)
+        use_lora = (phase_opt.get("train") or {}).get("use_lora", False)
+        if use_lora and hasattr(model, "save_merged"):
+            model.save_merged(last_global_step)
+
+    models_dir = (phase_opt.get("path") or {}).get("models", "")
+    if models_dir:
+        final_checkpoint_G = os.path.join(models_dir, f"{last_global_step}_G.pth")
+        e_decay = (phase_opt.get("train") or {}).get("E_decay", 0)
+        final_checkpoint_E = os.path.join(models_dir, f"{last_global_step}_E.pth") if e_decay else None
+    else:
+        final_checkpoint_G = None
+        final_checkpoint_E = None
+
+    return {
+        "final_checkpoint_G": final_checkpoint_G,
+        "final_checkpoint_E": final_checkpoint_E,
+    }
+
+
+def build_shared_runtime(opt, logger, tb_logger, seed):
+    return {
+        "logger": logger,
+        "tb_logger": tb_logger,
+        "seed": seed,
+        "opt": opt,
+    }
+
+
+def close_shared_runtime(shared_runtime):
+    tb_logger = shared_runtime.get("tb_logger")
+    if tb_logger is not None:
+        tb_logger.close()
+
+
+def prepare_phase2_opt(phase2_opt, *, phase1_final_g, phase1_final_e):
+    updated = copy.deepcopy(phase2_opt)
+    updated.setdefault("path", {})
+    updated.setdefault("train", {})
+    updated["path"]["pretrained_netG"] = phase1_final_g
+    updated["path"]["pretrained_netE"] = phase1_final_e
+    updated["path"]["pretrained_optimizerG"] = None
+    updated["train"]["G_optimizer_reuse"] = False
+    return updated
+
+
+def run_experiment(opt, logger, tb_logger, seed):
+    phase1_opt, phase2_opt = resolve_two_run_phase_opts(opt)
+    if phase1_opt is None or phase2_opt is None:
+        raise ValueError("run_experiment requires train.two_run.enable=true")
+
+    dump_resolved_two_run_opts(opt, phase1_opt, phase2_opt)
+    shared_runtime = build_shared_runtime(opt, logger, tb_logger, seed)
+    state_path = two_run_state_path(opt)
+    state = load_two_run_state(state_path)
+    shared_runtime["two_run_state_path"] = state_path
+    if state is None:
+        state = build_initial_two_run_state(
+            phase1_total_iter=phase1_opt["train"]["total_iter"],
+            phase2_total_iter=phase2_opt["train"]["total_iter"],
+        )
+        save_two_run_state(state_path, state)
+    shared_runtime["two_run_state"] = state
+
+    resume_phase = resolve_resume_phase(state)
+    result = None
+    try:
+        if resume_phase in {"phase1_fresh", "phase1_resume"}:
+            result = run_phase(
+                phase_opt=phase1_opt,
+                shared_runtime=shared_runtime,
+                phase_name="phase1",
+                global_step_offset=0,
+                resume_state={"phase_step": 0 if resume_phase == "phase1_fresh" else state.get("last_successful_phase_step", 0)},
+            )
+            mark_phase1_completed(
+                state,
+                phase1_final_g=result.get("final_checkpoint_G"),
+                phase1_final_e=result.get("final_checkpoint_E"),
+            )
+            save_two_run_state(state_path, state)
+
+        prepared_phase2_opt = prepare_phase2_opt(
+            phase2_opt,
+            phase1_final_g=state["phase1_final_G"],
+            phase1_final_e=state["phase1_final_E"],
+        )
+        mark_phase2_started(state)
+        save_two_run_state(state_path, state)
+
+        phase2_resume_step = state.get("last_successful_phase_step", 0) if resume_phase == "phase2_resume" else 0
+        result = run_phase(
+            phase_opt=prepared_phase2_opt,
+            shared_runtime=shared_runtime,
+            phase_name="phase2",
+            global_step_offset=state["global_step_offset"],
+            resume_state={"phase_step": phase2_resume_step},
+        )
+        return result
+    finally:
+        close_shared_runtime(shared_runtime)
+
+
+def run_phase(phase_opt, shared_runtime, phase_name, global_step_offset, resume_state):
+    logger = shared_runtime["logger"]
+    tb_logger = shared_runtime["tb_logger"]
+    seed = shared_runtime["seed"]
+    runtime = build_phase_runtime(phase_opt, seed, logger, phase_name)
+    model = runtime["model"]
+    train_loader = runtime["train_loader"]
+    train_sampler = runtime.get("train_sampler")
+    phase_total_iter = phase_opt["train"]["total_iter"]
+    last_phase_step = int((resume_state or {}).get("phase_step", 0))
+    last_global_step = compute_global_step(global_step_offset, last_phase_step)
+
+    epoch = 0
+    if train_sampler is not None:
+        train_sampler.set_epoch(epoch)
+
+    train_loader_iter = iter(train_loader)
+    while not should_finish_phase(last_phase_step, phase_total_iter):
+        phase_step = last_phase_step + 1
+        global_step = compute_global_step(global_step_offset, phase_step)
+        try:
+            train_data = next(train_loader_iter)
+        except StopIteration:
+            epoch += 1
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            train_loader_iter = iter(train_loader)
+            train_data = next(train_loader_iter)
+        logs = execute_training_iteration(
+            model=model,
+            train_data=train_data,
+            phase_step=phase_step,
+            global_step=global_step,
+        )
+        if tb_logger is not None and phase_step % phase_opt["train"]["checkpoint_print"] == 0:
+            tb_logger.log_scalars(global_step, logs, tag_prefix="train")
+        last_phase_step = phase_step
+        last_global_step = global_step
+        _state = shared_runtime.get("two_run_state")
+        _state_path = shared_runtime.get("two_run_state_path")
+        if _state is not None and _state_path is not None:
+            update_last_successful_step(_state, phase_step=phase_step, global_step=global_step)
+            save_two_run_state(_state_path, _state)
+
+    finalize = finalize_phase(
+        model=model,
+        phase_opt=phase_opt,
+        phase_name=phase_name,
+        last_phase_step=last_phase_step,
+        last_global_step=last_global_step,
+        shared_runtime=shared_runtime,
+    )
+    return {
+        "model": model,
+        "runtime": runtime,
+        "last_phase_step": last_phase_step,
+        "last_global_step": last_global_step,
+        **finalize,
+    }
+
+
 def main():
     """
     主训练函数，接收命令行参数指定的配置文件路径
@@ -414,6 +627,14 @@ def main():
     np.random.seed(seed_rank)  # NumPy 随机数
     torch.manual_seed(seed_rank)  # PyTorch CPU 随机数
     torch.cuda.manual_seed_all(seed_rank)  # PyTorch GPU 随机数（所有 GPU）
+
+    # ----------------------------------------
+    # Dispatch to two-run orchestrator if enabled
+    # ----------------------------------------
+    two_run_cfg = (opt.get("train") or {}).get("two_run") or {}
+    if two_run_cfg.get("enable", False):
+        run_experiment(opt, logger=logger, tb_logger=tb_logger, seed=seed)
+        return
 
     '''
     # ----------------------------------------
