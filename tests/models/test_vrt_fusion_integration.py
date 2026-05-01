@@ -2049,25 +2049,31 @@ def test_vrt_builds_with_dual_scale_temporal_mamba_raw_window_config():
 
 
 def test_vrt_rejects_dual_scale_temporal_mamba_without_raw_window():
-    bad_opt = _dual_scale_raw_window_opt()
-    bad_opt["datasets"]["train"]["spike"]["representation"] = "tfp"
+    opt = _dual_scale_raw_window_opt(in_chans=12)
+    opt["datasets"]["train"]["spike"] = {
+        "reconstruction": {"type": "spikecv_tfp", "num_bins": 9},
+    }
 
-    with pytest.raises(ValueError, match="raw_window"):
-        VRT(
-            upscale=1,
-            in_chans=7,
-            out_chans=3,
-            img_size=[6, 16, 16],
-            window_size=[6, 8, 8],
-            depths=[1] * 8,
-            indep_reconsts=[],
-            embed_dims=[16] * 8,
-            num_heads=[1] * 8,
-            pa_frames=2,
-            use_flash_attn=False,
-            optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
-            opt=bad_opt,
-        )
+    model = VRT(
+        upscale=1,
+        in_chans=12,
+        out_chans=3,
+        img_size=[6, 16, 16],
+        window_size=[6, 8, 8],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.fusion_operator is not None
+    assert model.fusion_operator.spike_chans == 9
+    assert model._fusion_spike_representation == "tfp"
+    assert model._fusion_raw_window_length is None
 
 
 def test_vrt_dual_scale_temporal_mamba_records_representation_metadata(monkeypatch):

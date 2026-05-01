@@ -324,9 +324,10 @@ class VRT(nn.Module):
                     raise ValueError("fusion.operator='dual_scale_temporal_mamba' requires fusion.out_chans=3 for early fusion.")
                 if effective_frame_contract != 'collapsed':
                     raise ValueError("fusion.operator='dual_scale_temporal_mamba' requires fusion.early.frame_contract='collapsed'.")
-                if spike_repr != 'raw_window':
+                if spike_repr not in {'tfp', 'raw_window'}:
                     raise ValueError(
-                        "fusion.operator='dual_scale_temporal_mamba' requires spike.representation='raw_window'."
+                        "fusion.operator='dual_scale_temporal_mamba' requires "
+                        "spike.representation='tfp' or 'raw_window'."
                     )
 
             # Guard: raw_window is only allowed with operators that consume raw temporal windows directly.
