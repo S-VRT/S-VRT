@@ -164,3 +164,12 @@ def test_debug_config_has_phase1_fusion_loss_for_fast_path():
         train.get("phase1_fusion_aux_loss_weight", 0.0)
         + train.get("fusion_passthrough_loss_weight", 0.0)
     ) > 0.0
+
+
+def test_snapshot_config_parses_two_run_block():
+    opt = utils_option.parse("options/gopro_rgbspike_server_pase_residual_snapshot.json", is_train=True)
+    two_run = opt["train"]["two_run"]
+
+    assert two_run["enable"] is True
+    assert two_run["phase1"]["total_iter"] == 4000
+    assert two_run["phase2"]["total_iter"] == 6000
