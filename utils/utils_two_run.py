@@ -147,6 +147,8 @@ def mark_phase1_completed(state, *, phase1_final_g, phase1_final_e):
     state["phase1_final_G"] = phase1_final_g
     state["phase1_final_E"] = phase1_final_e
     state["global_step_offset"] = state["phase1_total_iter"]
+    state["last_successful_phase_step"] = 0
+    state["last_successful_global_step"] = state["global_step_offset"]
 
 
 def mark_phase2_started(state):

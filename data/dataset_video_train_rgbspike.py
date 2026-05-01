@@ -358,19 +358,18 @@ class TrainDatasetRGBSpike(data.Dataset):
         img_gts = []
         spike_voxels = []
         flow_spikes = []
-        defer_precomputed_raw_window_crop = (
+        defer_precomputed_spike_crop = (
             self.use_precomputed_spike
-            and self.spike_representation == 'raw_window'
             and self.precomputed_spike_format == 'npy'
         )
 
         img_gt_path_reference = None
         for neighbor in neighbor_list:
             neighbor_key = f'{clip_name}/{neighbor:{self.filename_tmpl}}'
-            sample = self._load_rgb_frame(neighbor_key) if defer_precomputed_raw_window_crop else self._load_raw_frame(neighbor_key)
+            sample = self._load_rgb_frame(neighbor_key) if defer_precomputed_spike_crop else self._load_raw_frame(neighbor_key)
             img_lqs.append(sample['lq'])
             img_gts.append(sample['gt'])
-            if not defer_precomputed_raw_window_crop:
+            if not defer_precomputed_spike_crop:
                 spike_voxels.append(sample['spike'])
             if self.use_encoding25_flow:
                 flow_spikes.append(self._load_encoded_flow_spike(clip_name, neighbor))
@@ -392,7 +391,7 @@ class TrainDatasetRGBSpike(data.Dataset):
 
         # Crop spike voxels to the RGB-corresponding region, then resize to the RGB crop size.
         spike_voxels_resized = []
-        if defer_precomputed_raw_window_crop:
+        if defer_precomputed_spike_crop:
             spike_shape = (self.spike_channels, self.spike_h, self.spike_w)
             spike_crop = self._resolve_chw_crop(
                 spike_shape,
@@ -593,10 +592,16 @@ class TrainDatasetRGBSpike(data.Dataset):
         spike_matrix = spike_stream.get_spike_matrix(flipud=self.spike_flipud)  # (T, H, W)
         if self.spike_reconstruction in {'middle_tfp', 'middle-tfp'}:
             spike_frame = self._middle_tfp_reconstructor(spike_matrix)  # (H, W)
-            return spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+            spike_voxel = spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+            if crop is not None:
+                spike_voxel = self._apply_chw_crop(spike_voxel, crop)
+            return spike_voxel
         if self.spike_reconstruction == 'snn':
             spike_frame = self._snn_reconstructor(spike_matrix)  # (H, W)
-            return spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+            spike_voxel = spike_frame[np.newaxis, ...].astype(np.float32)  # (1, H, W)
+            if crop is not None:
+                spike_voxel = self._apply_chw_crop(spike_voxel, crop)
+            return spike_voxel
         if self.spike_representation == 'raw_window':
             raw_window = extract_centered_raw_window(
                 spike_matrix,
@@ -605,12 +610,15 @@ class TrainDatasetRGBSpike(data.Dataset):
             if crop is not None:
                 raw_window = self._apply_chw_crop(raw_window, crop)
             return raw_window
-        return voxelize_spikes_tfp(
+        spike_voxel = voxelize_spikes_tfp(
             spike_matrix,
             num_channels=self.spike_channels,
             device=self._select_tfp_device(),
             half_win_length=self.tfp_half_win_length,
         )  # (S, H, W)
+        if crop is not None:
+            spike_voxel = self._apply_chw_crop(spike_voxel, crop)
+        return spike_voxel
 
     def _build_precomputed_spike_base_path(self, clip_name, frame_idx):
         if self.spike_representation == 'raw_window':
@@ -634,7 +642,7 @@ class TrainDatasetRGBSpike(data.Dataset):
                         flush=True,
                     )
                 return None
-            if crop is not None and self.spike_representation == 'raw_window':
+            if crop is not None:
                 spike_voxel = self._apply_chw_crop(np.load(path, mmap_mode='r'), crop)
             else:
                 spike_voxel = np.load(path)

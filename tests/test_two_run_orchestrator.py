@@ -62,6 +62,297 @@ def test_run_phase_keeps_tracking_logger_open_until_explicit_close(monkeypatch):
     assert calls["log_scalars"][1][0] == 2
 
 
+def test_run_phase_logs_training_status_at_checkpoint_print(monkeypatch):
+    from main_train_vrt import run_phase
+
+    messages = []
+
+    class _Logger:
+        def info(self, message, *args):
+            if args:
+                message = message % args
+            messages.append(message)
+
+    class _Timer:
+        def __init__(self):
+            self.current_timings = {}
+
+        def timer(self, name):
+            timer = self
+
+            class _Context:
+                def __enter__(self):
+                    return None
+
+                def __exit__(self, exc_type, exc, tb):
+                    timer.current_timings[name] = 1.25
+                    return False
+
+            return _Context()
+
+        def get_current_timings(self):
+            return self.current_timings.copy()
+
+    class _Model:
+        def __init__(self):
+            self.timer = _Timer()
+
+        def current_learning_rate(self):
+            return 2e-4
+
+    monkeypatch.setattr("main_train_vrt.build_phase_runtime", lambda *args, **kwargs: {
+        "model": _Model(),
+        "train_loader": iter([{"L": 1}, {"L": 2}]),
+        "train_sampler": None,
+        "train_set": [1, 2],
+        "active_train_dataset_opt": {"dataloader_batch_size": 1, "gt_size": 64},
+    })
+    monkeypatch.setattr(
+        "main_train_vrt.execute_training_iteration",
+        lambda **kwargs: {
+            "G_loss": 0.1,
+            **{
+                f"time_{key}": value
+                for key, value in kwargs["model"].timer.get_current_timings().items()
+            },
+            "time_forward": 0.5,
+            "phase_step": float(kwargs["phase_step"]),
+            "global_step": float(kwargs["global_step"]),
+        },
+    )
+    monkeypatch.setattr("main_train_vrt.finalize_phase", lambda **kwargs: {})
+
+    run_phase(
+        phase_opt={"train": {"total_iter": 2, "checkpoint_print": 2}, "rank": 0},
+        shared_runtime={"tb_logger": None, "logger": _Logger(), "seed": 123},
+        phase_name="phase1",
+        global_step_offset=10,
+        resume_state={"phase_step": 0},
+    )
+
+    assert any(
+        "<phase:phase1, epoch:" in message
+        and "phase_iter:       2" in message
+        and "global_iter:      12" in message
+        and "batch_wait: 1.2500s" in message
+        and "forward: 0.5000s" in message
+        for message in messages
+    )
+
+
+def test_run_phase_logs_outer_iteration_and_state_persist_timing(monkeypatch):
+    from main_train_vrt import run_phase
+
+    messages = []
+
+    class _Logger:
+        def info(self, message, *args):
+            if args:
+                message = message % args
+            messages.append(message)
+
+    class _Model:
+        def __init__(self):
+            self.timer = SimpleNamespace(current_timings={}, clear=lambda: None)
+
+        def current_learning_rate(self):
+            return 2e-4
+
+    times = iter([
+        0.0, 0.1, 0.2, 0.3,
+        1.0, 1.1, 1.2, 1.3,
+    ])
+
+    monkeypatch.setattr("main_train_vrt.time.perf_counter", lambda: next(times))
+    monkeypatch.setattr("main_train_vrt.build_phase_runtime", lambda *args, **kwargs: {
+        "model": _Model(),
+        "train_loader": iter([{"L": 1}, {"L": 2}]),
+        "train_sampler": None,
+        "train_set": [1, 2],
+        "active_train_dataset_opt": {"dataloader_batch_size": 1, "gt_size": 64},
+    })
+    monkeypatch.setattr(
+        "main_train_vrt.execute_training_iteration",
+        lambda **kwargs: {
+            "G_loss": 0.1,
+            "phase_step": float(kwargs["phase_step"]),
+            "global_step": float(kwargs["global_step"]),
+        },
+    )
+    monkeypatch.setattr("main_train_vrt.save_two_run_state", lambda _path, _state: None)
+    monkeypatch.setattr("main_train_vrt.finalize_phase", lambda **kwargs: {})
+
+    run_phase(
+        phase_opt={
+            "train": {
+                "total_iter": 2,
+                "checkpoint_print": 2,
+                "timing": {"enable": True},
+            },
+            "rank": 0,
+        },
+        shared_runtime={
+            "tb_logger": None,
+            "logger": _Logger(),
+            "seed": 123,
+            "two_run_state": {},
+            "two_run_state_path": "state.json",
+        },
+        phase_name="phase1",
+        global_step_offset=10,
+        resume_state={"phase_step": 0},
+    )
+
+    assert any(
+        "iter_total: 0.3000s" in message
+        and "state_persist: 0.1000s" in message
+        for message in messages
+    )
+
+
+def test_run_phase_suppresses_outer_timing_when_train_timing_disabled(monkeypatch):
+    from main_train_vrt import run_phase
+
+    messages = []
+
+    class _Logger:
+        def info(self, message, *args):
+            if args:
+                message = message % args
+            messages.append(message)
+
+    class _Model:
+        def __init__(self):
+            self.timer = SimpleNamespace(current_timings={}, clear=lambda: None)
+
+        def current_learning_rate(self):
+            return 2e-4
+
+    times = iter([
+        0.0, 0.1, 0.2, 0.3,
+        1.0, 1.1, 1.2, 1.3,
+    ])
+
+    monkeypatch.setattr("main_train_vrt.time.perf_counter", lambda: next(times))
+    monkeypatch.setattr("main_train_vrt.build_phase_runtime", lambda *args, **kwargs: {
+        "model": _Model(),
+        "train_loader": iter([{"L": 1}, {"L": 2}]),
+        "train_sampler": None,
+        "train_set": [1, 2],
+        "active_train_dataset_opt": {"dataloader_batch_size": 1, "gt_size": 64},
+    })
+    monkeypatch.setattr(
+        "main_train_vrt.execute_training_iteration",
+        lambda **kwargs: {
+            "G_loss": 0.1,
+            "phase_step": float(kwargs["phase_step"]),
+            "global_step": float(kwargs["global_step"]),
+        },
+    )
+    monkeypatch.setattr("main_train_vrt.save_two_run_state", lambda _path, _state: None)
+    monkeypatch.setattr("main_train_vrt.finalize_phase", lambda **kwargs: {})
+
+    run_phase(
+        phase_opt={
+            "train": {
+                "total_iter": 2,
+                "checkpoint_print": 2,
+                "timing": {"enable": False},
+            },
+            "rank": 0,
+        },
+        shared_runtime={
+            "tb_logger": None,
+            "logger": _Logger(),
+            "seed": 123,
+            "two_run_state": {},
+            "two_run_state_path": "state.json",
+        },
+        phase_name="phase1",
+        global_step_offset=10,
+        resume_state={"phase_step": 0},
+    )
+
+    assert messages
+    assert all("iter_total:" not in message for message in messages)
+    assert all("state_persist:" not in message for message in messages)
+    assert all("window_iter_total_" not in message for message in messages)
+    assert all("window_state_persist_" not in message for message in messages)
+
+
+def test_run_phase_logs_checkpoint_window_timing_stats(monkeypatch):
+    from main_train_vrt import run_phase
+
+    messages = []
+
+    class _Logger:
+        def info(self, message, *args):
+            if args:
+                message = message % args
+            messages.append(message)
+
+    class _Model:
+        def __init__(self):
+            self.timer = SimpleNamespace(current_timings={}, clear=lambda: None)
+
+        def current_learning_rate(self):
+            return 2e-4
+
+    times = iter([
+        0.0, 0.1, 0.2, 0.3,
+        1.0, 2.0, 2.2, 2.3,
+    ])
+
+    monkeypatch.setattr("main_train_vrt.time.perf_counter", lambda: next(times))
+    monkeypatch.setattr("main_train_vrt.build_phase_runtime", lambda *args, **kwargs: {
+        "model": _Model(),
+        "train_loader": iter([{"L": 1}, {"L": 2}]),
+        "train_sampler": None,
+        "train_set": [1, 2],
+        "active_train_dataset_opt": {"dataloader_batch_size": 1, "gt_size": 64},
+    })
+    monkeypatch.setattr(
+        "main_train_vrt.execute_training_iteration",
+        lambda **kwargs: {
+            "G_loss": 0.1,
+            "phase_step": float(kwargs["phase_step"]),
+            "global_step": float(kwargs["global_step"]),
+        },
+    )
+    monkeypatch.setattr("main_train_vrt.save_two_run_state", lambda _path, _state: None)
+    monkeypatch.setattr("main_train_vrt.finalize_phase", lambda **kwargs: {})
+
+    run_phase(
+        phase_opt={
+            "train": {
+                "total_iter": 2,
+                "checkpoint_print": 2,
+                "timing": {"enable": True},
+            },
+            "rank": 0,
+        },
+        shared_runtime={
+            "tb_logger": None,
+            "logger": _Logger(),
+            "seed": 123,
+            "two_run_state": {},
+            "two_run_state_path": "state.json",
+        },
+        phase_name="phase1",
+        global_step_offset=10,
+        resume_state={"phase_step": 0},
+    )
+
+    assert any(
+        "window_steps: 2.000e+00" in message
+        and "window_iter_total_mean: 0.8000s" in message
+        and "window_iter_total_max: 1.3000s" in message
+        and "window_state_persist_mean: 0.1500s" in message
+        and "window_state_persist_max: 0.2000s" in message
+        for message in messages
+    )
+
+
 def test_run_phase_rolls_over_epochs_when_total_iter_exceeds_loader_len(monkeypatch):
     from main_train_vrt import run_phase
 
@@ -150,6 +441,45 @@ def test_run_phase_advances_sampler_epoch_on_epoch_boundaries(monkeypatch):
 
     assert result["last_phase_step"] == 5
     assert sampler.epochs == [0, 1, 2]
+
+
+def test_run_phase_runs_validation_at_phase_checkpoint_steps(monkeypatch):
+    from main_train_vrt import run_phase
+
+    calls = {"validation": []}
+
+    class _Model:
+        def __init__(self):
+            self.timer = SimpleNamespace(current_timings={}, clear=lambda: None)
+
+    monkeypatch.setattr("main_train_vrt.build_phase_runtime", lambda *args, **kwargs: {
+        "model": _Model(),
+        "train_loader": iter([{"L": 1}, {"L": 2}, {"L": 3}]),
+        "train_sampler": None,
+        "test_loader": ["val_batch"],
+        "train_set": [1, 2, 3],
+        "active_train_dataset_opt": {"dataloader_batch_size": 1, "gt_size": 64},
+    })
+    monkeypatch.setattr("main_train_vrt.execute_training_iteration", lambda **kwargs: {"G_loss": 0.1})
+    monkeypatch.setattr("main_train_vrt.finalize_phase", lambda **kwargs: {})
+
+    def _run_validation_checkpoint(**kwargs):
+        calls["validation"].append((kwargs["phase_step"], kwargs["global_step"]))
+
+    monkeypatch.setattr("main_train_vrt.run_validation_checkpoint", _run_validation_checkpoint)
+
+    run_phase(
+        phase_opt={
+            "train": {"total_iter": 3, "checkpoint_print": 1, "checkpoint_test": [2]},
+            "rank": 0,
+        },
+        shared_runtime={"tb_logger": None, "logger": None, "seed": 123},
+        phase_name="phase2",
+        global_step_offset=4,
+        resume_state={"phase_step": 0},
+    )
+
+    assert calls["validation"] == [(2, 6)]
 
 
 def test_run_experiment_executes_phase1_then_phase2_with_continuous_offset(monkeypatch, tmp_path):
@@ -490,3 +820,69 @@ def test_resume_phase2_uses_zero_phase_step_when_phase2_not_started(monkeypatch,
     assert call["phase_name"] == "phase2"
     assert call["global_step_offset"] == 4
     assert call["phase_step"] == 0
+
+
+def test_resume_phase2_uses_phase2_step_not_phase1_boundary(monkeypatch, tmp_path):
+    from main_train_vrt import run_experiment
+
+    phase_calls = []
+    saved_states = []
+
+    base_opt = {
+        "path": {"task": str(tmp_path / "exp"), "options": str(tmp_path / "exp" / "options")},
+        "train": {"two_run": {"enable": True}},
+        "rank": 0,
+        "datasets": {"train": {}, "test": {}},
+    }
+    phase1_opt = {"train": {"total_iter": 4}, "datasets": {"train": {}}, "rank": 0}
+    phase2_opt = {"train": {"total_iter": 6}, "datasets": {"train": {}}, "rank": 0}
+    initial_state = {
+        "phase1_total_iter": 4,
+        "phase2_total_iter": 6,
+        "phase1_completed": True,
+        "phase1_final_G": "models/4_G.pth",
+        "phase1_final_E": None,
+        "phase2_started": True,
+        "global_step_offset": 4,
+        "last_successful_phase_step": 4,
+        "last_successful_global_step": 4,
+    }
+
+    monkeypatch.setattr("main_train_vrt.resolve_two_run_phase_opts", lambda _opt: (phase1_opt, phase2_opt))
+    monkeypatch.setattr("main_train_vrt.dump_resolved_two_run_opts", lambda *args, **kwargs: {})
+    monkeypatch.setattr("main_train_vrt.load_two_run_state", lambda _path: dict(initial_state))
+    monkeypatch.setattr("main_train_vrt.two_run_state_path", lambda _opt: tmp_path / "two_run_state.json")
+    monkeypatch.setattr("main_train_vrt.save_two_run_state", lambda _path, state: saved_states.append(dict(state)))
+    monkeypatch.setattr("main_train_vrt.resolve_resume_phase", lambda _state: "phase2_resume")
+    monkeypatch.setattr("main_train_vrt.close_shared_runtime", lambda _runtime: None)
+
+    def fake_run_phase(phase_opt, shared_runtime, phase_name, global_step_offset, resume_state):
+        phase_calls.append({
+            "phase_name": phase_name,
+            "global_step_offset": global_step_offset,
+            "phase_step": resume_state["phase_step"],
+        })
+        return {
+            "last_phase_step": 6,
+            "last_global_step": 10,
+            "final_checkpoint_G": "models/10_G.pth",
+            "final_checkpoint_E": None,
+            "runtime": {"model": object()},
+        }
+
+    monkeypatch.setattr("main_train_vrt.run_phase", fake_run_phase)
+    monkeypatch.setattr("main_train_vrt.build_shared_runtime", lambda _opt, _logger, _tb_logger, seed: {
+        "logger": _logger,
+        "tb_logger": _tb_logger,
+        "seed": seed,
+    })
+
+    run_experiment(base_opt, logger=None, tb_logger=None, seed=123)
+
+    assert phase_calls == [{
+        "phase_name": "phase2",
+        "global_step_offset": 4,
+        "phase_step": 0,
+    }]
+    assert saved_states[0]["last_successful_phase_step"] == 0
+    assert saved_states[0]["last_successful_global_step"] == 4

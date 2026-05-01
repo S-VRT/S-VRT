@@ -48,6 +48,44 @@ from models.model_vrt import should_score_validation_batch
 from models.select_model import define_Model  # 模型工厂函数
 
 
+class RepeatEpochDistributedSampler(DistributedSampler):
+    def __init__(self, dataset, *, epoch_repeat=1, **kwargs):
+        super().__init__(dataset, **kwargs)
+        self.epoch_repeat = int(epoch_repeat)
+        if self.epoch_repeat <= 0:
+            raise ValueError(f"dataloader_epoch_repeat must be > 0, got {self.epoch_repeat}")
+        self._base_num_samples = self.num_samples
+        self._base_total_size = self.total_size
+        self.num_samples = self._base_num_samples * self.epoch_repeat
+        self.total_size = self._base_total_size * self.epoch_repeat
+
+    def __iter__(self):
+        if self.shuffle:
+            generator = torch.Generator()
+            generator.manual_seed(self.seed + self.epoch)
+            indices = torch.randperm(len(self.dataset), generator=generator).tolist()
+        else:
+            indices = list(range(len(self.dataset)))
+
+        if not self.drop_last:
+            padding_size = self._base_total_size - len(indices)
+            if padding_size <= len(indices):
+                indices += indices[:padding_size]
+            else:
+                indices += (indices * math.ceil(padding_size / len(indices)))[:padding_size]
+        else:
+            indices = indices[: self._base_total_size]
+
+        indices = indices[self.rank : self._base_total_size : self.num_replicas]
+        if self.epoch_repeat > 1:
+            indices = indices * self.epoch_repeat
+        if len(indices) != self.num_samples:
+            raise RuntimeError(
+                f"RepeatEpochDistributedSampler produced {len(indices)} samples, expected {self.num_samples}"
+            )
+        return iter(indices)
+
+
 def resolve_phase_value(value, is_phase1, key_name):
     """Resolve scalar or [phase1, phase2] value to active phase value."""
     if isinstance(value, int):
@@ -85,6 +123,16 @@ def compute_is_phase1(current_step, fix_iter):
     return fix_iter > 0 and current_step < fix_iter
 
 
+def build_two_run_phase_model_train_opt(phase_train_opt, phase_name):
+    resolved = copy.deepcopy(phase_train_opt)
+    if phase_name == "phase1":
+        fix_iter = int(resolved.get("fix_iter", 0) or 0)
+        total_iter = int(resolved.get("total_iter", 0) or 0)
+        if fix_iter > 0 and fix_iter == total_iter:
+            resolved["fix_iter"] = total_iter + 1
+    return resolved
+
+
 def init_dataloader_worker(_worker_id):
     """Keep each DataLoader worker single-threaded to avoid CPU oversubscription."""
     os.environ["OMP_NUM_THREADS"] = "1"
@@ -100,6 +148,23 @@ def init_dataloader_worker(_worker_id):
         cv2.setNumThreads(0)
     except Exception:
         pass
+
+
+def build_train_sampler(train_set, *, shuffle, seed, epoch_repeat=1, num_replicas=None, rank=None):
+    kwargs = {
+        "shuffle": shuffle,
+        "drop_last": True,
+        "seed": seed,
+    }
+    if num_replicas is not None:
+        kwargs["num_replicas"] = num_replicas
+    if rank is not None:
+        kwargs["rank"] = rank
+    return RepeatEpochDistributedSampler(
+        train_set,
+        epoch_repeat=int(epoch_repeat or 1),
+        **kwargs,
+    )
 
 
 def build_timing_summary(logs, dist_enabled=False, device=None):
@@ -160,11 +225,13 @@ def build_train_loader_bundle(opt, train_dataset_opt, is_phase1, seed, logger):
                 f"(global batch={batch_size}, num_gpu={opt['num_gpu']})"
             )
 
-        train_sampler = DistributedSampler(
+        train_sampler = build_train_sampler(
             train_set,
             shuffle=dataset_opt["dataloader_shuffle"],
-            drop_last=True,
             seed=seed,
+            epoch_repeat=dataset_opt.get("dataloader_epoch_repeat", 1),
+            num_replicas=opt.get("num_gpu"),
+            rank=opt.get("rank", 0),
         )
         per_gpu_workers = dataset_opt["dataloader_num_workers"] // opt["num_gpu"]
         kwargs = dict(
@@ -206,6 +273,85 @@ def build_train_loader_bundle(opt, train_dataset_opt, is_phase1, seed, logger):
     }
 
 
+def build_test_loader_bundle(opt, test_dataset_opt, seed, logger):
+    if opt['rank'] == 0 and logger is not None:
+        logger.info('[DATASET] Creating test/validation dataset...')
+    mem_before_test = log_memory_stage(logger, 'Before creating test dataset', opt['rank'])
+
+    test_set = define_Dataset(test_dataset_opt)
+
+    mem_after_test = log_memory_stage(logger, 'After creating test dataset', opt['rank'])
+    if opt['rank'] == 0 and logger is not None:
+        logger.info('[DATASET] Test dataset created. Memory delta: {:.2f} GB'.format(mem_after_test - mem_before_test))
+        logger.info('[DATASET] Test dataset does not use in-memory caching (cache_data=False by default)')
+
+    test_batch_size = test_dataset_opt.get('dataloader_batch_size', 1)
+    test_num_workers = test_dataset_opt.get('dataloader_num_workers', 1)
+    test_shuffle = test_dataset_opt.get('dataloader_shuffle', False)
+
+    if opt['dist']:
+        if dist.is_initialized():
+            test_sampler = DistributedSampler(
+                test_set,
+                num_replicas=dist.get_world_size(),
+                rank=dist.get_rank(),
+                shuffle=test_shuffle,
+                drop_last=False,
+                seed=seed,
+            )
+        else:
+            test_sampler = DistributedSampler(test_set, shuffle=test_shuffle, drop_last=False, seed=seed)
+        per_gpu_batch_size = max(1, test_batch_size // opt['num_gpu'])
+        per_gpu_num_workers = max(1, test_num_workers // opt['num_gpu'])
+        test_loader_kwargs = dict(
+            batch_size=per_gpu_batch_size,
+            shuffle=False,
+            num_workers=per_gpu_num_workers,
+            drop_last=False,
+            pin_memory=True,
+            sampler=test_sampler,
+        )
+        if per_gpu_num_workers > 0:
+            test_loader_kwargs['persistent_workers'] = test_dataset_opt.get('dataloader_persistent_workers', False)
+            test_loader_kwargs['prefetch_factor'] = test_dataset_opt.get('dataloader_prefetch_factor', 2)
+            test_loader_kwargs['multiprocessing_context'] = 'spawn'
+        test_loader = DataLoader(test_set, **test_loader_kwargs)
+    else:
+        test_loader_kwargs = dict(
+            batch_size=test_batch_size,
+            shuffle=test_shuffle,
+            num_workers=test_num_workers,
+            drop_last=False,
+            pin_memory=True,
+        )
+        if test_num_workers > 0:
+            test_loader_kwargs['persistent_workers'] = test_dataset_opt.get('dataloader_persistent_workers', False)
+            test_loader_kwargs['prefetch_factor'] = test_dataset_opt.get('dataloader_prefetch_factor', 2)
+            test_loader_kwargs['multiprocessing_context'] = 'spawn'
+        test_loader = DataLoader(test_set, **test_loader_kwargs)
+
+    requested_dist_patch_val = bool(opt.get('val', {}).get('distributed_patch_testing', False))
+    dist_world_size = dist.get_world_size() if opt['dist'] and dist.is_initialized() else opt.get('world_size', 1)
+    active_dist_patch_val = requested_dist_patch_val and opt['dist'] and dist_world_size > 1 and len(test_set) == 1
+    opt.setdefault('val', {})['distributed_patch_testing_active'] = active_dist_patch_val
+    if requested_dist_patch_val and opt['rank'] == 0 and logger is not None:
+        if active_dist_patch_val:
+            logger.info(
+                '[VALIDATION] Distributed patch testing active for single-sample validation '
+                f'(world_size={dist_world_size}).'
+            )
+        else:
+            logger.info(
+                '[VALIDATION] Distributed patch testing requested but inactive '
+                f'(dist={opt["dist"]}, world_size={dist_world_size}, test_set_size={len(test_set)}).'
+            )
+
+    return {
+        "test_set": test_set,
+        "test_loader": test_loader,
+    }
+
+
 def get_memory_usage():
     """获取当前进程的内存使用情况"""
     try:
@@ -219,7 +365,7 @@ def get_memory_usage():
 
 def log_memory_stage(logger, stage_name, rank=0):
     """记录内存使用阶段信息"""
-    if rank == 0:
+    if rank == 0 and logger is not None:
         mem_usage = get_memory_usage()
         logger.info(f'[MEMORY] {stage_name} - Current memory usage: {mem_usage:.2f} GB')
         return mem_usage
@@ -267,6 +413,255 @@ def maybe_dump_full_frame_fusion_debug_from_batch(model, batch, current_step, ba
     return model.dump_full_frame_fusion_only_from_batch(batch, current_step)
 
 
+def should_run_validation_checkpoint(checkpoint_test, phase_step):
+    if checkpoint_test in (None, 0, [], ()):
+        return False
+    if isinstance(checkpoint_test, list):
+        return int(phase_step) in checkpoint_test
+    return int(phase_step) % int(checkpoint_test) == 0
+
+
+def run_validation_checkpoint(*, model, phase_opt, test_loader, tb_logger, logger, phase_step, global_step, epoch):
+    opt = phase_opt
+    if test_loader is None:
+        return
+
+    if opt['rank'] == 0 and logger is not None:
+        logger.info('[VALIDATION] Starting model validation/test phase...')
+    mem_before_validation = log_memory_stage(logger, 'Before validation memory cleanup', opt['rank'])
+
+    is_master_process = opt['rank'] == 0
+    if opt['dist']:
+        barrier_safe()
+
+    test_results = OrderedDict()
+    test_results['psnr'] = []
+    test_results['ssim'] = []
+    test_results['psnr_y'] = []
+    test_results['ssim_y'] = []
+
+    gt = None
+
+    for idx, test_data in enumerate(test_loader):
+        if opt['rank'] == 0:
+            maybe_dump_full_frame_fusion_debug_from_batch(model, test_data, phase_step, idx)
+        if idx < 2:
+            log_validation_probe(logger, f'before feed_data batch={idx}', opt['rank'])
+            if opt['rank'] == 0 and logger is not None:
+                batch_summary = []
+                for key, value in test_data.items():
+                    if hasattr(value, 'shape'):
+                        batch_summary.append(f'{key}:{tuple(value.shape)}')
+                    elif isinstance(value, (list, tuple)):
+                        batch_summary.append(f'{key}:len={len(value)}')
+                    else:
+                        batch_summary.append(f'{key}:{type(value).__name__}')
+                logger.info(f'[VAL_BATCH] idx={idx} contents: {", ".join(batch_summary)}')
+
+        model.feed_data(test_data)
+        if idx < 2:
+            log_validation_probe(logger, f'after feed_data batch={idx}', opt['rank'])
+        if idx < 2 and opt['rank'] == 0 and logger is not None:
+            logger.info(f'[VAL_BATCH] idx={idx} entering model.test()')
+        model.test()
+        if idx < 2:
+            log_validation_probe(logger, f'after model.test batch={idx}', opt['rank'])
+            if opt['rank'] == 0 and logger is not None:
+                logger.info(f'[VAL_BATCH] idx={idx} model.test() completed')
+
+        if not should_score_validation_batch(opt):
+            continue
+
+        visuals = model.current_visuals()
+        output = visuals['E']
+        gt = visuals['H'] if 'H' in visuals else None
+        folder = test_data['folder']
+        folder_name = folder[0] if isinstance(folder, (list, tuple)) else folder
+
+        test_results_folder = OrderedDict()
+        test_results_folder['psnr'] = []
+        test_results_folder['ssim'] = []
+        test_results_folder['psnr_y'] = []
+        test_results_folder['ssim_y'] = []
+
+        lq_paths = test_data.get('lq_path')
+        batch_clip_count = output.shape[0]
+        for i in range(batch_clip_count):
+            clip_name = f'clip_{i:03d}'
+            if lq_paths is not None:
+                clip_source = None
+                try:
+                    clip_source = lq_paths[i]
+                except Exception:
+                    clip_source = None
+                if isinstance(clip_source, (list, tuple)) and clip_source:
+                    clip_source = clip_source[0]
+                if isinstance(clip_source, str):
+                    clip_name = os.path.splitext(os.path.basename(clip_source))[0]
+
+            img = output[i, ...].clamp_(0, 1).numpy()
+            if img.ndim == 3:
+                img = np.transpose(img[[2, 1, 0], :, :], (1, 2, 0))
+            img = (img * 255.0).round().astype(np.uint8)
+
+            if opt['val']['save_img']:
+                save_dir = opt['path']['images']
+                util.mkdir(save_dir)
+                os.makedirs(f'{save_dir}/{folder_name}', exist_ok=True)
+                cv2.imwrite(f'{save_dir}/{folder_name}/{clip_name}_{global_step:d}.png', img)
+
+            if gt is not None:
+                img_gt = gt[i, ...].clamp_(0, 1).numpy()
+                if img_gt.ndim == 3:
+                    img_gt = np.transpose(img_gt[[2, 1, 0], :, :], (1, 2, 0))
+                img_gt = (img_gt * 255.0).round().astype(np.uint8)
+                img_gt = np.squeeze(img_gt)
+
+                clip_psnr = util.calculate_psnr(img, img_gt, border=0)
+                clip_ssim = util.calculate_ssim(img, img_gt, border=0)
+                test_results_folder['psnr'].append(clip_psnr)
+                test_results_folder['ssim'].append(clip_ssim)
+
+                if img_gt.ndim == 3:
+                    img_y = util.bgr2ycbcr(img.astype(np.float32) / 255.) * 255.
+                    img_gt_y = util.bgr2ycbcr(img_gt.astype(np.float32) / 255.) * 255.
+                    clip_psnr_y = util.calculate_psnr(img_y, img_gt_y, border=0)
+                    clip_ssim_y = util.calculate_ssim(img_y, img_gt_y, border=0)
+                else:
+                    clip_psnr_y = clip_psnr
+                    clip_ssim_y = clip_ssim
+                test_results_folder['psnr_y'].append(clip_psnr_y)
+                test_results_folder['ssim_y'].append(clip_ssim_y)
+
+        if len(test_results_folder['psnr']) > 0:
+            psnr = sum(test_results_folder['psnr']) / len(test_results_folder['psnr'])
+            ssim = sum(test_results_folder['ssim']) / len(test_results_folder['ssim'])
+            psnr_y = sum(test_results_folder['psnr_y']) / len(test_results_folder['psnr_y'])
+            ssim_y = sum(test_results_folder['ssim_y']) / len(test_results_folder['ssim_y'])
+
+            test_results['psnr'].append(psnr)
+            test_results['ssim'].append(ssim)
+            test_results['psnr_y'].append(psnr_y)
+            test_results['ssim_y'].append(ssim_y)
+
+            print('[Rank {}] Testing {:20s} ({:2d}/{}) - PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                  format(opt['rank'], folder_name, len(test_results['psnr']), len(test_loader), psnr, ssim, psnr_y, ssim_y))
+
+    local_psnr_sum = sum(test_results['psnr'])
+    local_ssim_sum = sum(test_results['ssim'])
+    local_psnr_y_sum = sum(test_results['psnr_y'])
+    local_ssim_y_sum = sum(test_results['ssim_y'])
+
+    local_psnr_count = len(test_results['psnr'])
+    local_ssim_count = len(test_results['ssim'])
+    local_psnr_y_count = len(test_results['psnr_y'])
+    local_ssim_y_count = len(test_results['ssim_y'])
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    metrics_tensor = torch.tensor(
+        [local_psnr_sum, local_ssim_sum, local_psnr_y_sum, local_ssim_y_sum,
+         local_psnr_count, local_ssim_count, local_psnr_y_count, local_ssim_y_count],
+        dtype=torch.float64, device=device)
+
+    world_size = opt.get('world_size', 1)
+
+    if opt['dist'] and dist.is_initialized():
+        gathered = [torch.zeros_like(metrics_tensor) for _ in range(world_size)]
+        dist.all_gather(gathered, metrics_tensor)
+
+        if is_master_process and logger is not None:
+            all_folder_psnr = []
+            all_folder_ssim = []
+            all_folder_psnr_y = []
+            all_folder_ssim_y = []
+
+            for r, t in enumerate(gathered):
+                (psnr_sum, ssim_sum, psnr_y_sum, ssim_y_sum,
+                 psnr_cnt, ssim_cnt, psnr_y_cnt, ssim_y_cnt) = t.tolist()
+                psnr_cnt = int(round(psnr_cnt))
+                ssim_cnt = int(round(ssim_cnt))
+                psnr_y_cnt = int(round(psnr_y_cnt))
+                ssim_y_cnt = int(round(ssim_y_cnt))
+                if psnr_cnt > 0:
+                    ave_psnr_r = psnr_sum / psnr_cnt
+                    ave_ssim_r = ssim_sum / max(ssim_cnt, 1)
+                    ave_psnr_y_r = psnr_y_sum / max(psnr_y_cnt, 1)
+                    ave_ssim_y_r = ssim_y_sum / max(ssim_y_cnt, 1)
+                    logger.info('[Rank {}] Average PSNR: {:.2f} dB; SSIM: {:.4f}; PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.
+                                format(r, ave_psnr_r, ave_ssim_r, ave_psnr_y_r, ave_ssim_y_r))
+
+                    all_folder_psnr.extend([ave_psnr_r] * psnr_cnt)
+                    all_folder_ssim.extend([ave_ssim_r] * ssim_cnt)
+                    all_folder_psnr_y.extend([ave_psnr_y_r] * psnr_y_cnt)
+                    all_folder_ssim_y.extend([ave_ssim_y_r] * ssim_y_cnt)
+
+            if all_folder_psnr:
+                max_psnr_idx = all_folder_psnr.index(max(all_folder_psnr))
+                max_psnr = all_folder_psnr[max_psnr_idx]
+                max_ssim = all_folder_ssim[max_psnr_idx]
+                max_psnr_y = all_folder_psnr_y[max_psnr_idx]
+                max_ssim_y = all_folder_ssim_y[max_psnr_idx]
+
+                avg_psnr = sum(all_folder_psnr) / len(all_folder_psnr)
+                avg_ssim = sum(all_folder_ssim) / len(all_folder_ssim)
+                avg_psnr_y = sum(all_folder_psnr_y) / len(all_folder_psnr_y)
+                avg_ssim_y = sum(all_folder_ssim_y) / len(all_folder_ssim_y)
+
+                logger.info('<epoch:{:3d}, iter:{:8,d} Max PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                            'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                    epoch, global_step, max_psnr, max_ssim, max_psnr_y, max_ssim_y))
+
+                logger.info('<epoch:{:3d}, iter:{:8,d} Average PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                            'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                    epoch, global_step, avg_psnr, avg_ssim, avg_psnr_y, avg_ssim_y))
+
+                if tb_logger is not None:
+                    test_metrics = {
+                        'psnr': max_psnr,
+                        'ssim': max_ssim,
+                        'psnr_y': max_psnr_y,
+                        'ssim_y': max_ssim_y
+                    }
+                    tb_logger.log_scalars(global_step, test_metrics, tag_prefix='test')
+    else:
+        if is_master_process and logger is not None:
+            if test_results['psnr']:
+                max_psnr_idx = test_results['psnr'].index(max(test_results['psnr']))
+                max_psnr = test_results['psnr'][max_psnr_idx]
+                max_ssim = test_results['ssim'][max_psnr_idx]
+                max_psnr_y = test_results['psnr_y'][max_psnr_idx]
+                max_ssim_y = test_results['ssim_y'][max_psnr_idx]
+
+                avg_psnr = sum(test_results['psnr']) / len(test_results['psnr'])
+                avg_ssim = sum(test_results['ssim']) / len(test_results['ssim'])
+                avg_psnr_y = sum(test_results['psnr_y']) / len(test_results['psnr_y'])
+                avg_ssim_y = sum(test_results['ssim_y']) / len(test_results['ssim_y'])
+
+                logger.info('<epoch:{:3d}, iter:{:8,d} Max PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                            'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                    epoch, global_step, max_psnr, max_ssim, max_psnr_y, max_ssim_y))
+
+                logger.info('<epoch:{:3d}, iter:{:8,d} Average PSNR: {:.2f} dB; SSIM: {:.4f}; '
+                            'PSNR_Y: {:.2f} dB; SSIM_Y: {:.4f}'.format(
+                    epoch, global_step, avg_psnr, avg_ssim, avg_psnr_y, avg_ssim_y))
+
+                if tb_logger is not None:
+                    test_metrics = {
+                        'psnr': max_psnr,
+                        'ssim': max_ssim,
+                        'psnr_y': max_psnr_y,
+                        'ssim_y': max_ssim_y
+                    }
+                    tb_logger.log_scalars(global_step, test_metrics, tag_prefix='test')
+
+    mem_after_validation = log_memory_stage(logger, 'After validation completion', opt['rank'])
+    if opt['rank'] == 0 and logger is not None:
+        logger.info('[VALIDATION] Validation phase completed. Memory usage: {:.2f} GB'.format(mem_after_validation))
+
+    if opt['dist']:
+        barrier_safe()
+
+
 def compute_global_step(global_step_offset, phase_step):
     return int(global_step_offset) + int(phase_step)
 
@@ -279,19 +674,29 @@ def build_phase_runtime(phase_opt, seed, logger, phase_name):
     train_dataset_opt_base = phase_opt["datasets"]["train"]
     is_phase1 = phase_name == "phase1"
     bundle = build_train_loader_bundle(phase_opt, train_dataset_opt_base, is_phase1, seed, logger)
-    model = define_Model(phase_opt)
+    test_bundle = {}
+    test_dataset_opt = phase_opt.get("datasets", {}).get("test")
+    if test_dataset_opt is not None:
+        test_bundle = build_test_loader_bundle(phase_opt, test_dataset_opt, seed, logger)
+    model_opt = copy.deepcopy(phase_opt)
+    model_opt["train"] = build_two_run_phase_model_train_opt(
+        model_opt.get("train", {}),
+        phase_name=phase_name,
+    )
+    model = define_Model(model_opt)
     model.init_train()
     return {
         "model": model,
         "train_loader": bundle["train_loader"],
         "train_sampler": bundle["train_sampler"],
+        "test_loader": test_bundle.get("test_loader"),
+        "test_set": test_bundle.get("test_set"),
         "train_set": bundle["train_set"],
         "active_train_dataset_opt": bundle["dataset_opt"],
     }
 
 
 def execute_training_iteration(*, model, train_data, phase_step, global_step):
-    model.timer.current_timings.clear()
     model.update_learning_rate(phase_step)
     model.feed_data(train_data, current_step=phase_step)
     model.optimize_parameters(phase_step)
@@ -299,6 +704,54 @@ def execute_training_iteration(*, model, train_data, phase_step, global_step):
     logs["phase_step"] = float(phase_step)
     logs["global_step"] = float(global_step)
     return logs
+
+
+def next_train_batch_with_timing(model, train_loader_iter):
+    timer = getattr(getattr(model, "timer", None), "timer", None)
+    if timer is None:
+        return next(train_loader_iter)
+    with timer("batch_wait"):
+        return next(train_loader_iter)
+
+
+def format_training_log_message(*, phase_name, epoch, phase_step, global_step, learning_rate, logs):
+    message = (
+        f"<phase:{phase_name}, epoch:{epoch:3d}, "
+        f"phase_iter:{phase_step:8,d}, global_iter:{global_step:8,d}, "
+        f"lr:{learning_rate:.3e}> "
+    )
+    for key, value in logs.items():
+        if key.startswith("time_") or (key.startswith("window_") and key != "window_steps"):
+            message += f"{key.replace('time_', '')}: {float(value):.4f}s "
+        elif isinstance(value, numbers.Real):
+            message += f"{key}: {float(value):.3e} "
+        else:
+            message += f"{key}: {value} "
+    return message
+
+
+def build_checkpoint_window_summary(window_logs):
+    if not window_logs:
+        return {}
+
+    summary = {"window_steps": float(len(window_logs))}
+    keys = sorted({
+        key
+        for logs in window_logs
+        for key, value in logs.items()
+        if key.startswith("time_") and isinstance(value, numbers.Real)
+    })
+    for key in keys:
+        values = [
+            float(logs[key])
+            for logs in window_logs
+            if isinstance(logs.get(key), numbers.Real)
+        ]
+        if values:
+            metric = key.removeprefix("time_")
+            summary[f"window_{metric}_mean"] = sum(values) / len(values)
+            summary[f"window_{metric}_max"] = max(values)
+    return summary
 
 
 def finalize_phase(*, model, phase_opt, phase_name, last_phase_step, last_global_step, shared_runtime):
@@ -350,6 +803,12 @@ def prepare_phase2_opt(phase2_opt, *, phase1_final_g, phase1_final_e):
     return updated
 
 
+def compute_phase2_resume_step(state):
+    global_step_offset = int(state.get("global_step_offset", 0) or 0)
+    last_global_step = int(state.get("last_successful_global_step", global_step_offset) or 0)
+    return max(last_global_step - global_step_offset, 0)
+
+
 def run_experiment(opt, logger, tb_logger, seed):
     phase1_opt, phase2_opt = resolve_two_run_phase_opts(opt)
     if phase1_opt is None or phase2_opt is None:
@@ -391,10 +850,12 @@ def run_experiment(opt, logger, tb_logger, seed):
             phase1_final_g=state["phase1_final_G"],
             phase1_final_e=state["phase1_final_E"],
         )
+        phase2_resume_step = compute_phase2_resume_step(state) if resume_phase == "phase2_resume" else 0
+        if resume_phase == "phase2_resume":
+            state["last_successful_phase_step"] = phase2_resume_step
+            state["last_successful_global_step"] = state["global_step_offset"] + phase2_resume_step
         mark_phase2_started(state)
         save_two_run_state(state_path, state)
-
-        phase2_resume_step = state.get("last_successful_phase_step", 0) if resume_phase == "phase2_resume" else 0
         result = run_phase(
             phase_opt=prepared_phase2_opt,
             shared_runtime=shared_runtime,
@@ -415,7 +876,9 @@ def run_phase(phase_opt, shared_runtime, phase_name, global_step_offset, resume_
     model = runtime["model"]
     train_loader = runtime["train_loader"]
     train_sampler = runtime.get("train_sampler")
+    test_loader = runtime.get("test_loader")
     phase_total_iter = phase_opt["train"]["total_iter"]
+    phase_timing_enabled = bool(((phase_opt.get("train") or {}).get("timing") or {}).get("enable", False))
     last_phase_step = int((resume_state or {}).get("phase_step", 0))
     last_global_step = compute_global_step(global_step_offset, last_phase_step)
 
@@ -424,32 +887,76 @@ def run_phase(phase_opt, shared_runtime, phase_name, global_step_offset, resume_
         train_sampler.set_epoch(epoch)
 
     train_loader_iter = iter(train_loader)
+    checkpoint_window_logs = []
     while not should_finish_phase(last_phase_step, phase_total_iter):
+        iter_total_start = time.perf_counter() if phase_timing_enabled else None
         phase_step = last_phase_step + 1
         global_step = compute_global_step(global_step_offset, phase_step)
+        model.timer.current_timings.clear()
         try:
-            train_data = next(train_loader_iter)
+            train_data = next_train_batch_with_timing(model, train_loader_iter)
         except StopIteration:
             epoch += 1
             if train_sampler is not None:
                 train_sampler.set_epoch(epoch)
             train_loader_iter = iter(train_loader)
-            train_data = next(train_loader_iter)
+            train_data = next_train_batch_with_timing(model, train_loader_iter)
         logs = execute_training_iteration(
             model=model,
             train_data=train_data,
             phase_step=phase_step,
             global_step=global_step,
         )
-        if tb_logger is not None and phase_step % phase_opt["train"]["checkpoint_print"] == 0:
-            tb_logger.log_scalars(global_step, logs, tag_prefix="train")
+        if should_run_validation_checkpoint(phase_opt["train"].get("checkpoint_test"), phase_step):
+            run_validation_checkpoint(
+                model=model,
+                phase_opt=phase_opt,
+                test_loader=test_loader,
+                tb_logger=tb_logger,
+                logger=logger,
+                phase_step=phase_step,
+                global_step=global_step,
+                epoch=epoch,
+            )
         last_phase_step = phase_step
         last_global_step = global_step
         _state = shared_runtime.get("two_run_state")
         _state_path = shared_runtime.get("two_run_state_path")
         if _state is not None and _state_path is not None:
+            state_persist_start = time.perf_counter() if phase_timing_enabled else None
             update_last_successful_step(_state, phase_step=phase_step, global_step=global_step)
             save_two_run_state(_state_path, _state)
+            if phase_timing_enabled:
+                logs["time_state_persist"] = time.perf_counter() - state_persist_start
+        if phase_timing_enabled:
+            logs["time_iter_total"] = time.perf_counter() - iter_total_start
+        checkpoint_window_logs.append(dict(logs))
+        if (
+            logger is not None
+            and phase_opt.get("rank", 0) == 0
+            and phase_step % phase_opt["train"]["checkpoint_print"] == 0
+        ):
+            if phase_timing_enabled:
+                logs.update(build_checkpoint_window_summary(checkpoint_window_logs))
+            logger.info(
+                format_training_log_message(
+                    phase_name=phase_name,
+                    epoch=epoch,
+                    phase_step=phase_step,
+                    global_step=global_step,
+                    learning_rate=model.current_learning_rate(),
+                    logs=logs,
+                )
+            )
+            checkpoint_window_logs.clear()
+        if tb_logger is not None and phase_step % phase_opt["train"]["checkpoint_print"] == 0:
+            numeric_logs = {
+                key: float(value)
+                for key, value in logs.items()
+                if isinstance(value, numbers.Real)
+            }
+            if numeric_logs:
+                tb_logger.log_scalars(global_step, numeric_logs, tag_prefix="train")
 
     finalize = finalize_phase(
         model=model,
