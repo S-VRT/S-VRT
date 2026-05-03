@@ -31,6 +31,7 @@ from scripts.analysis.fusion_attr.cam import build_cam_metadata, build_cam_scope
 from scripts.analysis.fusion_attr.maps import (
     compute_error_map,
     compute_fusion_delta,
+    crop_map_xyxy,
     integrated_gradients_map,
     normalize_map,
 )
@@ -64,7 +65,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--analysis-num-frames", type=int, default=12)
     parser.add_argument("--analysis-crop-size", type=int, default=256)
     parser.add_argument("--analysis-tile-stride", type=int, default=None)
-    parser.add_argument("--cam-scopes", nargs="+", default=["fullframe", "roi"], choices=["fullframe", "roi"])
+    parser.add_argument(
+        "--cam-scopes",
+        nargs="+",
+        default=["fullframe", "roi"],
+        choices=["fullframe", "roi"],
+        help=(
+            "CAM scopes to export. ROI scope writes cam_roi_target_fullframe_* "
+            "for the ROI-target CAM on the full canvas and cam_roi_crop_* for "
+            "the selected ROI crop."
+        ),
+    )
     parser.add_argument("--stitch-weight", default="hann", choices=["hann"])
     return parser
 
@@ -580,12 +591,17 @@ def main(argv: list[str] | None = None) -> int:
         cam_overlay = None
         cam_color = None
         for scope_name, cam_map in stitched_cams.items():
-            stem = f"cam_{scope_name}"
+            stem = "cam_roi_target_fullframe" if scope_name == "roi" else f"cam_{scope_name}"
             np.save(str(maps_dir / f"{stem}_raw.npy"), cam_map[0, 0].numpy())
             save_gray_map_png(maps_dir / f"{stem}_gray.png", normalize_map(cam_map[0, 0]))
             scope_color = _save_color_map(maps_dir / f"{stem}_color.png", cam_map[0, 0])
             _save_overlay(overlays_dir / f"{stem}_on_blurry.png", blurry_bgr, scope_color)
             _save_overlay(overlays_dir / f"{stem}_on_restored.png", restored_bgr, scope_color)
+            if scope_name == "roi":
+                roi_crop = crop_map_xyxy(cam_map[0, 0], sample.xyxy)
+                np.save(str(maps_dir / "cam_roi_crop_raw.npy"), roi_crop.numpy())
+                save_gray_map_png(maps_dir / "cam_roi_crop_gray.png", normalize_map(roi_crop))
+                _save_color_map(maps_dir / "cam_roi_crop_color.png", roi_crop)
             if scope_name == "fullframe":
                 cam_color = scope_color
                 cam_overlay = _save_overlay(overlays_dir / "cam_on_blurry.png", blurry_bgr, scope_color)
@@ -636,6 +652,9 @@ def main(argv: list[str] | None = None) -> int:
                 roi_xyxy=sample.xyxy,
             )
         )
+        if "roi" in stitched_cams:
+            metadata["cam_roi_target_fullframe_stem"] = "cam_roi_target_fullframe"
+            metadata["cam_roi_crop_stem"] = "cam_roi_crop"
         metadata["cam_target_module"] = probe.record.module_name
 
         if args.save_ig:

@@ -587,6 +587,34 @@ def test_prepare_phase2_opt_rejects_positional_phase1_args():
         prepare_phase2_opt(phase2_opt, "models/4000_G.pth", "models/4000_E.pth")
 
 
+def test_verify_phase_checkpoint_paths_rejects_missing_g_checkpoint(tmp_path):
+    from main_train_vrt import verify_phase_checkpoint_paths
+
+    missing_g = tmp_path / "4000_G.pth"
+
+    with pytest.raises(FileNotFoundError, match="phase1 G checkpoint is not ready"):
+        verify_phase_checkpoint_paths(
+            phase_name="phase1",
+            checkpoint_g=str(missing_g),
+            checkpoint_e=None,
+        )
+
+
+def test_verify_phase_checkpoint_paths_accepts_existing_checkpoints(tmp_path):
+    from main_train_vrt import verify_phase_checkpoint_paths
+
+    checkpoint_g = tmp_path / "4000_G.pth"
+    checkpoint_e = tmp_path / "4000_E.pth"
+    checkpoint_g.write_bytes(b"g")
+    checkpoint_e.write_bytes(b"e")
+
+    verify_phase_checkpoint_paths(
+        phase_name="phase1",
+        checkpoint_g=str(checkpoint_g),
+        checkpoint_e=str(checkpoint_e),
+    )
+
+
 def test_finalize_phase_returns_checkpoint_paths_without_e_when_no_e_decay(tmp_path, monkeypatch):
     from main_train_vrt import finalize_phase
 
@@ -595,6 +623,9 @@ def test_finalize_phase_returns_checkpoint_paths_without_e_when_no_e_decay(tmp_p
     class _Model:
         def save(self, step):
             saved.append(("save", step))
+            models_dir = tmp_path / "models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            (models_dir / f"{step}_G.pth").write_bytes(b"g")
 
     phase_opt = {
         "rank": 0,
@@ -621,7 +652,10 @@ def test_finalize_phase_returns_e_checkpoint_when_e_decay_set(tmp_path):
 
     class _Model:
         def save(self, step):
-            pass
+            models_dir = tmp_path / "models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            (models_dir / f"{step}_G.pth").write_bytes(b"g")
+            (models_dir / f"{step}_E.pth").write_bytes(b"e")
 
     phase_opt = {
         "rank": 0,
@@ -650,6 +684,9 @@ def test_finalize_phase_calls_save_merged_when_use_lora(tmp_path):
     class _Model:
         def save(self, step):
             calls.append(("save", step))
+            models_dir = tmp_path / "models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            (models_dir / f"{step}_G.pth").write_bytes(b"g")
 
         def save_merged(self, step):
             calls.append(("save_merged", step))
@@ -681,6 +718,9 @@ def test_finalize_phase_returns_global_step_checkpoint_labels(tmp_path):
     class _Model:
         def save(self, step):
             calls.append(("save", step))
+            models_dir = tmp_path / "models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            (models_dir / f"{step}_G.pth").write_bytes(b"g")
 
         def save_merged(self, step):
             calls.append(("save_merged", step))
@@ -703,6 +743,37 @@ def test_finalize_phase_returns_global_step_checkpoint_labels(tmp_path):
     assert ("save", 10) in calls
     assert ("save_merged", 10) in calls
     assert result["final_checkpoint_G"].endswith("10_G.pth")
+
+
+def test_finalize_phase_barriers_around_checkpoint_handoff_when_distributed(tmp_path, monkeypatch):
+    from main_train_vrt import finalize_phase
+
+    calls = []
+
+    class _Model:
+        def save(self, step):
+            calls.append(("save", step))
+            models_dir = tmp_path / "models"
+            models_dir.mkdir(parents=True, exist_ok=True)
+            (models_dir / f"{step}_G.pth").write_bytes(b"g")
+
+    monkeypatch.setattr("main_train_vrt.barrier_safe", lambda: calls.append(("barrier", None)))
+
+    finalize_phase(
+        model=_Model(),
+        phase_opt={
+            "rank": 0,
+            "dist": True,
+            "path": {"models": str(tmp_path / "models")},
+            "train": {"E_decay": 0, "use_lora": False},
+        },
+        phase_name="phase1",
+        last_phase_step=4,
+        last_global_step=4,
+        shared_runtime={},
+    )
+
+    assert calls == [("save", 4), ("barrier", None), ("barrier", None)]
 
 
 def test_run_phase_persists_state_after_each_iteration(monkeypatch, tmp_path):

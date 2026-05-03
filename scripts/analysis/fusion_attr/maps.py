@@ -27,6 +27,16 @@ def normalize_map(values: torch.Tensor, low: float = 1.0, high: float = 99.0) ->
     return torch.from_numpy(out).to(dtype=torch.float32, device=values.device)
 
 
+def crop_map_xyxy(values: torch.Tensor, xyxy: tuple[int, int, int, int]) -> torch.Tensor:
+    if values.ndim != 2:
+        raise ValueError(f"Expected 2D map tensor, got {tuple(values.shape)}")
+    x1, y1, x2, y2 = (int(v) for v in xyxy)
+    height, width = values.shape[-2:]
+    if x1 < 0 or y1 < 0 or x2 > width or y2 > height or x2 <= x1 or y2 <= y1:
+        raise ValueError(f"xyxy {xyxy} is outside map bounds {(width, height)}")
+    return values[y1:y2, x1:x2]
+
+
 def compute_fusion_delta(fusion_output: torch.Tensor, rgb_reference: torch.Tensor) -> torch.Tensor:
     if fusion_output.shape != rgb_reference.shape:
         raise ValueError(

@@ -8,6 +8,7 @@ from scripts.analysis.fusion_attr.cam import (
     compute_cam_map,
     select_cam_target,
 )
+from scripts.analysis.fusion_attr.maps import crop_map_xyxy
 from scripts.analysis.fusion_attr.stitching import (
     TileBox,
     crop_box_to_tile,
@@ -93,6 +94,15 @@ def test_stitch_weighted_tiles_smooths_overlap_boundaries():
     assert seam_profile[3].item() < seam_profile[6].item()
     assert seam_profile.min().item() >= 0.0
     assert seam_profile.max().item() <= 3.0
+
+
+def test_crop_map_xyxy_returns_selected_region():
+    cam = torch.arange(6 * 8, dtype=torch.float32).reshape(6, 8)
+
+    cropped = crop_map_xyxy(cam, (2, 1, 6, 5))
+
+    assert cropped.shape == (4, 4)
+    assert torch.equal(cropped, cam[1:5, 2:6])
 
 
 def test_build_cam_metadata_records_repaired_contract():

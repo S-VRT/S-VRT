@@ -90,7 +90,12 @@ def test_fusion_attribution_cli_dry_run_writes_manifest(tmp_path: Path):
     assert manifest["num_samples"] == 1
 
 
-from scripts.analysis.fusion_attribution import resolve_cam_default_scope, resolve_tile_stride, select_center_frame_tensor
+from scripts.analysis.fusion_attribution import (
+    build_parser,
+    resolve_cam_default_scope,
+    resolve_tile_stride,
+    select_center_frame_tensor,
+)
 
 
 def test_select_center_frame_tensor_handles_5d_and_4d():
@@ -150,14 +155,15 @@ def test_fusion_attribution_cli_help_mentions_ig_and_pca():
 
 
 def test_fusion_attribution_cli_help_mentions_cam_scopes():
-    result = subprocess.run(
-        ["uv", "run", "python", "scripts/analysis/fusion_attribution.py", "--help"],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    assert "--cam-scopes" in result.stdout
-    assert "--stitch-weight" in result.stdout
+    help_text = build_parser().format_help()
+    assert "--cam-scopes" in help_text
+    assert "--stitch-weight" in help_text
+
+
+def test_fusion_attribution_cli_help_mentions_explicit_roi_cam_outputs():
+    help_text = build_parser().format_help()
+    assert "cam_roi_target_fullframe" in help_text
+    assert "cam_roi_crop" in help_text
 
 
 def test_fusion_attribution_cli_dry_run_manifest_keeps_requested_cam_method(tmp_path: Path):

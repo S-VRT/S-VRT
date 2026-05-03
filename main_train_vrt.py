@@ -754,6 +754,19 @@ def build_checkpoint_window_summary(window_logs):
     return summary
 
 
+def verify_phase_checkpoint_paths(*, phase_name, checkpoint_g, checkpoint_e=None):
+    if not checkpoint_g or not os.path.isfile(checkpoint_g):
+        raise FileNotFoundError(
+            f"{phase_name} G checkpoint is not ready: {checkpoint_g}. "
+            "Phase handoff requires rank0 to finish saving before phase2 can load."
+        )
+    if checkpoint_e and not os.path.isfile(checkpoint_e):
+        raise FileNotFoundError(
+            f"{phase_name} E checkpoint is not ready: {checkpoint_e}. "
+            "Phase handoff requires rank0 to finish saving before phase2 can load."
+        )
+
+
 def finalize_phase(*, model, phase_opt, phase_name, last_phase_step, last_global_step, shared_runtime):
     rank = phase_opt.get("rank", 0)
     if rank == 0:
@@ -770,6 +783,16 @@ def finalize_phase(*, model, phase_opt, phase_name, last_phase_step, last_global
     else:
         final_checkpoint_G = None
         final_checkpoint_E = None
+
+    if phase_opt.get("dist", False):
+        barrier_safe()
+    verify_phase_checkpoint_paths(
+        phase_name=phase_name,
+        checkpoint_g=final_checkpoint_G,
+        checkpoint_e=final_checkpoint_E,
+    )
+    if phase_opt.get("dist", False):
+        barrier_safe()
 
     return {
         "final_checkpoint_G": final_checkpoint_G,
