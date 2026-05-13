@@ -564,10 +564,33 @@ print(out)
 PY
 }
 
+prepare_inference_result_link() {
+    local results_link="$1"
+    local inference_result_root="$2"
+
+    mkdir -p "$(dirname "$results_link")"
+    mkdir -p "$inference_result_root"
+    if [[ -L "$results_link" ]]; then
+        local current_target
+        current_target="$(readlink "$results_link")"
+        if [[ "$current_target" == "$inference_result_root" ]]; then
+            return 0
+        fi
+        echo "[ERROR] Refusing to replace existing results symlink: $results_link -> $current_target" >&2
+        return 1
+    fi
+    if [[ -e "$results_link" ]]; then
+        echo "[ERROR] Refusing to replace existing results path: $results_link" >&2
+        echo "        Move it to data disk or choose a new RUN_ID." >&2
+        return 1
+    fi
+    ln -s "$inference_result_root" "$results_link"
+}
+
 run_one_experiment() {
     local exp_dir="$1"
     local assigned_gpu="${2:-0}"
-    local base_config checkpoint runtime_config run_root inference_result_root debug_root cmd_exit
+    local base_config checkpoint runtime_config run_root inference_result_root results_link debug_root cmd_exit
     local -a inference_cmd debugger_cmd
 
     if [[ ! -d "$exp_dir" ]]; then
@@ -594,8 +617,10 @@ run_one_experiment() {
     else
         run_root="$exp_dir/images/forward_debug/$RUN_ID/$CHECKPOINT_STEM"
     fi
-    inference_result_root="results/$(basename "$exp_dir")_forward_debug_${CHECKPOINT_STEM}_${RUN_ID}"
+    inference_result_root="$run_root/inference_results"
+    results_link="results/$(basename "$exp_dir")_forward_debug_${CHECKPOINT_STEM}_${RUN_ID}"
     debug_root="$run_root/debugger"
+    prepare_inference_result_link "$results_link" "$inference_result_root"
 
     inference_cmd=(uv run python -u main_test_vrt.py --opt "$runtime_config")
 
@@ -632,6 +657,7 @@ run_one_experiment() {
     echo "Max samples: ${MAX_SAMPLES:-<all samples>}"
     echo "Stage: $STAGE"
     echo "Full inference output: $inference_result_root"
+    echo "Results symlink: $results_link"
     echo "Debugger output: $debug_root"
     echo "=========================================="
 

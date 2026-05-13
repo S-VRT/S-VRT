@@ -93,6 +93,17 @@ def test_forward_debug_batch_script_runs_full_inference_before_debugger_by_defau
     assert 'debug_root="$run_root/debugger"' in text
 
 
+def test_forward_debug_batch_script_redirects_inference_results_to_artifact_root():
+    text = SCRIPT.read_text(encoding="utf-8")
+
+    assert "prepare_inference_result_link()" in text
+    assert 'inference_result_root="$run_root/inference_results"' in text
+    assert 'results_link="results/$(basename "$exp_dir")_forward_debug_${CHECKPOINT_STEM}_${RUN_ID}"' in text
+    assert 'ln -s "$inference_result_root" "$results_link"' in text
+    assert "Full inference output: $inference_result_root" in text
+    assert "Results symlink: $results_link" in text
+
+
 def test_forward_debug_batch_script_maps_old_max_batches_to_max_samples():
     text = SCRIPT.read_text(encoding="utf-8")
 
