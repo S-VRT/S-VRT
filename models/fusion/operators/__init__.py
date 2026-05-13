@@ -1,10 +1,12 @@
 from typing import Any
 
+from .attention import AttentionFusionOperator
 from .concat import ConcatFusionOperator
 from .gated import GatedFusionOperator
 from .mamba import MambaFusionOperator
 from .pase import PaseFusionOperator
 from .pase_residual import PaseResidualFusionOperator
+from .dual_scale_temporal_mamba import DualScaleTemporalMambaFusionOperator
 
 
 def build_operator(
@@ -43,8 +45,22 @@ def build_operator(
             out_chans=out_chans,
             operator_params=operator_params,
         )
+    if normalized_name == 'attention':
+        return AttentionFusionOperator(
+            rgb_chans=rgb_chans,
+            spike_chans=spike_chans,
+            out_chans=out_chans,
+            operator_params=operator_params,
+        )
     if normalized_name == 'pase_residual':
         return PaseResidualFusionOperator(
+            rgb_chans=rgb_chans,
+            spike_chans=spike_chans,
+            out_chans=out_chans,
+            operator_params=operator_params,
+        )
+    if normalized_name == 'dual_scale_temporal_mamba':
+        return DualScaleTemporalMambaFusionOperator(
             rgb_chans=rgb_chans,
             spike_chans=spike_chans,
             out_chans=out_chans,
@@ -55,9 +71,11 @@ def build_operator(
 
 __all__ = [
     'build_operator',
+    'AttentionFusionOperator',
     'ConcatFusionOperator',
     'GatedFusionOperator',
     'MambaFusionOperator',
     'PaseFusionOperator',
     'PaseResidualFusionOperator',
+    'DualScaleTemporalMambaFusionOperator',
 ]

@@ -12,6 +12,7 @@ class FusionProbeRecord:
     inputs: tuple[torch.Tensor, ...]
     output: torch.Tensor
     module_name: str
+    structured_output: dict[str, Any] | None = None
 
 
 def _detach_tensor(value: Any) -> Any:
@@ -20,6 +21,19 @@ def _detach_tensor(value: Any) -> Any:
     if isinstance(value, (tuple, list)):
         return tuple(_detach_tensor(v) for v in value)
     return value
+
+
+def _extract_tensor_output(output: Any) -> torch.Tensor | None:
+    if isinstance(output, torch.Tensor):
+        return output
+    if isinstance(output, (tuple, list)) and output:
+        return _extract_tensor_output(output[0])
+    if isinstance(output, dict):
+        for key in ("backbone_view", "fused_main", "output"):
+            value = output.get(key)
+            if isinstance(value, torch.Tensor):
+                return value
+    return None
 
 
 def find_fusion_adapter(model: nn.Module) -> nn.Module:
@@ -58,16 +72,22 @@ class FusionProbe:
         self.close()
 
     def _hook(self, module: nn.Module, inputs: tuple[Any, ...], output: Any) -> None:
-        tensor_output = output[0] if isinstance(output, (tuple, list)) else output
-        if not isinstance(tensor_output, torch.Tensor):
+        tensor_output = _extract_tensor_output(output)
+        if tensor_output is None:
             return
         if tensor_output.requires_grad:
             tensor_output.retain_grad()
+        structured_output = output if isinstance(output, dict) else None
+        if structured_output is not None:
+            for value in structured_output.values():
+                if isinstance(value, torch.Tensor) and value.requires_grad:
+                    value.retain_grad()
         tensor_inputs = tuple(v for v in _detach_tensor(inputs) if isinstance(v, torch.Tensor))
         self.record = FusionProbeRecord(
             inputs=tensor_inputs,
             output=tensor_output,
             module_name=module.__class__.__name__,
+            structured_output=structured_output,
         )
 
 

@@ -217,6 +217,18 @@ def parse(opt_path, is_train=True):
     if 'netD' in opt and 'D_optimizer_reuse' not in opt['train']:
         opt['train']['D_optimizer_reuse'] = False
 
+    if 'two_run' not in opt['train']:
+        opt['train']['two_run'] = {'enable': False}
+    elif not isinstance(opt['train']['two_run'], dict):
+        raise ValueError("train.two_run must be a dict when provided.")
+
+    two_run_cfg = opt['train']['two_run']
+    if 'enable' not in two_run_cfg:
+        two_run_cfg['enable'] = False
+    if two_run_cfg.get('enable', False):
+        if 'phase1' not in two_run_cfg or 'phase2' not in two_run_cfg:
+            raise ValueError("train.two_run.enable=true requires both phase1 and phase2 blocks.")
+
     # ----------------------------------------
     # default setting of strict for model loading
     # ----------------------------------------

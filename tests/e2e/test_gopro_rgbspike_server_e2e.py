@@ -3,6 +3,8 @@ import copy
 import pytest
 import torch
 
+from utils import utils_option as option
+
 
 def _run_server_option_minimal_forward(
     server_option,
@@ -112,3 +114,15 @@ def test_server_option_e2e_minimal_forward_forced_dual_path(
         require_paths_or_skip_fn,
         force_dual_pack_mode=True,
     )
+
+
+def test_dual_scale_temporal_mamba_raw_window_config_parses():
+    opt = option.parse("options/gopro_rgbspike_server_dual_scale_temporal_mamba_raw_window.json", is_train=True)
+
+    assert opt["netG"]["fusion"]["operator"] == "dual_scale_temporal_mamba"
+    assert opt["datasets"]["train"]["spike"]["representation"] == "raw_window"
+    assert opt["datasets"]["test"]["spike"]["representation"] == "raw_window"
+    assert opt["datasets"]["train"]["spike_channels"] == 21
+    assert opt["datasets"]["train"]["spike_flow"]["subframes"] == opt["datasets"]["train"]["spike_channels"]
+    assert opt["datasets"]["test"]["spike_flow"]["subframes"] == opt["datasets"]["test"]["spike_channels"]
+    assert opt["netG"]["input"]["raw_ingress_chans"] == 24

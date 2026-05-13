@@ -139,6 +139,262 @@ def test_vrt_mamba_operator_name_is_case_insensitive_for_default_contract():
     assert model.fusion_adapter.frame_contract == "collapsed"
 
 
+def test_vrt_parses_scflow_collapse_policy_from_dataset_config():
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "scflow", "checkpoint": None, "params": {}},
+        opt={
+            "datasets": {
+                "train": {
+                    "spike_flow": {
+                        "representation": "encoding25",
+                        "subframes": 4,
+                        "collapse_policy": "compose_subframes",
+                    }
+                }
+            },
+            "netG": {
+                "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 7},
+                "fusion": {
+                    "placement": "early",
+                    "operator": "mamba",
+                    "out_chans": 3,
+                    "operator_params": {"model_dim": 8, "num_layers": 1},
+                    "early": {"frame_contract": "collapsed"},
+                },
+                "output_mode": "restoration",
+            },
+        },
+    )
+
+    assert model.spike_flow_collapse_policy == "compose_subframes"
+
+
+def test_vrt_compose_adjacent_flows_accumulates_constant_translation():
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "scflow", "checkpoint": None, "params": {}},
+        opt={"netG": {"input": {"strategy": "concat", "mode": "concat", "raw_ingress_chans": 7}}},
+    )
+
+    flows = torch.zeros(1, 8, 2, 6, 6)
+    flows[:, :, 0, :, :] = 1.0
+    composed = model._compose_adjacent_flows(flows, start=2, end=6)
+
+    assert composed.shape == (1, 2, 6, 6)
+    assert torch.allclose(composed[:, 0], torch.full((1, 6, 6), 4.0))
+    assert torch.allclose(composed[:, 1], torch.zeros(1, 6, 6))
+
+
+def test_vrt_get_flow_2frames_compose_subframes_returns_frame_level_flows(monkeypatch):
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[3, 8, 8],
+        window_size=[3, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "scflow", "checkpoint": None, "params": {}},
+        opt={
+            "datasets": {
+                "train": {
+                    "spike_flow": {
+                        "representation": "encoding25",
+                        "subframes": 4,
+                        "collapse_policy": "compose_subframes",
+                    }
+                }
+            },
+            "netG": {"input": {"strategy": "concat", "mode": "concat", "raw_ingress_chans": 7}},
+        },
+    )
+    model._last_spike_bins = 4
+
+    calls = []
+
+    class FakeSpikeFlow(torch.nn.Module):
+        input_type = "spike"
+
+        def forward(self, a, b):
+            calls.append((tuple(a.shape), tuple(b.shape)))
+            steps = a.shape[0]
+            height, width = a.shape[-2:]
+            full = torch.zeros(steps, 2, height, width)
+            full[:, 0, :, :] = 1.0
+            return [
+                full,
+                torch.zeros(steps, 2, height // 2, width // 2),
+                torch.zeros(steps, 2, height // 4, width // 4),
+                torch.zeros(steps, 2, height // 8, width // 8),
+            ]
+
+    model.spynet = FakeSpikeFlow()
+
+    x = torch.zeros(1, 3, 3, 8, 8)
+    flow_spike = torch.zeros(1, 12, 25, 8, 8)
+    flows_backward, flows_forward = model.get_flow_2frames(x, flow_spike=flow_spike)
+
+    assert calls[0][0] == (11, 25, 8, 8)
+    assert calls[1][0] == (11, 25, 8, 8)
+    assert flows_backward[0].shape == (1, 2, 2, 8, 8)
+    assert flows_forward[0].shape == (1, 2, 2, 8, 8)
+    assert torch.allclose(flows_backward[0][:, :, 0], torch.full((1, 2, 8, 8), 4.0))
+    assert torch.allclose(flows_forward[0][:, :, 0], torch.full((1, 2, 8, 8), 4.0))
+
+
+def test_vrt_get_flow_2frames_compose_subframes_reverses_forward_flow_order():
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[3, 8, 8],
+        window_size=[3, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "scflow", "checkpoint": None, "params": {}},
+        opt={
+            "datasets": {
+                "train": {
+                    "spike_flow": {
+                        "representation": "encoding25",
+                        "subframes": 4,
+                        "collapse_policy": "compose_subframes",
+                    }
+                }
+            },
+            "netG": {"input": {"strategy": "concat", "mode": "concat", "raw_ingress_chans": 7}},
+        },
+    )
+    model._last_spike_bins = 4
+
+    calls = []
+
+    class FakeSpikeFlow(torch.nn.Module):
+        input_type = "spike"
+
+        def forward(self, a, b):
+            calls.append((tuple(a.shape), tuple(b.shape)))
+            steps = a.shape[0]
+            height, width = a.shape[-2:]
+            full = torch.zeros(steps, 2, height, width)
+            if len(calls) == 2:
+                x_coords = torch.arange(width, dtype=full.dtype).view(1, width).expand(height, width)
+                full[2, 0] = x_coords
+                full[3, 0] = 1.0
+                full[4, 0] = 2.0
+                full[5, 0] = 3.0
+            return [
+                full,
+                torch.zeros(steps, 2, height // 2, width // 2),
+                torch.zeros(steps, 2, height // 4, width // 4),
+                torch.zeros(steps, 2, height // 8, width // 8),
+            ]
+
+    model.spynet = FakeSpikeFlow()
+
+    x = torch.zeros(1, 3, 3, 8, 8)
+    flow_spike = torch.zeros(1, 12, 25, 8, 8)
+    _flows_backward, flows_forward = model.get_flow_2frames(x, flow_spike=flow_spike)
+
+    expected_row = torch.tensor([12.0, 13.0, 13.0, 13.0, 13.0, 13.0, 13.0, 13.0])
+    assert torch.allclose(flows_forward[0][0, 0, 0, 0], expected_row)
+
+
+def test_vrt_get_flow_2frames_compose_subframes_rejects_batch_mismatch():
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[3, 8, 8],
+        window_size=[3, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "scflow", "checkpoint": None, "params": {}},
+        opt={
+            "datasets": {
+                "train": {
+                    "spike_flow": {
+                        "representation": "encoding25",
+                        "subframes": 4,
+                        "collapse_policy": "compose_subframes",
+                    }
+                }
+            },
+            "netG": {"input": {"strategy": "concat", "mode": "concat", "raw_ingress_chans": 7}},
+        },
+    )
+    model._last_spike_bins = 4
+
+    class FakeSpikeFlow(torch.nn.Module):
+        input_type = "spike"
+
+        def forward(self, _a, _b):
+            raise AssertionError("spynet should not be called when batch sizes mismatch")
+
+    model.spynet = FakeSpikeFlow()
+
+    x = torch.zeros(1, 3, 3, 8, 8)
+    flow_spike = torch.zeros(2, 12, 25, 8, 8)
+    with pytest.raises(ValueError, match="SCFlow flow_spike temporal dim mismatch"):
+        model.get_flow_2frames(x, flow_spike=flow_spike)
+
+
+def test_vrt_compose_adjacent_flows_rejects_invalid_inputs():
+    with pytest.raises(ValueError, match="Expected flows \\[B,T,2,H,W\\]"):
+        VRT._compose_adjacent_flows(torch.zeros(1, 4, 3, 6, 6), start=0, end=1)
+
+    flows = torch.zeros(1, 4, 2, 6, 6)
+    with pytest.raises(ValueError, match="Invalid flow composition range"):
+        VRT._compose_adjacent_flows(flows, start=-1, end=1)
+    with pytest.raises(ValueError, match="Invalid flow composition range"):
+        VRT._compose_adjacent_flows(flows, start=0, end=5)
+
+
+def test_vrt_rejects_conflicting_scflow_collapse_policies():
+    opt = {
+        "datasets": {
+            "train": {"spike_flow": {"collapse_policy": "compose_subframes"}},
+            "test": {"spike_flow": {"collapse_policy": "mean_windows"}},
+        }
+    }
+
+    with pytest.raises(ValueError, match="Conflicting spike_flow.collapse_policy"):
+        VRT._resolve_spike_flow_collapse_policy(opt)
+
+
 def test_vrt_forward_triggers_early_fusion(monkeypatch):
     opt = {
         "netG": {
@@ -875,7 +1131,7 @@ def test_vrt_collapsed_operator_keeps_main_and_exec_equal(monkeypatch):
     assert model._last_fusion_meta["frame_contract"] == "collapsed"
 
 
-def test_vrt_structured_early_mamba_collapses_subframe_flow_spike(monkeypatch):
+def test_vrt_structured_early_mamba_mean_windows_collapses_subframe_flow_spike(monkeypatch):
     model = VRT(
         upscale=1,
         in_chans=7,
@@ -945,6 +1201,140 @@ def test_vrt_structured_early_mamba_collapses_subframe_flow_spike(monkeypatch):
     assert model._last_fusion_exec.shape == (1, 6, 3, 8, 8)
     assert model._last_fusion_meta["frame_contract"] == "collapsed"
     assert out.shape == (1, 6, 3, 8, 8)
+
+
+def test_vrt_structured_early_mamba_compose_subframes_keeps_expanded_flow_spike(monkeypatch):
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[6, 8, 8],
+        window_size=[6, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "scflow", "checkpoint": None, "params": {}},
+        opt={
+            "datasets": {
+                "train": {
+                    "spike_flow": {
+                        "representation": "encoding25",
+                        "subframes": 4,
+                        "collapse_policy": "compose_subframes",
+                    }
+                }
+            },
+            "netG": {
+                "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 7},
+                "fusion": {
+                    "placement": "early",
+                    "operator": "mamba",
+                    "out_chans": 3,
+                    "operator_params": {"model_dim": 8, "num_layers": 1},
+                    "early": {"frame_contract": "collapsed"},
+                },
+                "output_mode": "restoration",
+            },
+        },
+    )
+
+    monkeypatch.setattr(model.fusion_adapter.operator, "forward", lambda rgb, spike: rgb)
+
+    captured = {}
+    dummy_flows = [
+        torch.zeros(1, 5, 2, 8, 8),
+        torch.zeros(1, 5, 2, 4, 4),
+        torch.zeros(1, 5, 2, 2, 2),
+        torch.zeros(1, 5, 2, 1, 1),
+    ]
+
+    def _fake_get_flows(_x, flow_spike=None):
+        captured["x_shape"] = tuple(_x.shape)
+        captured["flow_spike_shape"] = tuple(flow_spike.shape)
+        return dummy_flows, dummy_flows
+
+    def _fake_aligned(_x, _fb, _ff):
+        bsz, steps, _, height, width = _x.shape
+        chans = model.backbone_in_chans * 4
+        return [
+            torch.zeros(bsz, steps, chans, height, width),
+            torch.zeros(bsz, steps, chans, height, width),
+        ]
+
+    monkeypatch.setattr(model, "get_flows", _fake_get_flows)
+    monkeypatch.setattr(model, "get_aligned_image_2frames", _fake_aligned)
+    monkeypatch.setattr(model, "forward_features", lambda _x, *_args, **_kwargs: torch.zeros_like(_x))
+
+    x = torch.randn(1, 6, 7, 8, 8)
+    flow_spike = torch.randn(1, 24, 25, 8, 8)
+
+    with torch.no_grad():
+        _ = model(x, flow_spike=flow_spike)
+
+    assert captured["x_shape"] == (1, 6, 3, 8, 8)
+    assert captured["flow_spike_shape"] == (1, 24, 25, 8, 8)
+
+
+def test_model_vrt_test_video_slices_eager_subframe_flow_spike_by_subframes():
+    from models.model_vrt import ModelVRT
+
+    model = ModelVRT.__new__(ModelVRT)
+    model.opt = {
+        "scale": 1,
+        "val": {"num_frame_testing": 3, "num_frame_overlapping": 1},
+        "netG": {"out_chans": 3},
+    }
+    model._assert_lq_channels = lambda *_args, **_kwargs: None
+    captured = []
+
+    def _fake_test_clip(lq_clip, flow_spike=None, **_kwargs):
+        captured.append(flow_spike.detach().clone())
+        return torch.zeros(lq_clip.size(0), lq_clip.size(1), 3, lq_clip.size(3), lq_clip.size(4))
+
+    model._test_clip = _fake_test_clip
+
+    lq = torch.zeros(1, 5, 3, 4, 4)
+    flow_spike = torch.arange(1 * 20 * 25 * 4 * 4, dtype=torch.float32).reshape(1, 20, 25, 4, 4)
+    _ = model._test_video(lq, flow_spike=flow_spike)
+
+    assert [tuple(item.shape) for item in captured] == [
+        (1, 12, 25, 4, 4),
+        (1, 12, 25, 4, 4),
+    ]
+    assert torch.equal(captured[0], flow_spike[:, 0:12])
+    assert torch.equal(captured[1], flow_spike[:, 8:20])
+
+
+def test_model_vrt_test_video_pads_eager_subframe_flow_spike_by_subframes():
+    from models.model_vrt import ModelVRT
+
+    model = ModelVRT.__new__(ModelVRT)
+    model.opt = {
+        "scale": 1,
+        "val": {"num_frame_testing": 0},
+        "netG": {"window_size": [6, 4, 4], "out_chans": 3},
+    }
+    model._assert_lq_channels = lambda *_args, **_kwargs: None
+    captured = {}
+
+    def _fake_test_clip(lq_clip, flow_spike=None, **_kwargs):
+        captured["lq_shape"] = tuple(lq_clip.shape)
+        captured["flow_spike"] = flow_spike.detach().clone()
+        return torch.zeros(lq_clip.size(0), lq_clip.size(1), 3, lq_clip.size(3), lq_clip.size(4))
+
+    model._test_clip = _fake_test_clip
+
+    lq = torch.zeros(1, 5, 3, 4, 4)
+    flow_spike = torch.arange(1 * 20 * 25 * 4 * 4, dtype=torch.float32).reshape(1, 20, 25, 4, 4)
+    _ = model._test_video(lq, flow_spike=flow_spike)
+
+    assert captured["lq_shape"] == (1, 6, 3, 4, 4)
+    assert tuple(captured["flow_spike"].shape) == (1, 24, 25, 4, 4)
+    assert torch.equal(captured["flow_spike"][:, :20], flow_spike)
+    assert torch.equal(captured["flow_spike"][:, 20:], torch.flip(flow_spike[:, -4:], [1]))
 
 
 def test_vrt_flow_alignment_uses_execution_steps_not_main_steps(monkeypatch):
@@ -1334,3 +1724,395 @@ def test_full_t_hybrid_rejects_non_spikecv_tfp_from_test_dataset():
             optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
             opt=opt,
         )
+
+
+def test_vrt_allows_attention_expanded_frame_contract_config():
+    opt = {
+        "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "attention",
+                "out_chans": 3,
+                "early": {
+                    "frame_contract": "expanded",
+                    "expand_to_full_t": True,
+                },
+                "operator_params": {
+                    "token_dim": 8,
+                    "token_stride": 2,
+                    "num_layers": 1,
+                    "num_heads": 2,
+                },
+            },
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.fusion_adapter.requested_frame_contract == "expanded"
+    assert model.fusion_adapter.frame_contract == "expanded"
+
+
+def test_vrt_attention_operator_name_is_case_insensitive_for_default_contract():
+    opt = {
+        "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "Attention",
+                "out_chans": 3,
+                "operator_params": {
+                    "token_dim": 8,
+                    "token_stride": 2,
+                    "num_layers": 1,
+                    "num_heads": 2,
+                },
+            },
+        }
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=7,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.fusion_adapter.requested_frame_contract == "operator_default"
+    assert model.fusion_adapter.frame_contract == "collapsed"
+
+
+def test_vrt_rejects_attention_with_full_t_early_expansion():
+    import pytest
+    opt = {
+        "netG": {
+            "input": {
+                "strategy": "fusion",
+                "mode": "dual",
+                "raw_ingress_chans": 7,
+            },
+            "output_mode": "restoration",
+            "fusion": {
+                "enable": True,
+                "placement": "early",
+                "operator": "attention",
+                "out_chans": 3,
+                "early": {
+                    "expand_to_full_t": True,
+                },
+                "operator_params": {
+                    "token_dim": 8,
+                    "token_stride": 2,
+                    "num_layers": 1,
+                    "num_heads": 2,
+                },
+            },
+        }
+    }
+
+    with pytest.raises(ValueError, match="attention.*expand_to_full_t"):
+        VRT(
+            upscale=1,
+            in_chans=7,
+            out_chans=3,
+            img_size=[2, 8, 8],
+            window_size=[2, 4, 4],
+            depths=[1] * 8,
+            indep_reconsts=[],
+            embed_dims=[16] * 8,
+            num_heads=[1] * 8,
+            pa_frames=2,
+            use_flash_attn=False,
+            optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+            opt=opt,
+        )
+
+
+def _pase_residual_raw_window_opt(in_chans=11, raw_window_length=None):
+    return {
+        "netG": {
+            "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": in_chans},
+            "fusion": {
+                "placement": "early",
+                "operator": "pase_residual",
+                "out_chans": 3,
+                "early": {"frame_contract": "collapsed"},
+            },
+        },
+        "datasets": {
+            "train": {
+                "spike": {
+                    "representation": "raw_window",
+                    "reconstruction": {"type": "spikecv_tfp", "num_bins": 4},
+                    "raw_window_length": raw_window_length,
+                },
+                "tfp_half_win_length": 5,
+            }
+        },
+    }
+
+
+def test_vrt_builds_with_pase_residual_raw_window_config():
+    in_chans = 11
+    model = VRT(
+        upscale=1,
+        in_chans=in_chans,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=_pase_residual_raw_window_opt(in_chans=in_chans),
+    )
+
+    assert model.fusion_operator is not None
+    assert model._fusion_spike_representation == "raw_window"
+    assert model._fusion_raw_window_length == 11
+
+
+def test_vrt_rejects_raw_window_with_non_pase_residual_operator():
+    with pytest.raises(ValueError, match="raw_window.*pase_residual"):
+        VRT(
+            upscale=1,
+            in_chans=11,
+            out_chans=3,
+            img_size=[2, 8, 8],
+            window_size=[2, 4, 4],
+            depths=[1] * 8,
+            indep_reconsts=[],
+            embed_dims=[16] * 8,
+            num_heads=[1] * 8,
+            pa_frames=2,
+            use_flash_attn=False,
+            optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+            opt={
+                "netG": {
+                    "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": 11},
+                    "fusion": {
+                        "placement": "early",
+                        "operator": "gated",
+                        "out_chans": 3,
+                    },
+                },
+                "datasets": {
+                    "train": {
+                        "spike": {
+                            "representation": "raw_window",
+                            "reconstruction": {"type": "spikecv_tfp", "num_bins": 4},
+                            "raw_window_length": 11,
+                        },
+                        "tfp_half_win_length": 5,
+                    }
+                },
+            },
+        )
+
+
+def test_vrt_forward_records_raw_window_representation_metadata(monkeypatch):
+    in_chans = 11
+    model = VRT(
+        upscale=1,
+        in_chans=in_chans,
+        out_chans=3,
+        img_size=[2, 8, 8],
+        window_size=[2, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=_pase_residual_raw_window_opt(in_chans=in_chans),
+    )
+
+    dummy_flows = [
+        torch.zeros(1, 1, 2, 8, 8),
+        torch.zeros(1, 1, 2, 4, 4),
+        torch.zeros(1, 1, 2, 2, 2),
+        torch.zeros(1, 1, 2, 1, 1),
+    ]
+
+    monkeypatch.setattr(model, "get_flows", lambda _x, flow_spike=None: (dummy_flows, dummy_flows))
+    monkeypatch.setattr(
+        model,
+        "get_aligned_image_2frames",
+        lambda _x, _fb, _ff: [
+            torch.zeros(1, 2, model.backbone_in_chans * 4, 8, 8),
+            torch.zeros(1, 2, model.backbone_in_chans * 4, 8, 8),
+        ],
+    )
+    monkeypatch.setattr(model, "forward_features", lambda _x, *_args, **_kwargs: torch.zeros_like(_x))
+
+    x = torch.randn(1, 2, in_chans, 8, 8)
+    with torch.no_grad():
+        _ = model(x)
+
+    assert model._last_fusion_meta is not None
+    assert model._last_fusion_meta.get("spike_representation") == "raw_window"
+    assert model._last_fusion_meta.get("effective_spike_channels") == in_chans - 3
+    assert model._last_fusion_meta.get("spike_window_length") == 11
+
+
+def _dual_scale_raw_window_opt(in_chans=21 + 3, raw_window_length=21):
+    return {
+        "netG": {
+            "input": {"strategy": "fusion", "mode": "dual", "raw_ingress_chans": in_chans},
+            "fusion": {
+                "placement": "early",
+                "operator": "dual_scale_temporal_mamba",
+                "out_chans": 3,
+                "operator_params": {
+                    "token_dim": 8,
+                    "patch_stride": 4,
+                    "local_layers": 1,
+                    "global_layers": 1,
+                },
+            },
+            "output_mode": "restoration",
+        },
+        "datasets": {
+            "train": {
+                "spike": {
+                    "representation": "raw_window",
+                    "raw_window_length": raw_window_length,
+                    "reconstruction": {"type": "spikecv_tfp", "num_bins": 4},
+                }
+            }
+        },
+    }
+
+
+def test_vrt_builds_with_dual_scale_temporal_mamba_raw_window_config():
+    model = VRT(
+        upscale=1,
+        in_chans=24,
+        out_chans=3,
+        img_size=[6, 16, 16],
+        window_size=[6, 8, 8],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=_dual_scale_raw_window_opt(),
+    )
+
+    assert model.fusion_operator is not None
+    assert model.fusion_operator.spike_chans == 21
+    assert model._fusion_spike_representation == "raw_window"
+    assert model._fusion_raw_window_length == 21
+    assert model.fusion_adapter.frame_contract == "collapsed"
+
+
+def test_vrt_rejects_dual_scale_temporal_mamba_without_raw_window():
+    opt = _dual_scale_raw_window_opt(in_chans=12)
+    opt["datasets"]["train"]["spike"] = {
+        "reconstruction": {"type": "spikecv_tfp", "num_bins": 9},
+    }
+
+    model = VRT(
+        upscale=1,
+        in_chans=12,
+        out_chans=3,
+        img_size=[6, 16, 16],
+        window_size=[6, 8, 8],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=opt,
+    )
+
+    assert model.fusion_operator is not None
+    assert model.fusion_operator.spike_chans == 9
+    assert model._fusion_spike_representation == "tfp"
+    assert model._fusion_raw_window_length is None
+
+
+def test_vrt_dual_scale_temporal_mamba_records_representation_metadata(monkeypatch):
+    model = VRT(
+        upscale=1,
+        in_chans=24,
+        out_chans=3,
+        img_size=[6, 8, 8],
+        window_size=[6, 4, 4],
+        depths=[1] * 8,
+        indep_reconsts=[],
+        embed_dims=[16] * 8,
+        num_heads=[1] * 8,
+        pa_frames=2,
+        use_flash_attn=False,
+        optical_flow={"module": "spynet", "checkpoint": None, "params": {}},
+        opt=_dual_scale_raw_window_opt(),
+    )
+
+    monkeypatch.setattr(model.fusion_adapter.operator, "forward", lambda rgb, spike: rgb)
+    monkeypatch.setattr(
+        model.fusion_adapter.operator,
+        "diagnostics",
+        lambda: {"local_norm": 1.0, "global_norm": 2.0, "summary_gate_mean": 0.5, "warmup_stage": "full"},
+    )
+    dummy_flows = [torch.zeros(1, 5, 2, 8, 8)] * 4
+    monkeypatch.setattr(model, "get_flows", lambda _x, flow_spike=None: (dummy_flows, dummy_flows))
+    monkeypatch.setattr(
+        model,
+        "get_aligned_image_2frames",
+        lambda _x, _fb, _ff: [torch.zeros(1, 6, model.backbone_in_chans * 4, 8, 8)] * 2,
+    )
+    monkeypatch.setattr(model, "forward_features", lambda _x, *_args, **_kwargs: torch.zeros_like(_x))
+
+    x = torch.randn(1, 6, 24, 8, 8)
+    with torch.no_grad():
+        _ = model(x)
+
+    assert model._last_fusion_meta["spike_representation"] == "raw_window"
+    assert model._last_fusion_meta["spike_window_length"] == 21
+    assert model._last_fusion_meta["local_norm"] == 1.0
+    assert model._last_fusion_meta["global_norm"] == 2.0

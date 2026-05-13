@@ -44,17 +44,17 @@ def test_concat_operator_shape():
 
 
 @pytest.mark.parametrize(
-    ("operator_name", "rgb_chans", "spike_chans", "expected_frame_contract"),
+    ("operator_name", "expected_frame_contract"),
     [
-        ("gated", 3, 1, "expanded"),
-        ("concat", 3, 1, "expanded"),
-        ("pase", 3, 1, "expanded"),
-        ("mamba", 3, 1, "collapsed"),
-        ("pase_residual", 3, 4, "collapsed"),
+        ("gated", "expanded"),
+        ("concat", "expanded"),
+        ("pase", "expanded"),
+        ("mamba", "collapsed"),
+        ("attention", "collapsed"),
     ],
 )
-def test_fusion_operator_frame_contract_metadata(operator_name, rgb_chans, spike_chans, expected_frame_contract):
-    op = create_fusion_operator(operator_name, rgb_chans, spike_chans, 3, {})
+def test_fusion_operator_frame_contract_metadata(operator_name, expected_frame_contract):
+    op = create_fusion_operator(operator_name, 3, 1, 3, {})
     assert getattr(op, "frame_contract", None) == expected_frame_contract
 
 
@@ -617,3 +617,142 @@ def test_pase_residual_operator_token_mixer_stage_unfreezes_all_feature_paths():
     assert all(p.requires_grad for p in op.fusion_body.parameters())
     assert all(p.requires_grad for p in op.fusion_writeback_head.parameters())
     assert op.alpha.requires_grad is True
+
+
+def test_attention_operator_shape():
+    op = create_fusion_operator(
+        "attention",
+        3,
+        1,
+        3,
+        {
+            "token_dim": 16,
+            "token_stride": 2,
+            "num_layers": 1,
+            "num_heads": 4,
+            "mlp_ratio": 2.0,
+        },
+    )
+    rgb_feat = torch.randn(2, 5, 3, 16, 16)
+    spike_feat = torch.randn(2, 5, 6, 16, 16)
+    out = op(rgb_feat, spike_feat)
+    assert out.shape == (2, 5, 3, 16, 16)
+
+
+def test_attention_operator_small_output_non_degenerate_init():
+    op = create_fusion_operator(
+        "attention",
+        3,
+        1,
+        3,
+        {
+            "token_dim": 24,
+            "token_stride": 2,
+            "num_layers": 1,
+            "num_heads": 4,
+            "mlp_ratio": 2.0,
+            "alpha_init": 0.05,
+            "gate_bias_init": -2.0,
+            "enable_diagnostics": True,
+        },
+    )
+    rgb = torch.ones(1, 2, 3, 8, 8) * 0.5
+    spike = torch.zeros(1, 2, 4, 8, 8)
+
+    out = op(rgb, spike)
+
+    max_diff = (out - rgb).abs().max().item()
+    diagnostics = op.diagnostics()
+    assert 1e-7 < max_diff < 1e-2
+    assert 1e-7 < diagnostics["effective_update_norm"] < 1e-2
+    assert diagnostics["warmup_stage"] == "full"
+    assert set(diagnostics) >= {
+        "token_norm",
+        "attention_norm",
+        "delta_norm",
+        "gate_mean",
+        "effective_update_norm",
+        "warmup_stage",
+    }
+
+    loss = (out - rgb).abs().mean()
+    loss.backward()
+
+    delta_grad = op.fusion_writeback_head["delta"].weight.grad
+    gate_grad = op.fusion_writeback_head["gate"].weight.grad
+    assert delta_grad is not None and delta_grad.abs().sum().item() > 0.0
+    assert gate_grad is not None and gate_grad.abs().sum().item() > 0.0
+
+
+def test_attention_operator_writeback_only_stage_freezes_encoders_and_mixer():
+    op = create_fusion_operator(
+        "attention",
+        3,
+        1,
+        3,
+        {"token_dim": 16, "token_stride": 2, "num_layers": 1, "num_heads": 4},
+    )
+
+    op.set_warmup_stage("writeback_only")
+
+    assert all(not p.requires_grad for p in op.rgb_context_encoder.parameters())
+    assert all(not p.requires_grad for p in op.spike_token_encoder.parameters())
+    assert all(not p.requires_grad for p in op.attention_token_mixer.parameters())
+    assert all(p.requires_grad for p in op.fusion_writeback_head.parameters())
+    assert op.alpha.requires_grad is True
+
+
+def test_attention_operator_token_mixer_stage_unfreezes_all_feature_paths():
+    op = create_fusion_operator(
+        "attention",
+        3,
+        1,
+        3,
+        {"token_dim": 16, "token_stride": 2, "num_layers": 1, "num_heads": 4},
+    )
+
+    op.set_warmup_stage("token_mixer")
+
+    assert all(p.requires_grad for p in op.rgb_context_encoder.parameters())
+    assert all(p.requires_grad for p in op.spike_token_encoder.parameters())
+    assert all(p.requires_grad for p in op.attention_token_mixer.parameters())
+    assert all(p.requires_grad for p in op.fusion_writeback_head.parameters())
+    assert op.alpha.requires_grad is True
+
+
+def test_early_adapter_attention_expanded_override_reuses_collapsed_operator():
+    op = create_fusion_operator(
+        "attention",
+        3,
+        1,
+        3,
+        {"token_dim": 16, "token_stride": 2, "num_layers": 1, "num_heads": 4},
+    )
+    adapter = EarlyFusionAdapter(
+        operator=op,
+        spike_chans=4,
+        frame_contract="expanded",
+    )
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+
+    result = adapter(rgb=rgb, spike=spike)
+
+    assert result["fused_main"].shape == (1, 2, 3, 8, 8)
+    assert result["backbone_view"].shape == (1, 8, 3, 8, 8)
+    assert result["meta"]["requested_frame_contract"] == "expanded"
+    assert result["meta"]["frame_contract"] == "expanded"
+
+
+def test_attention_operator_explain_returns_expected_keys():
+    op = create_fusion_operator(
+        "attention", 3, 1, 3,
+        {"token_dim": 16, "token_stride": 2, "num_layers": 1, "num_heads": 4},
+    )
+    rgb = torch.randn(1, 2, 3, 8, 8)
+    spike = torch.randn(1, 2, 4, 8, 8)
+    op(rgb, spike)
+    explain = op.explain()
+    assert set(explain) >= {"gate", "delta", "effective_update", "token_energy"}
+    assert explain["gate"].shape == (1, 2, 3, 8, 8)
+    assert explain["token_energy"].shape == (1, 2, 8, 8)

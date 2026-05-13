@@ -27,6 +27,7 @@ from data.dataset_video_test import TestDataset, \
     SingleTestDataset
 from data.select_dataset import define_Dataset
 from models.fusion.debug import FusionDebugDumper
+from data.spike_recc.encoding25 import load_encoding25_artifact_with_shape
 
 
 def get_memory_usage():
@@ -110,6 +111,8 @@ def _merge_config_into_args(args, cfg):
     val_cfg = cfg.get('val', {}) or {}
     path_cfg = cfg.get('path', {}) or {}
     netG_cfg = cfg.get('netG', {}) or {}
+    fusion_cfg = netG_cfg.get('fusion', {}) if isinstance(netG_cfg.get('fusion', {}), dict) else {}
+    fusion_debug_cfg = fusion_cfg.get('debug', {}) if isinstance(fusion_cfg.get('debug', {}), dict) else {}
 
     args.task = args.task or val_cfg.get('task_name') or cfg.get('task')
     args.folder_lq = args.folder_lq or test_cfg.get('dataroot_lq')
@@ -141,6 +144,19 @@ def _merge_config_into_args(args, cfg):
 
     if val_cfg.get('save_img') and not args.save_result:
         args.save_result = True
+
+    if fusion_debug_cfg:
+        cfg_debug_enabled = bool(
+            fusion_debug_cfg.get('enable', fusion_debug_cfg.get('save_images', False))
+        )
+        if cfg_debug_enabled and not args.fusion_debug:
+            args.fusion_debug = True
+        if getattr(args, 'fusion_debug_subdir', None) is None:
+            args.fusion_debug_subdir = fusion_debug_cfg.get('subdir')
+        if getattr(args, 'fusion_debug_source_view', None) is None:
+            args.fusion_debug_source_view = fusion_debug_cfg.get('source_view')
+        if getattr(args, 'fusion_debug_max_batches', None) is None:
+            args.fusion_debug_max_batches = fusion_debug_cfg.get('max_batches')
 
     # Store config for model loading
     args.cfg = cfg
@@ -241,6 +257,102 @@ def dump_post_inference_fusion_debug(model, args, batch, batch_idx, dumper_cls=F
     )
 
 
+def _normalize_flow_spike_meta(raw_meta):
+    def _first(value):
+        if isinstance(value, (list, tuple)):
+            return _first(value[0])
+        return value
+
+    meta = {}
+    for key, value in raw_meta.items():
+        if key == 'frame_names':
+            if isinstance(value, (list, tuple)) and value and isinstance(value[0], (list, tuple)):
+                value = [item[0] for item in value]
+            meta[key] = [str(item) for item in value]
+        elif key in {'subframes', 'source_h', 'source_w', 'target_h', 'target_w'}:
+            meta[key] = int(_first(value))
+        else:
+            meta[key] = str(_first(value))
+    return meta
+
+
+def _crop_resize_flow_chw(arr_chw, src_top, src_left, src_crop_h, src_crop_w, patch_h, patch_w):
+    arr_chw = np.asarray(arr_chw)
+    cropped = arr_chw[:, src_top:src_top + src_crop_h, src_left:src_left + src_crop_w]
+    resized = [
+        cv2.resize(cropped[ch], (patch_w, patch_h), interpolation=cv2.INTER_LINEAR)
+        for ch in range(cropped.shape[0])
+    ]
+    return np.stack(resized, axis=0).astype(np.float32)
+
+
+def _load_lazy_flow_patch(
+    meta,
+    temporal_offset,
+    clip_len,
+    h_idx,
+    w_idx,
+    patch_h,
+    patch_w,
+    full_h,
+    full_w,
+    device,
+):
+    meta = _normalize_flow_spike_meta(meta)
+    src_h = int(meta['source_h'])
+    src_w = int(meta['source_w'])
+    src_top = round(h_idx * src_h / full_h)
+    src_left = round(w_idx * src_w / full_w)
+    src_crop_h = max(round(patch_h * src_h / full_h), 1)
+    src_crop_w = max(round(patch_w * src_w / full_w), 1)
+    src_top = max(min(src_top, src_h - src_crop_h), 0)
+    src_left = max(min(src_left, src_w - src_crop_w), 0)
+
+    flow_tensors = []
+    frame_names = meta['frame_names'][temporal_offset:temporal_offset + clip_len]
+    for frame_name in frame_names:
+        base_path = Path(meta['flow_clip_dir']) / frame_name
+        arr = load_encoding25_artifact_with_shape(
+            base_path,
+            artifact_format=meta['format'],
+            num_subframes=int(meta['subframes']),
+            spike_h=src_h,
+            spike_w=src_w,
+        )
+        if int(meta['subframes']) > 1:
+            for sub_idx in range(int(meta['subframes'])):
+                flow_tensors.append(
+                    torch.from_numpy(
+                        _crop_resize_flow_chw(
+                            arr[sub_idx],
+                            src_top,
+                            src_left,
+                            src_crop_h,
+                            src_crop_w,
+                            patch_h,
+                            patch_w,
+                        )
+                    )
+                )
+        else:
+            flow_tensors.append(
+                torch.from_numpy(
+                    _crop_resize_flow_chw(
+                        arr,
+                        src_top,
+                        src_left,
+                        src_crop_h,
+                        src_crop_w,
+                        patch_h,
+                        patch_w,
+                    )
+                )
+            )
+    if not flow_tensors:
+        raise ValueError('No frame names available to build lazy flow_spike patch.')
+    return torch.stack(flow_tensors, dim=0).unsqueeze(0).to(device).float()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--opt', type=str, default=None,
@@ -261,11 +373,11 @@ def main():
                         help='Dump fusion module outputs during inference after loading checkpoint weights.')
     parser.add_argument('--fusion_debug_dir', type=str, default=None,
                         help='Override root directory for fusion debug images.')
-    parser.add_argument('--fusion_debug_subdir', type=str, default='fusion_post_infer',
+    parser.add_argument('--fusion_debug_subdir', type=str, default=None,
                         help='Subdirectory under each folder for fusion debug images.')
     parser.add_argument('--fusion_debug_source_view', type=str, default=None, choices=['main', 'exec'],
                         help='Fusion debug view to dump: main fused output or execution/backbone view.')
-    parser.add_argument('--fusion_debug_max_batches', type=int, default=1,
+    parser.add_argument('--fusion_debug_max_batches', type=int, default=None,
                         help='Maximum number of inference batches to dump for fusion debug.')
     args = parser.parse_args()
 
@@ -413,8 +525,9 @@ def main():
         print(f"DEBUG main: Processing batch, lq shape: {lq.shape}")
 
         # inference - keep original test_video logic but ensure model compatibility
+        flow_spike_meta = batch.get('L_flow_spike_meta')
         with torch.no_grad():
-            output = test_video(lq, model, args)
+            output = test_video(lq, model, args, flow_spike_meta=flow_spike_meta)
         if args.fusion_debug:
             dump_post_inference_fusion_debug(model, args, batch, idx)
 
@@ -615,16 +728,17 @@ def main():
 
 def _assert_lq_channels(tensor, tensor_name, netG_cfg):
     """Validate that the incoming temporal tensor matches configured in_chans."""
-    expected_in_chans = netG_cfg.get('in_chans', 3)
+    input_cfg = netG_cfg.get('input', {}) if isinstance(netG_cfg.get('input', {}), dict) else {}
+    expected_in_chans = int(input_cfg.get('raw_ingress_chans', netG_cfg.get('in_chans', 3)))
     actual_in_chans = tensor.size(2)
     if actual_in_chans != expected_in_chans:
         raise ValueError(
             f"{tensor_name} Channel Mismatch!\n"
             f"Tensor shape: {tensor.shape} (Channels: {actual_in_chans})\n"
-            f"Expected netG.in_chans: {expected_in_chans}\n"
+            f"Expected raw input channels: {expected_in_chans}\n"
             f"Mode: Test/Inference\n"
             f"Hint: Ensure your dataset returns all expected channels "
-            f"(e.g., RGB 3 + Spike 4 = 7) before feeding them to netG."
+            f"(e.g., RGB 3 + Spike channels) before feeding them to netG."
         )
 
 
@@ -747,7 +861,7 @@ def prepare_model_dataset(args):
     return model
 
 
-def test_video(lq, model, args):
+def test_video(lq, model, args, flow_spike=None, flow_spike_meta=None):
         '''test the video as a whole or as clips (divided temporally). '''
 
         # Channel validation - align with validation code
@@ -793,7 +907,22 @@ def test_video(lq, model, args):
 
             for d_idx in d_idx_list:
                 lq_clip = lq[:, d_idx:d_idx+num_frame_testing, ...]
-                out_clip = test_clip(lq_clip, model, args)
+                flow_spike_clip = None
+                if flow_spike is not None:
+                    spike_bins = _infer_eager_flow_spike_bins(flow_spike, d)
+                    flow_start = d_idx * spike_bins
+                    flow_end = (d_idx + num_frame_testing) * spike_bins
+                    flow_spike_clip = flow_spike[:, flow_start:flow_end, ...]
+                out_clip = test_clip(
+                    lq_clip,
+                    model,
+                    args,
+                    flow_spike=flow_spike_clip,
+                    flow_spike_meta=flow_spike_meta,
+                    temporal_offset=d_idx,
+                    full_h=h,
+                    full_w=w,
+                )
                 if E is None:
                     # Use actual output channels from model, but fallback to config if needed
                     c_out = out_clip.size(2)
@@ -819,13 +948,27 @@ def test_video(lq, model, args):
             d_old = lq.size(1)
             d_pad = (d_old // window_size[0] + 1) * window_size[0] - d_old
             lq = torch.cat([lq, torch.flip(lq[:, -d_pad:, ...], [1])], 1) if d_pad else lq
-            output = test_clip(lq, model, args)
+            if flow_spike is not None:
+                spike_bins = _infer_eager_flow_spike_bins(flow_spike, d_old)
+                flow_d_pad = d_pad * spike_bins
+                if flow_d_pad:
+                    flow_spike = torch.cat([flow_spike, torch.flip(flow_spike[:, -flow_d_pad:, ...], [1])], 1)
+            output = test_clip(lq, model, args, flow_spike=flow_spike, flow_spike_meta=flow_spike_meta)
             output = output[:, :d_old, :, :, :]
 
         return output
 
 
-def test_clip(lq, model, args):
+def _infer_eager_flow_spike_bins(flow_spike, frame_steps):
+    if flow_spike is None or frame_steps <= 0:
+        return 1
+    flow_steps = flow_spike.size(1)
+    if flow_steps > frame_steps and flow_steps % frame_steps == 0:
+        return flow_steps // frame_steps
+    return 1
+
+
+def test_clip(lq, model, args, flow_spike=None, flow_spike_meta=None, temporal_offset=0, full_h=None, full_w=None):
     ''' test the clip as a whole or as patches. '''
 
     # Channel validation - align with validation code
@@ -857,7 +1000,26 @@ def test_clip(lq, model, args):
         for h_idx in h_idx_list:
             for w_idx in w_idx_list:
                 in_patch = lq[..., h_idx:h_idx+size_patch_testing, w_idx:w_idx+size_patch_testing]
-                out_patch = model(in_patch).detach().cpu()
+                flow_patch = None
+                if flow_spike is not None:
+                    flow_patch = flow_spike[..., h_idx:h_idx+size_patch_testing, w_idx:w_idx+size_patch_testing]
+                elif flow_spike_meta is not None:
+                    flow_patch = _load_lazy_flow_patch(
+                        meta=flow_spike_meta,
+                        temporal_offset=temporal_offset,
+                        clip_len=d,
+                        h_idx=h_idx,
+                        w_idx=w_idx,
+                        patch_h=size_patch_testing,
+                        patch_w=size_patch_testing,
+                        full_h=full_h or h,
+                        full_w=full_w or w,
+                        device=lq.device,
+                    )
+                if flow_patch is not None:
+                    out_patch = model(in_patch, flow_spike=flow_patch).detach().cpu()
+                else:
+                    out_patch = model(in_patch).detach().cpu()
 
                 # Lazy-init accumulation buffers using model output shape (not LQ channels)
                 if E is None:
@@ -894,8 +1056,16 @@ def test_clip(lq, model, args):
 
         lq = torch.cat([lq, torch.flip(lq[:, :, :, -h_pad:, :], [3])], 3) if h_pad else lq
         lq = torch.cat([lq, torch.flip(lq[:, :, :, :, -w_pad:], [4])], 4) if w_pad else lq
+        if flow_spike is not None:
+            flow_spike = torch.cat([flow_spike, torch.flip(flow_spike[:, :, :, -h_pad:, :], [3])], 3) if h_pad else flow_spike
+            flow_spike = torch.cat([flow_spike, torch.flip(flow_spike[:, :, :, :, -w_pad:], [4])], 4) if w_pad else flow_spike
+        if flow_spike_meta is not None:
+            raise NotImplementedError("Lazy SCFlow metadata requires spatial tile testing (--tile H/W > 0).")
 
-        output = model(lq).detach().cpu()
+        if flow_spike is not None:
+            output = model(lq, flow_spike=flow_spike).detach().cpu()
+        else:
+            output = model(lq).detach().cpu()
 
         output = output[:, :, :, :h_old*sf, :w_old*sf]
 

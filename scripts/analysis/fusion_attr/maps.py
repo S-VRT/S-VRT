@@ -27,6 +27,16 @@ def normalize_map(values: torch.Tensor, low: float = 1.0, high: float = 99.0) ->
     return torch.from_numpy(out).to(dtype=torch.float32, device=values.device)
 
 
+def crop_map_xyxy(values: torch.Tensor, xyxy: tuple[int, int, int, int]) -> torch.Tensor:
+    if values.ndim != 2:
+        raise ValueError(f"Expected 2D map tensor, got {tuple(values.shape)}")
+    x1, y1, x2, y2 = (int(v) for v in xyxy)
+    height, width = values.shape[-2:]
+    if x1 < 0 or y1 < 0 or x2 > width or y2 > height or x2 <= x1 or y2 <= y1:
+        raise ValueError(f"xyxy {xyxy} is outside map bounds {(width, height)}")
+    return values[y1:y2, x1:x2]
+
+
 def compute_fusion_delta(fusion_output: torch.Tensor, rgb_reference: torch.Tensor) -> torch.Tensor:
     if fusion_output.shape != rgb_reference.shape:
         raise ValueError(
@@ -48,24 +58,48 @@ def compute_error_map(output: torch.Tensor, gt: torch.Tensor) -> torch.Tensor:
     return data.mean(dim=0)
 
 
-def gradient_activation_cam(activation: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+def _select_activation_slice(tensor: torch.Tensor, time_index: int | None) -> torch.Tensor:
+    if tensor.ndim == 5:
+        index = tensor.shape[1] // 2 if time_index is None else int(time_index)
+        return tensor[0, index]
+    if tensor.ndim == 4:
+        return tensor[0]
+    raise ValueError(f"Expected 4D or 5D activation, got {tuple(tensor.shape)}")
+
+
+def gradcam_from_activation(
+    activation: torch.Tensor,
+    target: torch.Tensor,
+    time_index: int | None = None,
+) -> torch.Tensor:
     if activation.grad is not None:
         activation.grad.zero_()
     target.backward(retain_graph=True)
     if activation.grad is None:
         raise RuntimeError("Activation gradient was not retained")
-    grad = activation.grad.detach()
-    act = activation.detach()
-    if act.ndim == 5:
-        weights = grad.mean(dim=(-1, -2), keepdim=True)
-        cam = (weights * act).sum(dim=2)
-        cam = cam[0, cam.shape[1] // 2]
-    elif act.ndim == 4:
-        weights = grad.mean(dim=(-1, -2), keepdim=True)
-        cam = (weights * act).sum(dim=1)[0]
-    else:
-        raise ValueError(f"Expected 4D or 5D activation, got {tuple(act.shape)}")
-    return torch.relu(cam.detach())
+    grad = _select_activation_slice(activation.grad.detach(), time_index)
+    act = _select_activation_slice(activation.detach(), time_index)
+    weights = grad.mean(dim=(-1, -2), keepdim=True)
+    return torch.relu((weights * act).sum(dim=0).detach())
+
+
+def hirescam_from_activation(
+    activation: torch.Tensor,
+    target: torch.Tensor,
+    time_index: int | None = None,
+) -> torch.Tensor:
+    if activation.grad is not None:
+        activation.grad.zero_()
+    target.backward(retain_graph=True)
+    if activation.grad is None:
+        raise RuntimeError("Activation gradient was not retained")
+    grad = _select_activation_slice(activation.grad.detach(), time_index)
+    act = _select_activation_slice(activation.detach(), time_index)
+    return torch.relu((grad * act).sum(dim=0).detach())
+
+
+def gradient_activation_cam(activation: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    return gradcam_from_activation(activation, target, time_index=None)
 
 
 def _clone_with_grad(tensor: torch.Tensor) -> torch.Tensor:

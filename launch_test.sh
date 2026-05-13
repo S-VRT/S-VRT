@@ -45,6 +45,11 @@ DATASET_ROOT=""
 OVERRIDE_GOPRO_ROOT=""
 OVERRIDE_SPIKE_ROOT=""
 GPU_LIST=""
+FUSION_DEBUG=false
+FUSION_DEBUG_DIR=""
+FUSION_DEBUG_SUBDIR=""
+FUSION_DEBUG_SOURCE_VIEW=""
+FUSION_DEBUG_MAX_BATCHES=""
 
 usage() {
     cat <<EOF
@@ -62,6 +67,11 @@ Options:
   --gopro-root PATH              Override GoPro root explicitly
   --spike-root PATH              Override Spike root explicitly
   --gpus 0,1,2                   Comma separated GPU ids (overrides GPU_COUNT)
+  --fusion-debug                 Force fusion debug dumping during inference
+  --fusion-debug-dir PATH        Override root directory for fusion debug images
+  --fusion-debug-subdir NAME     Override per-folder fusion debug subdirectory
+  --fusion-debug-source-view V   Dump fusion view: main or exec
+  --fusion-debug-max-batches N   Maximum inference batches to dump
   --help | -h                    Show this message
 
 Examples:
@@ -117,6 +127,42 @@ while [[ $# -gt 0 ]]; do
             ;;
         --gpus)
             GPU_LIST="$2"
+            shift 2
+            ;;
+        --fusion-debug)
+            FUSION_DEBUG=true
+            shift
+            ;;
+        --fusion-debug-dir=*)
+            FUSION_DEBUG_DIR="${1#*=}"
+            shift
+            ;;
+        --fusion-debug-dir)
+            FUSION_DEBUG_DIR="$2"
+            shift 2
+            ;;
+        --fusion-debug-subdir=*)
+            FUSION_DEBUG_SUBDIR="${1#*=}"
+            shift
+            ;;
+        --fusion-debug-subdir)
+            FUSION_DEBUG_SUBDIR="$2"
+            shift 2
+            ;;
+        --fusion-debug-source-view=*)
+            FUSION_DEBUG_SOURCE_VIEW="${1#*=}"
+            shift
+            ;;
+        --fusion-debug-source-view)
+            FUSION_DEBUG_SOURCE_VIEW="$2"
+            shift 2
+            ;;
+        --fusion-debug-max-batches=*)
+            FUSION_DEBUG_MAX_BATCHES="${1#*=}"
+            shift
+            ;;
+        --fusion-debug-max-batches)
+            FUSION_DEBUG_MAX_BATCHES="$2"
             shift 2
             ;;
         --help|-h)
@@ -253,6 +299,23 @@ if [[ -z "${MASTER_PORT:-}" ]]; then
     export MASTER_PORT=12355
 fi
 
+TEST_EXTRA_ARGS=()
+if [[ "$FUSION_DEBUG" == true ]]; then
+    TEST_EXTRA_ARGS+=(--fusion_debug)
+fi
+if [[ -n "$FUSION_DEBUG_DIR" ]]; then
+    TEST_EXTRA_ARGS+=(--fusion_debug_dir "$FUSION_DEBUG_DIR")
+fi
+if [[ -n "$FUSION_DEBUG_SUBDIR" ]]; then
+    TEST_EXTRA_ARGS+=(--fusion_debug_subdir "$FUSION_DEBUG_SUBDIR")
+fi
+if [[ -n "$FUSION_DEBUG_SOURCE_VIEW" ]]; then
+    TEST_EXTRA_ARGS+=(--fusion_debug_source_view "$FUSION_DEBUG_SOURCE_VIEW")
+fi
+if [[ -n "$FUSION_DEBUG_MAX_BATCHES" ]]; then
+    TEST_EXTRA_ARGS+=(--fusion_debug_max_batches "$FUSION_DEBUG_MAX_BATCHES")
+fi
+
 # Resolve dataset roots
 EFFECTIVE_GOPRO_ROOT="${CONFIG_GOPRO_ROOT:-}"
 EFFECTIVE_SPIKE_ROOT="${CONFIG_SPIKE_ROOT:-}"
@@ -323,6 +386,11 @@ echo "GoPro Root: $EFFECTIVE_GOPRO_ROOT"
 echo "Spike Root: $EFFECTIVE_SPIKE_ROOT"
 echo "Configured LQ Folder: ${TEST_LQ_FROM_CONFIG:-<none>}"
 echo "Configured GT Folder: ${TEST_GT_FROM_CONFIG:-<none>}"
+echo "Fusion Debug Force: $FUSION_DEBUG"
+echo "Fusion Debug Dir Override: ${FUSION_DEBUG_DIR:-<config/default>}"
+echo "Fusion Debug Subdir Override: ${FUSION_DEBUG_SUBDIR:-<config/default>}"
+echo "Fusion Debug Source View Override: ${FUSION_DEBUG_SOURCE_VIEW:-<config/default>}"
+echo "Fusion Debug Max Batches Override: ${FUSION_DEBUG_MAX_BATCHES:-<config/default>}"
 echo ""
 
 # ================================================================================
@@ -439,10 +507,10 @@ if [[ -n "${WORLD_SIZE:-}" && "${WORLD_SIZE:-0}" -gt 1 ]]; then
     echo "  MASTER_ADDR=${MASTER_ADDR:-<unset>}"
     echo "  MASTER_PORT=${MASTER_PORT:-<unset>}"
     echo ""
-    echo "Running: python -u main_test_vrt.py --opt $RUNTIME_CONFIG"
+    echo "Running: python -u main_test_vrt.py --opt $RUNTIME_CONFIG ${TEST_EXTRA_ARGS[*]}"
     echo "=========================================="
 
-    python -u main_test_vrt.py --opt "$RUNTIME_CONFIG"
+    python -u main_test_vrt.py --opt "$RUNTIME_CONFIG" "${TEST_EXTRA_ARGS[@]}"
 else
     echo "Local testing mode"
     if [[ "$GPU_COUNT" -gt 1 ]]; then
@@ -450,23 +518,23 @@ else
         echo "  GPUs: $GPU_COUNT"
         echo "  CUDA_VISIBLE_DEVICES: $GPU_LIST"
         echo ""
-        echo "Running: torchrun --nproc_per_node=$GPU_COUNT main_test_vrt.py --opt $RUNTIME_CONFIG"
+        echo "Running: torchrun --nproc_per_node=$GPU_COUNT main_test_vrt.py --opt $RUNTIME_CONFIG ${TEST_EXTRA_ARGS[*]}"
         echo "=========================================="
 
         CUDA_VISIBLE_DEVICES="$GPU_LIST" \
         torchrun \
             --nproc_per_node="$GPU_COUNT" \
             --standalone \
-            main_test_vrt.py --opt "$RUNTIME_CONFIG"
+            main_test_vrt.py --opt "$RUNTIME_CONFIG" "${TEST_EXTRA_ARGS[@]}"
     else
         echo "Single GPU inference"
         SINGLE_GPU_ID="${GPU_ID_ARRAY[0]}"
         echo "  CUDA_VISIBLE_DEVICES: $SINGLE_GPU_ID"
         echo ""
-        echo "Running: python main_test_vrt.py --opt $RUNTIME_CONFIG"
+        echo "Running: python main_test_vrt.py --opt $RUNTIME_CONFIG ${TEST_EXTRA_ARGS[*]}"
         echo "=========================================="
 
-        CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" python main_test_vrt.py --opt "$RUNTIME_CONFIG"
+        CUDA_VISIBLE_DEVICES="$SINGLE_GPU_ID" python main_test_vrt.py --opt "$RUNTIME_CONFIG" "${TEST_EXTRA_ARGS[@]}"
     fi
 fi
 

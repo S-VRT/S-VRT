@@ -3,7 +3,7 @@
   // 基础配置
   // ========================================
   // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
-  "task": "gopro_tfp4_scflow_mamba_collapsed_dcn4"
+  "task": "gopro_tfp9_scflow_dual_scale_temporal_mamba"
   // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
   ,
   "model": "vrt"
@@ -116,20 +116,20 @@
       }
       // Spike 重建 bin 数：legacy 字段名仍叫 spike_channels，但语义上仅表示 Spike 表征宽度
       ,
-      "spike_channels": 4
+      "spike_channels": 9
       ,
       "input_pack_mode": "dual"
       ,
       "compat": {
-        "keep_legacy_L": true
+        "keep_legacy_L": false
       }
       ,
-      "keep_legacy_l": true
+      "keep_legacy_l": false
       ,
       "spike": {
         "reconstruction": {
           "type": "spikecv_tfp",
-          "num_bins": 4
+          "num_bins": 9
         },
         "precomputed": {
           "enable": true,
@@ -147,7 +147,7 @@
         "representation": "encoding25",
         "dt": 10,
         "root": "auto",
-        "subframes": 4
+        "subframes": 9
       }
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
@@ -161,8 +161,8 @@
       "rgb_normalize": null
       ,
       "spike_normalize": {
-        "mean": [0.0, 0.0, 0.0, 0.0],
-        "std": [1.0, 1.0, 1.0, 1.0]
+        "mean": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "std": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       }
       // 元信息文件路径：包含数据集元信息的文本文件路径
       ,
@@ -189,7 +189,7 @@
       "num_frame": 6
       // 真实标签图像尺寸：支持单值或 [phase1, phase2]
       ,
-      "gt_size": [192, 128]
+      "gt_size": [224, 128]
       // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
       ,
       "interval_list": [
@@ -215,10 +215,13 @@
       "dataloader_num_workers": 32
       // 批次大小：支持单值或 [phase1, phase2]
       ,
-      "dataloader_batch_size": [32, 16]
+      "dataloader_batch_size": [128, 16]
       // 预取因子：每个工作进程预取的批次数量
       ,
-      "dataloader_prefetch_factor": 2
+      "dataloader_prefetch_factor": 3
+      // 逻辑 epoch 重复次数：减少 DDP DataLoader iterator 重建导致的周期性供给气泡
+      ,
+      "dataloader_epoch_repeat": 8
       // 是否保持工作进程持久化：true 表示工作进程在 epoch 之间保持活跃，提高效率
       ,
       "dataloader_persistent_workers": true
@@ -251,7 +254,7 @@
       "spike_w": 640
       // Spike 重建 bin 数：legacy 字段名仍叫 spike_channels，但语义上仅表示 Spike 表征宽度
       ,
-      "spike_channels": 4
+      "spike_channels": 9
       ,
       "input_pack_mode": "dual"
       ,
@@ -264,7 +267,7 @@
       "spike": {
         "reconstruction": {
           "type": "spikecv_tfp",
-          "num_bins": 4
+          "num_bins": 9
         },
         "precomputed": {
           "enable": true,
@@ -282,7 +285,7 @@
         "representation": "encoding25",
         "dt": 10,
         "root": "auto",
-        "subframes": 4
+        "subframes": 9
       }
       // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
       ,
@@ -292,8 +295,8 @@
       "rgb_normalize": null
       ,
       "spike_normalize": {
-        "mean": [0.0, 0.0, 0.0, 0.0],
-        "std": [1.0, 1.0, 1.0, 1.0]
+        "mean": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "std": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
       }
       // Spike TFP 重建窗口的半宽度：越大越平滑但越耗时
       ,
@@ -347,7 +350,7 @@
     "input": {
       "strategy": "fusion",
       "mode": "dual",
-      "raw_ingress_chans": 7
+      "raw_ingress_chans": 12
     }
     ,
     // concat 与 fusion 是并列输入策略；当前配置选择 fusion，因此 concat 留空
@@ -356,7 +359,7 @@
     "fusion": {
       "enable": true,
       "placement": "early",
-      "operator": "mamba",
+      "operator": "dual_scale_temporal_mamba",
       "mode": "replace",
       "out_chans": 3,
       "early": {
@@ -364,12 +367,12 @@
       },
       "operator_params": {
         "token_dim": 48,
-        "token_stride": 4,
+        "patch_stride": 4,
         "d_state": 32,
         "d_conv": 4,
         "expand": 2,
-        "num_layers": 3,
-        "mamba_amp_policy": "fp32",
+        "local_layers": 1,
+        "global_layers": 1,
         "alpha_init": 0.05,
         "gate_bias_init": -2.0,
         "enable_diagnostics": false
@@ -400,10 +403,10 @@
       "checkpoint": null,
       "params": {}
     }
-    // 原始入口宽度：RGB 3 + Spike 重建 bins 8 = 11
+    // 原始入口宽度：RGB 3 + TFP Spike 9 = 12
     // 在 fusion 策略下，对齐前使用的是 raw ingress 宽度；进入 backbone 后会由 fusion.out_chans 决定主干宽度
     ,
-    "in_chans": 7
+    "in_chans": 12
     // 上采样倍数：1 表示不进行上采样（保持原始分辨率）
     ,
     "upscale": 1
@@ -411,8 +414,8 @@
     ,
     "img_size": [
       6,
-      96,
-      96
+      128,
+      128
     ]
     // 窗口大小：[时间, 高度, 宽度]，[4,8,8] 表示 4 帧时间窗口，8x8 空间窗口
     ,
@@ -687,6 +690,46 @@
     // 打印检查点间隔：每训练多少迭代打印一次训练信息
     ,
     "checkpoint_print": 100
+    // two-run orchestrator：phase1 只训练融合/Mamba路径，phase2 从 phase1 权重继续完整训练
+    // 注意：phase1 fix_iter 保持等于 phase1 total_iter，用于触发现有 phase1 fusion fast-path
+    ,
+    "two_run": {
+      "enable": true,
+      "phase1": {
+        "total_iter": 4000,
+        "fix_iter": 4000,
+        "fix_keys": [
+          "spynet",
+          "pa_deform"
+        ],
+        "phase2_lora_mode": true,
+        "G_optimizer_reuse": false,
+        "G_scheduler_periods": 4000,
+        "checkpoint_test": [
+          4000
+        ],
+        "checkpoint_save": 2000
+      },
+      "phase2": {
+        "total_iter": 6000,
+        "fix_iter": 1,
+        "fix_keys": [
+          "spynet",
+          "pa_deform"
+        ],
+        "fix_lr_mul": 0.1,
+        "use_lora": true,
+        "phase2_lora_mode": true,
+        "G_optimizer_reuse": false,
+        "G_scheduler_periods": 6000,
+        "checkpoint_test": [
+          2000,
+          4000,
+          6000
+        ],
+        "checkpoint_save": 2000
+      }
+    }
     ,
     "timing": {
       "enable": false,
@@ -769,10 +812,10 @@
     "num_frame_overlapping": 2
     // 测试时的补丁大小：160 表示将大图像分割成 160x160 的补丁进行测试
     ,
-    "size_patch_testing": 96
+    "size_patch_testing": 128
     // 测试时的补丁重叠大小：20 表示相邻测试补丁之间有 20 像素重叠（用于滑动窗口测试）
     ,
-    "size_patch_overlapping": 24
+    "size_patch_overlapping": 16
     // 测试时将多个空间补丁合并为一个 batch 推理；不改变补丁划分、重叠或指标计算
     ,
     "patch_batch_size": 1
@@ -819,7 +862,7 @@
     "wandb_entity": null
     // W&B 运行名称：用于标识当前训练运行的名称
     ,
-    "wandb_name": "gopro_tfp4_scflow_mamba_collapsed_dcn4"
+    "wandb_name": "gopro_tfp9_scflow_dual_scale_temporal_mamba"
     // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
     ,
     "wandb_mode": "online"
@@ -837,10 +880,10 @@
     "swanlab_workspace": null
     // SwanLab 运行名称：用于区分不同实验
     ,
-    "swanlab_name": "gopro_tfp4_scflow_mamba_collapsed_dcn4"
+    "swanlab_name": "gopro_tfp9_scflow_dual_scale_temporal_mamba"
     // SwanLab 实验描述：可选文本信息
     ,
-    "swanlab_description": "early fusion mamba_tokenized + scflow"
+    "swanlab_description": "early fusion dual-scale temporal mamba + tfp9 + scflow s9"
     // SwanLab 运行模式：可设置 cloud/offline/local；留空自动根据 API key 决定
     ,
     "swanlab_mode": null

@@ -158,6 +158,10 @@ def _validate_binary_tensor(arr: np.ndarray) -> None:
         unique = np.unique(arr)
         if unique.size <= 2 and np.all((unique == 0) | (unique == 1)):
             return
+    if np.issubdtype(arr.dtype, np.floating):
+        unique = np.unique(arr)
+        if unique.size <= 2 and np.all((unique == 0.0) | (unique == 1.0)):
+            return
     raise ValueError(f"encoding25 .dat save expects binary spike tensor, got dtype={arr.dtype}")
 
 
