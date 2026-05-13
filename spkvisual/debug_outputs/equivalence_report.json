@@ -1,0 +1,402 @@
+{
+  "num_cases": 12,
+  "all_identical": true,
+  "results": [
+    {
+      "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train/GOPR0372_07_00/spike/000108.dat",
+      "flipud": true,
+      "spike_shape": [
+        56,
+        360,
+        640
+      ],
+      "svrt_shape": [
+        16,
+        360,
+        640
+      ],
+      "spikecv_shape": [
+        16,
+        360,
+        640
+      ],
+      "comparison": {
+        "same_shape": true,
+        "shape": [
+          16,
+          360,
+          640
+        ],
+        "identical": true,
+        "num_diff_pixels": 0,
+        "num_diff_frames": 0,
+        "diff_frame_indices": [],
+        "max_abs_diff": 0,
+        "mean_abs_diff": 0.0
+      }
+    },
+    {
+      "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train/GOPR0372_07_00/spike/000108.dat",
+      "flipud": false,
+      "spike_shape": [
+        56,
+        360,
+        640
+      ],
+      "svrt_shape": [
+        16,
+        360,
+        640
+      ],
+      "spikecv_shape": [
+        16,
+        360,
+        640
+      ],
+      "comparison": {
+        "same_shape": true,
+        "shape": [
+          16,
+          360,
+          640
+        ],
+        "identical": true,
+        "num_diff_pixels": 0,
+        "num_diff_frames": 0,
+        "diff_frame_indices": [],
+        "max_abs_diff": 0,
+        "mean_abs_diff": 0.0
+      }
+    },
+    {
+      "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train/GOPR0372_07_00/spike/000047.dat",
+      "flipud": true,
+      "spike_shape": [
+        56,
+        360,
+        640
+      ],
+      "svrt_shape": [
+        16,
+        360,
+        640
+      ],
+      "spikecv_shape": [
+        16,
+        360,
+        640
+      ],
+      "comparison": {
+        "same_shape": true,
+        "shape": [
+          16,
+          360,
+          640
+        ],
+        "identical": true,
+        "num_diff_pixels": 0,
+        "num_diff_frames": 0,
+        "diff_frame_indices": [],
+        "max_abs_diff": 0,
+        "mean_abs_diff": 0.0
+      }
+    },
+    {
+      "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train/GOPR0372_07_00/spike/000047.dat",
+      "flipud": false,
+      "spike_shape": [
+        56,
+        360,
+        640
+      ],
+      "svrt_shape": [
+        16,
+        360,
+        640
+      ],
+      "spikecv_shape": [
+        16,
+        360,
+        640
+      ],
+      "comparison": {
+        "same_shape": true,
+        "shape": [
+          16,
+          360,
+          640
+        ],
+        "identical": true,
+        "num_diff_pixels": 0,
+        "num_diff_frames": 0,
+        "diff_frame_indices": [],
+        "max_abs_diff": 0,
+        "mean_abs_diff": 0.0
+      }
+    },
+    {
+      "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train/GOPR0372_07_00/spike/000109.dat",
+      "flipud": true,
+      "spike_shape": [
+        56,
+        360,
+        640
+      ],
+      "svrt_shape": [
+        16,
+        360,
+        640
+      ],
+      "spikecv_shape": [
+        16,
+        360,
+        640
+      ],
+      "comparison": {
+        "same_shape": true,
+        "shape": [
+          16,
+          360,
+          640
+        ],
+        "identical": true,
+        "num_diff_pixels": 0,
+        "num_diff_frames": 0,
+        "diff_frame_indices": [],
+        "max_abs_diff": 0,
+        "mean_abs_diff": 0.0
+      }
+    },
+    {
+      "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train/GOPR0372_07_00/spike/000109.dat",
+      "flipud": false,
+      "spike_shape": [
+        56,
+        360,
+        640
+      ],
+      "svrt_shape": [
+        16,
+        360,
+        640
+      ],
+      "spikecv_shape": [
+        16,
+        360,
+        640
+      ],
+      "comparison": {
+        "same_shape": true,
+        "shape": [
+          16,
+          360,
+          640
+        ],
+        "identical": true,
+        "num_diff_pixels": 0,
+        "num_diff_frames": 0,
+        "diff_frame_indices": [],
+        "max_abs_diff": 0,
+        "mean_abs_diff": 0.0
+      }
+    },
+    {
+      "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/test/GOPR0384_11_00/spike/000062.dat",
+      "flipud": true,
+      "spike_shape": [
+        64,
+        360,
+        640
+      ],
+      "svrt_shape": [
+        24,
+        360,
+        640
+      ],
+      "spikecv_shape": [
+        24,
+        360,
+        640
+      ],
+      "comparison": {
+        "same_shape": true,
+        "shape": [
+          24,
+          360,
+          640
+        ],
+        "identical": true,
+        "num_diff_pixels": 0,
+        "num_diff_frames": 0,
+        "diff_frame_indices": [],
+        "max_abs_diff": 0,
+        "mean_abs_diff": 0.0
+      }
+    },
+    {
+      "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/test/GOPR0384_11_00/spike/000062.dat",
+      "flipud": false,
+      "spike_shape": [
+        64,
+        360,
+        640
+      ],
+      "svrt_shape": [
+        24,
+        360,
+        640
+      ],
+      "spikecv_shape": [
+        24,
+        360,
+        640
+      ],
+      "comparison": {
+        "same_shape": true,
+        "shape": [
+          24,
+          360,
+          640
+        ],
+        "identical": true,
+        "num_diff_pixels": 0,
+        "num_diff_frames": 0,
+        "diff_frame_indices": [],
+        "max_abs_diff": 0,
+        "mean_abs_diff": 0.0
+      }
+    },
+    {
+      "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/test/GOPR0384_11_00/spike/000001.dat",
+      "flipud": true,
+      "spike_shape": [
+        64,
+        360,
+        640
+      ],
+      "svrt_shape": [
+        24,
+        360,
+        640
+      ],
+      "spikecv_shape": [
+        24,
+        360,
+        640
+      ],
+      "comparison": {
+        "same_shape": true,
+        "shape": [
+          24,
+          360,
+          640
+        ],
+        "identical": true,
+        "num_diff_pixels": 0,
+        "num_diff_frames": 0,
+        "diff_frame_indices": [],
+        "max_abs_diff": 0,
+        "mean_abs_diff": 0.0
+      }
+    },
+    {
+      "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/test/GOPR0384_11_00/spike/000001.dat",
+      "flipud": false,
+      "spike_shape": [
+        64,
+        360,
+        640
+      ],
+      "svrt_shape": [
+        24,
+        360,
+        640
+      ],
+      "spikecv_shape": [
+        24,
+        360,
+        640
+      ],
+      "comparison": {
+        "same_shape": true,
+        "shape": [
+          24,
+          360,
+          640
+        ],
+        "identical": true,
+        "num_diff_pixels": 0,
+        "num_diff_frames": 0,
+        "diff_frame_indices": [],
+        "max_abs_diff": 0,
+        "mean_abs_diff": 0.0
+      }
+    },
+    {
+      "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/test/GOPR0384_11_00/spike/000063.dat",
+      "flipud": true,
+      "spike_shape": [
+        64,
+        360,
+        640
+      ],
+      "svrt_shape": [
+        24,
+        360,
+        640
+      ],
+      "spikecv_shape": [
+        24,
+        360,
+        640
+      ],
+      "comparison": {
+        "same_shape": true,
+        "shape": [
+          24,
+          360,
+          640
+        ],
+        "identical": true,
+        "num_diff_pixels": 0,
+        "num_diff_frames": 0,
+        "diff_frame_indices": [],
+        "max_abs_diff": 0,
+        "mean_abs_diff": 0.0
+      }
+    },
+    {
+      "dat_path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/test/GOPR0384_11_00/spike/000063.dat",
+      "flipud": false,
+      "spike_shape": [
+        64,
+        360,
+        640
+      ],
+      "svrt_shape": [
+        24,
+        360,
+        640
+      ],
+      "spikecv_shape": [
+        24,
+        360,
+        640
+      ],
+      "comparison": {
+        "same_shape": true,
+        "shape": [
+          24,
+          360,
+          640
+        ],
+        "identical": true,
+        "num_diff_pixels": 0,
+        "num_diff_frames": 0,
+        "diff_frame_indices": [],
+        "max_abs_diff": 0,
+        "mean_abs_diff": 0.0
+      }
+    }
+  ]
+}

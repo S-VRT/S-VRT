@@ -1,0 +1,128 @@
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_run_with_wrapper_does_not_feed_fifo_to_python_dash():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert '<<\'PY\' < "$stdout_pipe"' not in launch_script
+    assert '<<\'PY\' < "$stderr_pipe"' not in launch_script
+
+
+def test_launch_phase_status_messages_use_launch_echo_after_logger_bootstrap():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+    after_bootstrap = launch_script.split(
+        'LAUNCH_LOG_FILE="$(ensure_launch_logger "train" "$TRAIN_LOG_DIR" "$CONFIG_PATH")"',
+        maxsplit=1,
+    )[1]
+
+    bare_echo_lines = [
+        line.strip()
+        for line in after_bootstrap.splitlines()
+        if line.strip().startswith("echo ")
+    ]
+
+    assert bare_echo_lines == []
+
+
+def test_launch_python_helpers_suppress_utils_option_parse_stdout():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert launch_script.count("utils_option.parse(") == launch_script.count(
+        "with contextlib.redirect_stdout(io.StringIO()):"
+    )
+
+
+def test_initial_launch_banner_is_logged_in_one_python_call():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+    after_bootstrap = launch_script.split(
+        'LAUNCH_LOG_FILE="$(ensure_launch_logger "train" "$TRAIN_LOG_DIR" "$CONFIG_PATH")"',
+        maxsplit=1,
+    )[1]
+    banner_block = after_bootstrap.split(
+        "# ================================================================================\n# Data Preparation",
+        maxsplit=1,
+    )[0]
+
+    assert 'launch_echo_lines "train" "launch" "local_single" "info" \\' in banner_block
+    assert 'launch_echo "train"' not in banner_block
+
+
+def test_launch_echo_uses_persistent_logger_daemon():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+    launch_echo_body = launch_script.split("launch_echo() {", maxsplit=1)[1].split(
+        "\n}\n\nlaunch_emit_record()",
+        maxsplit=1,
+    )[0]
+
+    assert "start_launch_logger" in launch_script
+    assert "LAUNCH_LOG_PIPE" in launch_script
+    assert '"$PYTHON_BIN"' not in launch_echo_body
+
+
+def test_training_process_is_not_wrapped_by_launch_logger():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert 'run_with_wrapper "train" "train"' not in launch_script
+    assert 'run_with_wrapper "train" "dependency"' in launch_script
+
+
+def test_launch_script_exposes_terminal_session_logging_options():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    for option in (
+        "--foreground",
+        "--attach",
+        "--detach",
+        "--no-terminal-log",
+    ):
+        assert option in launch_script
+
+
+def test_launch_script_wraps_outer_invocation_with_screen_and_script():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert "SVRT_LAUNCH_INNER" in launch_script
+    assert 'SVRT_LAUNCH_INNER:-0}" != "1"' in launch_script
+    assert "terminal_" in launch_script
+    assert "screen_" in launch_script
+    assert "screen -S" in launch_script
+    assert "script -q -f -e" in launch_script
+
+
+def test_inner_training_command_remains_unwrapped_by_launch_logger():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert 'command_text="cd $(quote_shell_word "$(pwd)") && SVRT_LAUNCH_INNER=1"' in launch_script
+    assert 'env SVRT_LAUNCH_INNER=1' not in launch_script
+    assert 'exec bash $(quote_shell_word "$0")' in launch_script
+
+
+def test_outer_wrapper_replays_original_arguments_after_parser_shifts():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert 'ORIGINAL_ARGS=("$@")' in launch_script
+    assert 'start_terminal_transcript_wrapper "$TRAIN_LOG_DIR_FOR_TRANSCRIPT" "${ORIGINAL_ARGS[@]}"' in launch_script
+
+
+def test_launch_script_can_prepare_autodl_tensorboard_before_training():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert "--autodl-tensorboard" in launch_script
+    assert "resolve_tensorboard_logdir()" in launch_script
+    assert "ensure_autodl_tensorboard()" in launch_script
+    assert 'AUTODL_TENSORBOARD=${AUTODL_TENSORBOARD:-true}' in launch_script
+    assert 'ensure_autodl_tensorboard "$TENSORBOARD_LOGDIR"' in launch_script
+
+
+def test_launch_script_auto_detects_available_gpus_by_default():
+    launch_script = (REPO_ROOT / "launch_train.sh").read_text(encoding="utf-8")
+
+    assert 'DEFAULT_GPU_COUNT="auto"' in launch_script
+    assert "detect_available_gpus()" in launch_script
+    assert "resolve_gpu_selection()" in launch_script
+    assert "SVRT_GPU_FREE_MEMORY_MAX_MB" in launch_script
+    assert 'GPU List Source: $GPU_LIST_SOURCE' in launch_script
+    assert 'resolve_gpu_selection "$GPU_COUNT" "$GPU_LIST"' in launch_script

@@ -19,67 +19,90 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.pytest_cache
 MANIFEST
 
-# Virtual Environment
+# Virtual environments
 venv/
-ENV/
 env/
+ENV/
 .venv
 
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# PyCharm
-.idea/
-
-# VSCode
+# IDEs
 .vscode/
-
-# Cursor IDE
+.codex/
+.claude/
 .cursor/
-
-# Training outputs
-outputs/
-runs/
-checkpoints/
-*.pth
-*.pt
-*.ckpt
-
-# Logs
-*.log
-logs/
-
-# Data
-data/
-datasets/
-*.h5
-*.hdf5
-
-# Temporary files
+.idea/
 *.swp
 *.swo
 *~
 .DS_Store
-Thumbs.db
+.cursor/
 
-# Environment variables
-.env
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
 
-# Weights & Biases
-wandb/
+# Model files and data
+*.pt
+# *.pth
+*.ckpt
+*.safetensors
+*.h5
+*.pb
+*.onnx
+*.tflite
+*.bin
+pretrained_models/
+experiments/
+results/
+trainsets/
+testsets/
+logs/
+outputs/
+checkpoints/
+saved_models/
+swanlog/
+spkvisual/output_frames/
 
-# TensorBoard
-events.out.tfevents.*
-
-# Large files
+# Image and video files (large)
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
 *.mp4
 *.avi
 *.mov
-*.mkv
+*.wmv
+*.flv
+*.webm
+
+# Compressed files
 *.zip
-*.tar.gz
 *.tar
+*.tar.gz
+*.rar
+*.7z
+
+# Temporary files
+*.log
+*.tmp
+*.temp
+*.cache
+wandb/
+.pytest_cache/
+.coverage
+htmlcov/
+.playwright-cli/
+.runtime/
+.worktrees/
+
+# OS
+Thumbs.db
+desktop.ini
 
 
+.worktrees/
