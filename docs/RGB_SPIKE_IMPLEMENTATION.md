@@ -1,327 +1,385 @@
-# VRT RGB+Spike 实现总结
+# RGB+Spike 实现说明
 
-## 概述
+本文档记录当前 RGB+Spike 实现的文件职责、配置入口、预处理脚本和验证命令。它是实现维护文档，不再描述旧的 `options/vrt/...` 路径。
 
-成功实现了 VRT 网络使用 RGB+Spike 拼接输入进行视频去模糊训练。基于 GoPro 数据集，保持训练参数与官方配置一致作为 baseline。
+## 1. 当前能力
 
-## 实现细节
+当前代码支持：
 
-### 1. 数据结构确认
+- RGB-only VRT baseline。
+- RGB+Spike concat 输入。
+- RGB+Spike dual 输入，保留 legacy `L` 兼容。
+- TFP Spike 表征。
+- Raw-window Spike 表征。
+- SpyNet RGB 光流。
+- SCFlow Spike `encoding25` 光流。
+- Early fusion operators: `gated`、`attention`、`pase_residual`、`dual_scale_temporal_mamba`。
+- Expanded 和 collapsed 两类 early-fusion 时间轴契约。
+- SCFlow collapsed 子帧策略 `mean_windows` 和 `compose_subframes`。
+- Forward debug/inference artifact 目录和 `results/` symlink。
 
-#### RGB 数据
-- **格式**: 目录格式（PNG 图像）
-- **分辨率**: 720x1280
-- **路径**:
-  - GT: `trainsets/GoPro/train_GT/`
-  - LQ (模糊): `trainsets/GoPro/train_GT_blurred/`
+## 2. 文件结构
 
-#### Spike 数据
-- **格式**: .dat 二进制文件
-- **分辨率**: 250x400 (H×W)
-- **时间步**: 约 202 帧/文件
-- **路径**: `trainsets/gopro_spike/GOPRO_Large_spike_seq/train/`
-- **目录结构**: 
-  ```
-  train/
-    ├── GOPR0384_11_02/
-    │   └── spike/
-    │       ├── 001301.dat
-    │       ├── 001302.dat
-    │       └── ...
-    └── ...
-  ```
+### Dataset
 
-### 2. 关键实现
+| 文件 | 职责 |
+|------|------|
+| `data/select_dataset.py` | 根据 `dataset_type` 和 `phase` 选择 dataset 类 |
+| `data/dataset_video_train_rgbspike.py` | 训练 RGB+Spike dataset |
+| `data/dataset_video_test.py` | 测试/验证 RGB+Spike dataset |
+| `data/spike_recc/__init__.py` | Spike 工具导出 |
+| `data/spike_recc/raw_window.py` | centered raw-window 提取 |
+| `data/spike_recc/encoding25.py` | SCFlow encoding25 artifact 路径、shape 校验、子中心工具 |
 
-#### 2.1 Spike 数据加载器
+### 模型
 
-**文件**: `data/spike_recc/spikecv_loader.py`
+| 文件 | 职责 |
+|------|------|
+| `models/architectures/vrt/vrt.py` | VRT 输入策略、fusion、光流、SGP 对齐、输出 reducer |
+| `models/fusion/factory.py` | fusion operator/adapter 创建 |
+| `models/fusion/adapters.py` | early/middle/hybrid fusion adapter |
+| `models/fusion/operators/` | gated、attention、PASE residual、dual-scale mamba operator |
+| `models/fusion/reducers.py` | expanded 时间轴 restoration 输出 reducer |
+| `models/optical_flow/` | SpyNet/SCFlow/SEA-RAFT 工厂和 wrapper |
+| `models/model_plain.py` | 训练/测试时 `L`、`L_rgb`、`L_spike`、`L_flow_spike` 喂入模型 |
 
-- 实现了简化的 spike .dat 文件加载器
-- 移除了 SpikeCV 的在线相机依赖
-- 支持高效的比特流解码
+### 预处理和调试
 
-**核心功能**:
-```python
-class SpikeStreamSimple:
-    def __init__(self, filepath, spike_h, spike_w)
-    def get_spike_matrix(self, flipud=True) -> np.ndarray  # (T, H, W)
-    def get_block_spikes(self, begin_idx, block_len) -> np.ndarray
-```
+| 文件 | 职责 |
+|------|------|
+| `scripts/data_preparation/spike/prepare_spike_tfp.py` | 生成 `tfp_b<num_bins>_hw<half_win_length>` |
+| `scripts/data_preparation/spike/prepare_spike_raw_window.py` | 生成 `raw_window_l<length>` |
+| `scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py` | 生成 `encoding25_dt<dt>[_s<subframes>]` |
+| `scripts/run_forward_debug_experiments.sh` | 跑 inference 后执行 fusion attribution/debugger |
+| `scripts/analysis/fusion_attribution.py` | fusion attribution CLI |
 
-#### 2.2 RGB+Spike Dataset
+## 3. Dataset 实现
 
-**文件**: `data/dataset_video_train_rgbspike.py`
+### 3.1 初始化配置
 
-- 继承 `VideoRecurrentTrainDataset`，复用 RGB 加载逻辑
-- 添加 Spike 数据加载和体素化
-- 实现分辨率自动对齐（Spike 250x400 → RGB crop size）
-- 支持联合数据增强（flip, rotate）
-
-**体素化策略**:
-
-1. **S=1** (默认): 简单时间累积
-   - 公式: `voxel = sum(spikes) / max(sum(spikes))`
-   - 适用于快速训练和 baseline
-
-2. **S=4**: 4-bin 时间体素化
-   - 将时间维度均分为 4 段
-   - 每段独立归一化
-   - 保留更多时间信息
-
-**输出格式**:
-- LQ: `(T, 3+S, H, W)` - RGB + Spike 拼接
-- GT: `(T, 3, H, W)` - 仅 RGB
-
-#### 2.3 网络修改
-
-**文件**: `models/select_network.py`
-
-- 添加 `in_chans` 参数传递给 VRT 网络
-- 默认值为 3（向后兼容）
-- RGB+Spike 配置设置为 7 (3+4)
-
-```python
-netG = net(
-    upscale=opt_net['upscale'],
-    in_chans=opt_net.get('in_chans', 3),  # 新增
-    img_size=opt_net['img_size'],
-    ...
-)
-```
-
-#### 2.4 Dataset 注册
-
-**文件**: `data/select_dataset.py`
-
-添加新的 dataset 类型:
-```python
-elif dataset_type in ['videorecurrenttraindatasetrgbspike']:
-    from data.dataset_video_train_rgbspike import VideoRecurrentTrainDatasetRGBSpike as D
-```
-
-### 3. 训练配置
-
-**文件**: `options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json`
-
-**关键配置项**:
+`TrainDatasetRGBSpike` 解析以下关键字段：
 
 ```json
 {
-  "task": "006_train_vrt_videodeblurring_gopro_rgbspike",
-  
-  "datasets": {
-    "train": {
-      "dataset_type": "VideoRecurrentTrainDatasetRGBSpike",
-      "dataroot_gt": "trainsets/GoPro/train_GT",
-      "dataroot_lq": "trainsets/GoPro/train_GT_blurred",
-      "dataroot_spike": "trainsets/gopro_spike/GOPRO_Large_spike_seq/train",
-      "spike_h": 250,
-      "spike_w": 400,
-      "spike_channels": 4,
-      "spike_flipud": true,
-      "io_backend": {"type": "disk"},
-      "scale": 1,
-      ...
+  "dataset_type": "TrainDatasetRGBSpike",
+  "dataroot_gt": "...",
+  "dataroot_lq": "...",
+  "dataroot_spike": "...",
+  "spike_h": 360,
+  "spike_w": 640,
+  "spike_channels": 4,
+  "input_pack_mode": "dual",
+  "compat": {
+    "keep_legacy_L": true
+  },
+  "spike": {
+    "representation": "tfp",
+    "reconstruction": {
+      "type": "spikecv_tfp",
+      "num_bins": 4
+    },
+    "precomputed": {
+      "enable": true,
+      "root": "auto",
+      "format": "npy"
     }
   },
-  
-  "netG": {
-    "net_type": "vrt",
-    "in_chans": 7,  // 3 (RGB) + 4 (Spike)
-    ...
-  },
-  
-  "train": {
-    // 所有训练参数与官方 baseline 完全一致
-    "total_iter": 300000,
-    "G_optimizer_lr": 4e-4,
-    ...
+  "spike_flow": {
+    "representation": "encoding25",
+    "dt": 10,
+    "root": "auto",
+    "subframes": 4
   }
 }
 ```
 
-## 使用方法
+兼容字段仍存在，例如 `spike_reconstruction`、`middle_tfp_center`、`keep_legacy_l`。新配置优先使用 `spike.*` 和 `compat.*`。
 
-### 启动训练
+### 3.2 `__getitem__` 数据流
 
-```bash
-cd /home/mallm/henry/KAIR
+1. 根据 `meta_info_file` 选取相邻帧列表。
+2. 读取 RGB LQ/GT。
+3. 读取或预计算加载 Spike restoration 表征。
+4. 若启用 SCFlow，读取 `encoding25` flow Spike。
+5. 对 RGB 做 paired random crop。
+6. 将 crop 参数映射到 Spike/SCFlow 源分辨率。
+7. crop+resize Spike 到 RGB crop 尺寸。
+8. 合并 RGB+Spike 为 legacy `L`。
+9. 对 `L`、`L_flow_spike`、GT 做一致 augment。
+10. 根据 `input_pack_mode` 返回 concat 或 dual keys。
 
-# 单 GPU 训练
-python main_train_vrt.py --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
+返回契约：
 
-# 多 GPU 分布式训练 (推荐)
-torchrun --nproc_per_node=3 --master_port=4321 main_train_vrt.py \
-    --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
+```text
+concat:
+  L: [T,3+S,H,W]
+  H: [T,3,H,W]
+
+dual:
+  L_rgb: [T,3,H,W]
+  L_spike: [T,S,H,W]
+  L: [T,3+S,H,W] when keep_legacy_L=true
+  H: [T,3,H,W]
+  L_flow_spike: [T*S,25,H,W] when SCFlow is enabled
 ```
 
-### 测试 Dataloader
+## 4. Spike 表征实现
+
+### 4.1 TFP
+
+在线路径调用：
 
 ```python
-from data.select_dataset import define_Dataset
-import json
-
-with open('options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json') as f:
-    config = json.load(f)
-
-dataset = define_Dataset(config['datasets']['train'])
-sample = dataset[0]
-
-print(f"LQ shape: {sample['L'].shape}")  # (6, 4, 224, 224)
-print(f"GT shape: {sample['H'].shape}")  # (6, 3, 224, 224)
+voxelize_spikes_tfp(spike_matrix, num_channels=spike_channels, half_win_length=tfp_half_win_length)
 ```
 
-## 数据流水线
+预计算路径查找：
 
-```
-1. 读取 RGB 帧 (从目录)
-   ├─ LQ: train_GT_blurred/GOPR0384_11_02/001301.png  (720x1280x3, BGR) → 转为 RGB
-   └─ GT: train_GT/GOPR0384_11_02/001301.png          (720x1280x3, BGR) → 转为 RGB
-
-2. 读取对应 Spike 数据
-   └─ spike/001301.dat → (202, 250, 400) → 体素化 → (1, 250, 400)
-
-3. 随机裁剪 RGB 到 224x224
-   ├─ LQ: (720x1280x3) → (224x224x3)
-   └─ GT: (720x1280x3) → (224x224x3)
-
-4. Resize Spike 到裁剪尺寸
-   └─ (1, 250, 400) → (1, 224, 224)
-
-5. 通道拼接
-   └─ LQ: (224x224x3) + (224x224x1) → (224x224x4)
-
-6. 数据增强 (flip, rotate)
-   └─ 应用于 LQ 和 GT
-
-7. 转换为 Tensor
-   ├─ LQ: (T, 4, 224, 224)
-   └─ GT: (T, 3, 224, 224)
+```text
+<dataroot_spike>/<clip>/tfp_b<num_bins>_hw<half_win_length>/<frame>.npy
 ```
 
-## 验证结果
-
-### Dataloader 测试输出
-
-```
-✓ 数据集创建成功!
-  - 数据集大小: 2103
-
-✓ 样本加载成功!
-  - Key: GOPR0372_07_00/000047
-  - LQ shape (RGB+Spike): torch.Size([6, 4, 224, 224])
-  - GT shape (RGB): torch.Size([6, 3, 224, 224])
-
-数据范围分析:
-  - LQ RGB 通道 (0:3):
-    - Range: [0.000, 0.980]
-    - Mean: 0.253
-  - LQ Spike 通道 (3:):
-    - Range: [0.276, 0.933]
-    - Mean: 0.578
-    - Non-zero ratio: 100.00%
-
-✓ Batch 加载成功!
-  - LQ shape: torch.Size([2, 6, 4, 224, 224])
-  - GT shape: torch.Size([2, 6, 3, 224, 224])
-```
-
-## 文件清单
-
-### 新增文件
-1. ✅ `data/spike_recc/spikecv_loader.py` - Spike 数据加载器
-2. ✅ `data/dataset_video_train_rgbspike.py` - RGB+Spike Dataset
-3. ✅ `options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json` - 训练配置
-4. ✅ `trainsets/gopro_spike/GOPRO_Large_spike_seq/config.yaml` - Spike 数据配置
-
-### 修改文件
-1. ✅ `models/select_network.py` - 添加 in_chans 参数传递
-2. ✅ `data/select_dataset.py` - 注册新 Dataset 类型
-
-## 技术亮点
-
-1. **零依赖的 Spike 加载器**: 移除 SpikeCV 的硬件依赖，纯 NumPy 实现
-2. **自动分辨率对齐**: Spike (250x400) 自动 resize 到 RGB crop 尺寸
-3. **灵活的体素化**: 支持 S=1 和 S=4 两种策略，可配置
-4. **联合数据增强**: RGB 和 Spike 同步进行 flip/rotate
-5. **向后兼容**: 保持原始 VRT 代码的所有功能
-
-## 下一步工作
-
-### 可选优化
-1. **测试 S=4 体素化**: 修改配置 `"spike_channels": 4`，网络 `"in_chans": 6`
-2. **LMDB 格式**: 如果训练速度成为瓶颈，考虑转换为 LMDB
-3. **在线测试**: 实现 RGB+Spike 的测试 Dataset，用于验证集评估
-
-### 实验建议
-1. **Baseline 对比**: 先训练纯 RGB 版本作为对照
-2. **消融实验**: 
-   - RGB only
-   - Spike only
-   - RGB + Spike (S=1)
-   - RGB + Spike (S=4)
-3. **学习率调整**: Spike 通道可能需要不同的学习率
-
-## Sanity Checklist & Minimal Validation Run
-
-1. **配置核对**
-   - `options/gopro_rgbspike_local*.json` / `006_train_vrt_*.json` 中确保 `netG.in_chans=7`、`datasets.*.spike_channels=4`
-   - `datasets.*.rgb_normalize="imagenet"`；`spike_normalize` 保持 `[0,0,0,0]` / `[1,1,1,1]`
-2. **Runtime 断言位置**
-   - `ModelPlain._assert_lq_channels`：训练 `feed_data` / `_test_video` / `_test_clip`
-   - `network_vrt.get_aligned_image_2frames`：SGP 对齐 4×in_chans=28 通道检查
-   - `conv_first` 前的 `ValueError`：9×in_chans (=63) 输入不符立即报错
-3. **调试命令（迷你实验）**
-   ```bash
-   # 使用本地 Debug 配置（64px crop，batch=60）跑一次快速验证
-   bash launch_train.sh 1 options/gopro_rgbspike_local_debug.json --prepare-data
-   # 将 val_freq 降到 500 以触发 `_test_video`
-   python main_train_vrt.py --opt options/gopro_rgbspike_local_debug.json --override 'train.checkpoint_test=500'
-   ```
-4. **预期日志**
-   - Dataloader 输出 `L` 形状：`[B, T, 7, H, W]`
-   - `conv_first` 断言未触发；若误用 RGB-only clip，会抛出 “Channel Mismatch” 错误而不是静默失败
-5. **遇到 “63 vs 36” 报错时排查顺序**
-   - 检查 JSON 的 `spike_channels` + `in_chans`
-   - 打印 Dataset 样本 `sample['L'].shape`
-   - 若断言来自 `get_aligned_image_2frames`，说明 SpyNet 对齐阶段的数据宽度被截断，重点检查 `flow_warp(..., 'nearest4')` 输出拼接逻辑
-
-## 问题排查
-
-### 常见错误
-
-1. **FileNotFoundError**: 检查 spike 数据路径是否正确
-2. **Shape mismatch**: 确认配置中 `scale=1` 且 `io_backend: disk`
-3. **CUDA OOM**: 减小 `batch_size` 或 `gt_size`
-
-### 调试命令
+生成命令：
 
 ```bash
-# 测试 spike 加载
-python utils/spike_loader.py
-
-# 测试 dataset
-python -c "from data.select_dataset import define_Dataset; import json; \
-    config = json.load(open('options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json')); \
-    ds = define_Dataset(config['datasets']['train']); print(ds[0]['L'].shape)"
+uv run python scripts/data_preparation/spike/prepare_spike_tfp.py \
+  --spike-root /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train \
+  --spike-h 360 \
+  --spike-w 640 \
+  --num-bins 4 \
+  --half-win-length 20 \
+  --workers 32
 ```
 
-## 性能参考
+### 4.2 Raw Window
 
-- **数据集大小**: 2103 个训练样本
-- **单样本加载时间**: ~0.5s (首次加载，含 spike 解码)
-- **内存占用**: 每个 spike .dat 文件 ~2.5MB
-- **预期训练时间**: ~3-5 天 (3xGPU, batch_size=3)
+在线路径调用：
 
-## 作者与日期
+```python
+extract_centered_raw_window(spike_matrix, window_length=raw_window_length)
+```
 
-- **实现日期**: 2025-11-05
-- **基础代码**: KAIR (VRT for Video Deblurring)
-- **数据集**: GoPro Large + GoPro Spike Sequences
+预计算路径查找：
 
----
+```text
+<dataroot_spike>/<clip>/raw_window_l<raw_window_length>/<frame>.npy
+```
 
-**注**: 所有代码已测试通过，可直接用于训练。如有问题，请参考本文档的"问题排查"章节。
+生成命令：
 
+```bash
+uv run python scripts/data_preparation/spike/prepare_spike_raw_window.py \
+  --spike-root /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train \
+  --spike-h 360 \
+  --spike-w 640 \
+  --window-length 21 \
+  --workers 32
+```
 
+## 5. SCFlow 实现
+
+Dataset 加载 `spike_flow.representation="encoding25"` 时：
+
+```text
+subframes = 1:
+  <clip>/encoding25_dt10/<frame>.npy -> [25,H,W]
+
+subframes > 1:
+  <clip>/encoding25_dt10_s4/<frame>.npy -> [4,25,H,W]
+```
+
+`__getitem__` 会将每个 RGB frame 的子窗口展平：
+
+```text
+T frames * S subframes -> [T*S,25,H,W]
+```
+
+生成命令：
+
+```bash
+uv run python scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py \
+  --spike-root /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train \
+  --dt 10 \
+  --subframes 4 \
+  --spike-h 360 \
+  --spike-w 640 \
+  --num-workers 16
+```
+
+`spike_flow.collapse_policy` 在 VRT 中解析：
+
+- `mean_windows`: 默认，将 `[B,T,S,25,H,W]` 均值到 `[B,T,25,H,W]`。
+- `compose_subframes`: 在 `[B,T*S,25,H,W]` 上跑 SCFlow，再组合到 RGB 帧级 flow。
+
+train/test split 的 `collapse_policy` 必须一致。
+
+## 6. VRT 输入实现
+
+`models/architectures/vrt/vrt.py` 解析：
+
+```json
+"netG": {
+  "input": {
+    "strategy": "fusion",
+    "mode": "dual",
+    "raw_ingress_chans": 7
+  },
+  "fusion": {
+    "enable": true,
+    "placement": "early",
+    "operator": "pase_residual",
+    "mode": "replace",
+    "out_chans": 3,
+    "early": {
+      "frame_contract": "collapsed"
+    }
+  },
+  "in_chans": 7
+}
+```
+
+关键属性：
+
+```text
+self.in_chans             raw ingress width, 3 + spike_channels
+self.backbone_in_chans    actual VRT backbone width after early/hybrid fusion
+self.spike_bins           spike_channels when fusion is enabled
+self._last_fusion_meta    diagnostics from fusion adapter/operator
+```
+
+`conv_first` 通道：
+
+```text
+pa_frames > 0 and nonblind=false:
+  conv_first.in_channels = backbone_in_chans * 9
+```
+
+Concat TFP4:
+
+```text
+backbone_in_chans = 7
+conv_first.in_channels = 63
+```
+
+Early fusion TFP4 with `out_chans=3`:
+
+```text
+raw_ingress_chans = 7
+backbone_in_chans = 3
+conv_first.in_channels = 27
+```
+
+## 7. 配置入口
+
+| 配置 | 用途 |
+|------|------|
+| `options/006_train_vrt_videodeblurring_gopro_rgbspike.json` | TFP4 concat + SpyNet baseline |
+| `options/gopro_rgbspike_server.json` | TFP4 dual+fusion + SCFlow server 主配置 |
+| `options/gopro_rgbspike_server_debug.json` | server debug 配置 |
+| `options/gopro_rgbspike_server_pase_residual.json` | PASE residual operator |
+| `options/gopro_rgbspike_server_pase_residual_snapshot.json` | two-run PASE residual snapshot |
+| `options/gopro_rgbspike_server_dual_scale_temporal_mamba_raw_window.json` | raw-window21 + dual-scale temporal mamba |
+| `options/gopro_server_mamba_collapsed_scflow_snapshot.json` | collapsed SCFlow mamba snapshot |
+| `options/gopro_server_mamba_expanded_scflow_snapshot.json` | expanded SCFlow mamba snapshot |
+| `options/gopro_server_pase_scflow.json` | PASE + SCFlow config |
+| `options/gopro_server_pase_scflow_snapshot.json` | PASE + SCFlow snapshot |
+| `options/gopro_server_pase_spynet_snapshot.json` | PASE + SpyNet snapshot |
+
+## 8. 验证命令
+
+Dataset 和 raw-window：
+
+```bash
+uv run pytest tests/data/test_dataset_rgbspike_raw_window.py \
+              tests/data/test_prepare_spike_raw_window.py \
+              tests/data/test_spike_raw_window.py -v
+```
+
+SCFlow contract：
+
+```bash
+uv run pytest tests/models/test_optical_flow_scflow_contract.py \
+              tests/models/test_optical_flow_scflow_integration.py -v
+```
+
+Fusion/VRT integration：
+
+```bash
+uv run pytest tests/models/test_fusion_early_adapter.py \
+              tests/models/test_vrt_fusion_integration.py -v
+```
+
+Forward debug script tests：
+
+```bash
+uv run pytest tests/test_forward_debug_batch_script.py -v
+```
+
+Server config smoke：
+
+```bash
+uv run pytest tests/e2e/test_gopro_rgbspike_server_e2e.py -v
+```
+
+## 9. 常见错误和定位
+
+### `raw_window_length` 与 `spike_channels` 冲突
+
+Raw-window 模式下：
+
+```text
+spike_channels == spike.raw_window_length
+```
+
+例如 `raw_window_length=21` 时，`netG.in_chans` 和 `netG.input.raw_ingress_chans` 应为 `24`。
+
+### SCFlow 缺少 artifact
+
+错误通常提示运行：
+
+```text
+scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py
+```
+
+确认目录名是否匹配 `dt` 和 `subframes`：
+
+```text
+encoding25_dt10
+encoding25_dt10_s4
+encoding25_dt10_s21
+```
+
+### SCFlow 时间轴不匹配
+
+检查：
+
+```text
+datasets.train.spike_channels
+datasets.train.spike_flow.subframes
+datasets.test.spike_channels
+datasets.test.spike_flow.subframes
+fusion.early.frame_contract
+spike_flow.collapse_policy
+```
+
+### SGP channel mismatch
+
+错误来自 `get_aligned_image_2frames` 或 `conv_first` 前。检查：
+
+```text
+raw_ingress_chans = 3 + spike_channels
+backbone_in_chans = raw_ingress_chans or fusion.out_chans
+conv_first.in_channels = backbone_in_chans * 9
+```
+
+### SpyNet 权重与 SCFlow 权重混用
+
+`netG.optical_flow.module="spynet"` 使用 RGB flow checkpoint；`"scflow"` 使用 Spike flow checkpoint。二者输入类型不同，不能只替换 checkpoint。
+
+## 10. 维护原则
+
+- 新实验优先使用 `dual+fusion`，除非明确要复现 concat baseline。
+- 新 Spike restoration 表征必须在 Dataset 中明确 shape，并在 VRT/fusion 中明确 raw ingress 宽度。
+- SCFlow 输入始终走 `L_flow_spike`，不要把 restoration Spike 通道直接喂给 SCFlow。
+- 配置中 train/test 的 Spike 表征、`spike_flow.subframes` 和 `collapse_policy` 应保持一致。
+- 修改输入契约时同步更新 `docs/QUICKSTART_RGB_SPIKE.md`、`docs/RGB_SPIKE_DESIGN.md` 和 `docs/SCFLOW_SUBFRAME_FUSION.md`。

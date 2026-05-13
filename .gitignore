@@ -19,6 +19,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.pytest_cache
 MANIFEST
 
 # Virtual environments
@@ -30,6 +31,7 @@ ENV/
 # IDEs
 .vscode/
 .codex/
+.claude/
 .cursor/
 .idea/
 *.swp

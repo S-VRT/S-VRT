@@ -1,230 +1,275 @@
-# VRT RGB+Spike 快速入门指南
+# VRT RGB+Spike 快速入门
 
-## 环境准备
+本文档面向当前 `baseline` 分支的 RGB+Spike 训练、验证和调试流程。旧路径 `options/vrt/...` 已不再作为主入口；当前配置集中在仓库根目录的 `options/*.json`。
 
-确保已激活正确的 conda 环境：
+## 1. 环境准备
+
 ```bash
-conda activate vrtspike
-cd /home/mallm/henry/KAIR
-pip install -r requirement.txt
+cd /root/projects/S-VRT
+uv pip list >/dev/null
 ```
 
-## 一键启动训练
+若不用 `uv`，确保当前 Python 环境已安装 PyTorch、OpenCV、einops、pytest 以及项目依赖。
 
-### 单卡训练
+常用权重位置：
+
+```text
+weights/vrt/006_VRT_videodeblurring_GoPro.pth
+weights/optical_flow/dt10_e40.pth
+model_zoo/vrt/spynet_sintel_final-3d2a1287.pth
+```
+
+## 2. 选择配置
+
+### 轻量 concat baseline
+
+`options/006_train_vrt_videodeblurring_gopro_rgbspike.json`
+
+- Dataset: `TrainDatasetRGBSpike`
+- 输入打包: `input_pack_mode="concat"`
+- Spike 表征: TFP, `spike_channels=4`
+- 模型入口: `netG.in_chans=7`
+- 光流: SpyNet
+- 数据路径: 相对路径 `trainsets/...`
+
+### 服务器 fusion 训练
+
+`options/gopro_rgbspike_server.json`
+
+- 输入打包: `input_pack_mode="dual"`
+- 兼容输出: `compat.keep_legacy_L=true`
+- Fusion: `netG.input.strategy="fusion"`, `netG.input.mode="dual"`
+- 光流: SCFlow, 需要 `encoding25` artifact
+- 预计算 Spike: `spike.precomputed.enable=true`
+- 数据路径: `/root/autodl-tmp/datasets/gopro_spike/...`
+
+### PASE residual 变体
+
+`options/gopro_rgbspike_server_pase_residual.json`
+
+- Fusion operator: `pase_residual`
+- Frame contract: `collapsed`
+- Raw ingress: `3 + 4 = 7`
+- 适合从 GoPro VRT 权重做 warmup/LoRA 训练
+
+### Raw-window Mamba 变体
+
+`options/gopro_rgbspike_server_dual_scale_temporal_mamba_raw_window.json`
+
+- Spike 表征: `raw_window`
+- `raw_window_length=21`
+- Raw ingress: `3 + 21 = 24`
+- Fusion operator: `dual_scale_temporal_mamba`
+- SCFlow 子帧数: `spike_flow.subframes=21`
+
+## 3. 数据目录检查
+
+相对路径 baseline：
+
 ```bash
-python main_train_vrt.py --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
+ls trainsets/GoPro/train_GT
+ls trainsets/GoPro/train_GT_blurred
+ls trainsets/gopro_spike/GOPRO_Large_spike_seq/train
 ```
 
-### 多卡训练 (推荐 - 3 GPUs)
+服务器路径：
+
 ```bash
-torchrun --nproc_per_node=3 --master_port=4321 main_train_vrt.py \
-    --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
+ls /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/train_GT
+ls /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/train_GT_blurred
+ls /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train
 ```
 
-## 快速测试
+每个 Spike clip 应包含：
 
-### 测试 Spike 加载器
+```text
+<dataroot_spike>/<clip>/spike/000001.dat
+```
+
+如果启用预计算 TFP、raw-window 或 SCFlow，还应有对应 artifact：
+
+```text
+<clip>/tfp_b4_hw20/000001.npy
+<clip>/raw_window_l21/000001.npy
+<clip>/encoding25_dt10_s4/000001.npy
+```
+
+## 4. 预计算 Spike Artifact
+
+TFP 预计算：
+
 ```bash
-python data/spike_recc/spikecv_loader.py
+uv run python scripts/data_preparation/spike/prepare_spike_tfp.py \
+  --spike-root /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train \
+  --spike-h 360 \
+  --spike-w 640 \
+  --num-bins 4 \
+  --half-win-length 20 \
+  --workers 32
 ```
 
-**预期输出**:
-```
-测试 spike 加载...
-Loading total spikes from dat file -- spatial resolution: 400 x 250, total timestamp: 202
-结果:
-  Shape: (202, 250, 400)
-  Dtype: bool
-  Range: [False, True]
-  Non-zero ratio: 20.17%
-```
+Raw-window 预计算：
 
-### 测试 Dataset
 ```bash
-python -c "
+uv run python scripts/data_preparation/spike/prepare_spike_raw_window.py \
+  --spike-root /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train \
+  --spike-h 360 \
+  --spike-w 640 \
+  --window-length 21 \
+  --workers 32
+```
+
+SCFlow encoding25 子帧：
+
+```bash
+uv run python scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py \
+  --spike-root /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train \
+  --dt 10 \
+  --subframes 4 \
+  --spike-h 360 \
+  --spike-w 640 \
+  --num-workers 16
+```
+
+`subframes` 必须与对应配置的 `spike_channels` 一致。Raw-window 21 通道配置需要 `--subframes 21`。
+
+## 5. 快速验证 Dataset
+
+Concat baseline：
+
+```bash
+uv run python - <<'PY'
+from utils import utils_option as option
 from data.select_dataset import define_Dataset
-import json
 
-with open('options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json') as f:
-    config = json.load(f)
-
-dataset = define_Dataset(config['datasets']['train'])
-print(f'Dataset size: {len(dataset)}')
-
-sample = dataset[0]
-print(f'LQ shape: {sample[\"L\"].shape}')  # Should be (6, 4, 224, 224)
-print(f'GT shape: {sample[\"H\"].shape}')  # Should be (6, 3, 224, 224)
-print('✓ Dataset test passed!')
-"
+opt = option.parse("options/006_train_vrt_videodeblurring_gopro_rgbspike.json", is_train=True)
+ds = define_Dataset(opt["datasets"]["train"])
+sample = ds[0]
+print(sample["L"].shape)  # [T, 7, H, W]
+print(sample["H"].shape)  # [T, 3, H, W]
+PY
 ```
 
-## 配置调整
+Dual+fusion 服务器配置：
 
-### 修改 Spike 通道数 (S=1 → S=4)
-
-编辑 `options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json`:
-
-```json
-{
-  "datasets": {
-    "train": {
-      "spike_channels": 4,  // 改为 4
-      ...
-    }
-  },
-  "netG": {
-    "in_chans": 6,  // 3 (RGB) + 4 (Spike) = 7? 不对，应该是 7
-    ...
-  }
-}
-```
-
-**注意**: 记得同步修改 `in_chans = 3 + spike_channels`
-
-### 调整 Batch Size
-
-如果 GPU 内存不足：
-```json
-{
-  "datasets": {
-    "train": {
-      "dataloader_batch_size": 2,  // 默认是 3
-      "gt_size": 192,  // 或减小 crop 尺寸
-      ...
-    }
-  }
-}
-```
-
-### 调整学习率
-
-```json
-{
-  "train": {
-    "G_optimizer_lr": 2e-4,  // 默认 4e-4
-    ...
-  }
-}
-```
-
-## 监控训练
-
-### 查看日志
 ```bash
-tail -f experiments/006_train_vrt_videodeblurring_gopro_rgbspike/train_*.log
+uv run python - <<'PY'
+from utils import utils_option as option
+from data.select_dataset import define_Dataset
+
+opt = option.parse("options/gopro_rgbspike_server_pase_residual.json", is_train=True)
+ds = define_Dataset(opt["datasets"]["train"])
+sample = ds[0]
+print(sample["L_rgb"].shape)        # [T, 3, H, W]
+print(sample["L_spike"].shape)      # [T, 4, H, W]
+print(sample["L"].shape)            # [T, 7, H, W] when keep_legacy_L=true
+print(sample["L_flow_spike"].shape) # [T*S, 25, H, W] when SCFlow is enabled
+PY
 ```
 
-### TensorBoard (如果启用)
+## 6. 启动训练
+
+推荐使用 `launch_train.sh`，它会选择可用 GPU、设置 Python/CUDA 环境、包装 screen/script 日志，并可选启动 AutoDL TensorBoard。
+
+单 GPU debug：
+
 ```bash
-tensorboard --logdir experiments/006_train_vrt_videodeblurring_gopro_rgbspike/
+bash launch_train.sh 1 options/gopro_rgbspike_server_debug.json --foreground
 ```
 
-### 检查 GPU 使用
+4 GPU 服务器训练：
+
 ```bash
-watch -n 1 nvidia-smi
+bash launch_train.sh 4 options/gopro_rgbspike_server.json --detach
 ```
 
-## 训练检查点
+指定 GPU：
 
-模型会自动保存在:
-```
-experiments/006_train_vrt_videodeblurring_gopro_rgbspike/
-├── models/
-│   ├── 5000_G.pth
-│   ├── 10000_G.pth
-│   └── ...
-└── training_states/
-    ├── 5000.state
-    └── ...
-```
-
-## 恢复训练
-
-如果训练中断，自动从最新检查点恢复：
 ```bash
-# 会自动检测并加载最新的 checkpoint
-python main_train_vrt.py --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
+bash launch_train.sh 2 options/gopro_rgbspike_server_pase_residual.json --gpus=0,1 --detach
 ```
 
-## 常见问题
+平台已注入 DDP 环境时，不要再套 `torchrun`：
 
-### Q1: FileNotFoundError - spike data not found
-**A**: 检查 spike 数据路径:
 ```bash
-ls trainsets/gopro_spike/GOPRO_Large_spike_seq/train/GOPR0384_11_02/spike/001301.dat
+uv run python -u main_train_vrt.py --opt options/gopro_rgbspike_server.json
 ```
 
-### Q2: CUDA out of memory
-**A**: 减小 batch size 或 crop size:
-```json
-"dataloader_batch_size": 2,
-"gt_size": 192
+本地手动 DDP：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 main_train_vrt.py \
+  --opt options/gopro_rgbspike_server.json
 ```
 
-### Q3: Scale mismatches error
-**A**: 确保配置中有 `"scale": 1`:
-```json
-{
-  "datasets": {
-    "train": {
-      "scale": 1,
-      ...
-    }
-  }
-}
+## 7. Forward Debug
+
+用于跑完整 inference 后执行 fusion attribution/debugger：
+
+```bash
+bash scripts/run_forward_debug_experiments.sh \
+  --config options/gopro_rgbspike_server_debug.json \
+  --checkpoint weights/vrt/006_VRT_videodeblurring_GoPro.pth \
+  --run-id debug_smoke \
+  --max-samples 1
 ```
 
-### Q4: 训练速度太慢
-**A**: 
-1. 减少 `dataloader_num_workers`
-2. 使用 SSD 存储数据
-3. 考虑转换为 LMDB 格式（需要额外工作）
+输出位置：
 
-## 对比实验
+```text
+<exp_dir>/images/forward_debug/<RUN_ID>/<CHECKPOINT_STEM>/inference_results
+<exp_dir>/images/forward_debug/<RUN_ID>/<CHECKPOINT_STEM>/debugger
+results/<task>_forward_debug_<CHECKPOINT_STEM>_<RUN_ID> -> inference_results
+```
 
-建议训练顺序：
+脚本会拒绝覆盖已有的 `results/...` 路径。换 `RUN_ID` 或手动移动旧路径。
 
-1. **Baseline (RGB only)**:
-   ```bash
-   python main_train_vrt.py --opt options/vrt/006_train_vrt_videodeblurring_gopro.json
-   ```
+## 8. 常见配置关系
 
-2. **RGB + Spike (S=1)** - 本配置
-   ```bash
-   python main_train_vrt.py --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
-   ```
+| 场景 | Dataset 输出 | `netG.input` | Backbone 宽度 |
+|------|--------------|--------------|---------------|
+| concat TFP4 | `L=[T,7,H,W]` | `strategy` 默认 concat | `backbone_in_chans=7` |
+| fusion TFP4 | `L_rgb`, `L_spike`, `L` | `strategy=fusion`, `mode=dual`, `raw_ingress_chans=7` | early fusion 后通常为 3 |
+| raw-window21 | `L_spike=[T,21,H,W]` | `raw_ingress_chans=24` | early fusion 后通常为 3 |
 
-3. **RGB + Spike (S=4)** - 修改配置后
-   ```bash
-   # 修改 spike_channels=4, in_chans=7
-   python main_train_vrt.py --opt options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json
-   ```
+`netG.in_chans` 和 `netG.input.raw_ingress_chans` 表示原始入口宽度，也就是 `3 + spike_channels`。启用 early fusion 后，VRT 主干实际看到的宽度由 `fusion.out_chans` 决定，代码中记录为 `backbone_in_chans`。
 
-## 预期结果
+## 9. 常见问题
 
-- **训练时间**: 约 3-5 天 (3x GPU, 300k iterations)
-- **首次迭代**: ~10-20s (数据加载 + 模型初始化)
-- **后续迭代**: ~0.5-1s per iteration
-- **显存占用**: ~10-12GB per GPU (batch_size=3)
+### `FileNotFoundError` 或缺少 Spike artifact
 
-## 数据统计
+检查 `dataroot_spike`、`spike_h/spike_w` 和 artifact 目录名。启用 `spike.precomputed.enable=true` 时，TFP 目录为 `tfp_b<num_bins>_hw<half_win_length>`。
 
-- **训练样本数**: 2103
-- **每个 epoch**: ~700 iterations (batch_size=3)
-- **总 epochs**: ~428 (300k iterations / 700)
+### SCFlow temporal dim mismatch
 
-## 快速验证清单
+`spike_flow.subframes` 必须等于 `spike_channels`。例如 TFP4 使用 `subframes=4`，raw-window21 使用 `subframes=21`。
 
-- [ ] Conda 环境已激活 (`conda activate vrtspike`)
-- [ ] RGB 数据存在 (`ls trainsets/GoPro/train_GT/`)
-- [ ] Spike 数据存在 (`ls trainsets/gopro_spike/GOPRO_Large_spike_seq/train/`)
-- [ ] GPU 可用 (`nvidia-smi`)
-- [ ] Dataset 测试通过 (见上方测试命令)
-- [ ] 配置文件正确 (`cat options/vrt/006_train_vrt_videodeblurring_gopro_rgbspike.json`)
+### Channel mismatch after SGP alignment
 
----
+检查以下字段是否一致：
 
-**准备好了吗？运行训练命令开始实验！** 🚀
+- `datasets.*.spike_channels`
+- `datasets.*.spike.representation`
+- `datasets.*.spike.raw_window_length`
+- `netG.in_chans`
+- `netG.input.raw_ingress_chans`
+- `fusion.out_chans`
 
+### CUDA OOM
 
+优先降低：
+
+- `datasets.train.dataloader_batch_size`
+- `datasets.train.gt_size`
+- `val.size_patch_testing`
+- `num_frame_testing`
+
+## 10. 快速检查清单
+
+- [ ] 当前分支包含最新 `baseline` 文档和配置。
+- [ ] RGB/GT/Spike 路径存在。
+- [ ] 需要的 VRT/SCFlow/SpyNet 权重存在。
+- [ ] 若启用预计算，`tfp_b*`、`raw_window_l*`、`encoding25_dt*_s*` 已生成。
+- [ ] Dataset smoke test 能打印预期 shape。
+- [ ] `spike_channels == spike_flow.subframes`。
+- [ ] `netG.in_chans == netG.input.raw_ingress_chans == 3 + spike_channels`。

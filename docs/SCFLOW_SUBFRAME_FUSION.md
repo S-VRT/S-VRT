@@ -1,298 +1,377 @@
-# SCFlow 子帧光流与 Early Fusion 集成
+# SCFlow 子帧光流与 RGB+Spike Fusion
 
-## 概述
+本文档描述当前 SCFlow 与 RGB+Spike early fusion 的集成方式。SCFlow 使用独立的 `encoding25` Spike flow 表征，不直接消费 restoration Spike TFP/raw-window 通道。
 
-本文档描述 SCFlow 光流模块如何与 Early Fusion 时间展开机制集成，使光流在子帧粒度上提供运动信息。
+## 1. 背景
 
-### 背景
+RGB+Spike fusion 有两条相关但独立的数据路径：
 
-S-VRT 中有两条独立的时间轴扩展路径：
+1. Restoration Spike 路径：用于图像恢复，返回 `L_spike=[T,S,H,W]`。
+2. SCFlow Spike 路径：用于光流估计，返回 `L_flow_spike=[T*S,25,H,W]`。
 
-1. **Early Fusion**：将 RGB 复制 S 份对齐 Spike 子帧，主干从 N 帧扩展到 N×S 帧
-2. **SCFlow 光流**：从 Spike 原始流中提取 25-bin 时间窗口，计算相邻帧间光流
+其中 `S` 是 `spike_channels`，也是 `spike_flow.subframes`。在 early fusion 展开或 collapsed 子帧组合时，这两个值必须一致。
 
-问题：early fusion 扩展主干时间轴后，光流仍在原始 N 帧粒度上工作，两者时间维度不匹配。
+## 2. Artifact 格式
 
-### 解决方案
+每个 RGB frame 对应一个 `.dat` 文件：
 
-为每个 `.dat` 文件生成 S 个子帧 encoding25 窗口，使 `flow_spike` 形状从 `[B, N, 25, H, W]` 变为 `[B, N×S, 25, H, W]`，与主干时间轴对齐。
-
----
-
-## 数据模型
-
-### 每帧 `.dat` 文件
-
-每个视频帧对应一个独立的 `.dat` 文件，包含该帧周围的原始 spike 流：
-
-```
-<dataroot_spike>/<clip>/spike/000047.dat  →  (T_raw, H, W)
+```text
+<dataroot_spike>/<clip>/spike/<frame>.dat
 ```
 
-`T_raw` 不固定，已观测到 56 和 88 两种长度。
+SCFlow 需要从 `.dat` 中提取以某个中心为基准的 25-bin Spike window：
 
-### 子中心选取
-
-从每个 `.dat` 的有效中心范围内均匀选取 S 个点：
-
-```
-有效范围: [12, T_raw - 13]
-子中心:   numpy.linspace(12, T_raw - 13, S) 取整
-
-T_raw=56, S=4:  centers = [12, 22, 33, 43]   sub_dt ≈ 10.3
-T_raw=88, S=4:  centers = [12, 33, 54, 75]   sub_dt ≈ 21
+```text
+single frame: [25,H,W]
+subframes:    [S,25,H,W]
 ```
 
-每个子中心提取一个 ±12 的 25-bin 窗口。最终每帧输出 `[S, 25, H, W]`。
+输出目录：
 
-### Shape 端到端
+```text
+S=1:
+  <clip>/encoding25_dt10/<frame>.npy
 
-```
-.dat 文件
-  ↓ compute_subframe_centers(T_raw, S=4)
-  ↓ build_centered_window() × S
-  ↓ [S, 25, H, W]  .npy artifact
-
-Dataset __getitem__()
-  ↓ 加载 N 帧 × [S, 25, H, W]
-  ↓ 独立 crop/resize 每个子窗口
-  ↓ 展平为 [N×S, 25, H, W]
-  ↓ augment (flip/rotate)
-  → sample['L_flow_spike']: [N×S, 25, H, W]
-
-DataLoader
-  → L_flow_spike: [B, N×S, 25, H, W]
-
-VRT forward()
-  ↓ early fusion: x [B, N, C, H, W] → [B, N×S, 3, H, W]
-  ↓ get_flow_2frames(x, flow_spike)
-  ↓ flow_spike.size(1) == x.size(1) == N×S  ✓
-  ↓ SCFlow(sub_i, sub_{i+1}) → (N×S - 1) 对 flow
-  → flow-guided temporal attention 在子帧粒度对齐
+S>1:
+  <clip>/encoding25_dt10_s<S>/<frame>.npy
 ```
 
----
+示例：
 
-## 配置
+```text
+GOPR0384_11_02/
+  spike/
+    001301.dat
+  encoding25_dt10_s4/
+    001301.npy        # [4,25,360,640]
+```
 
-### 最小配置
+## 3. 子中心选取
+
+对每个 `.dat` 的局部时间轴，在有效范围 `[12, T_raw - 13]` 内均匀选取 `S` 个中心：
+
+```text
+T_raw=56, S=4 -> [12,22,33,43]
+T_raw=88, S=4 -> [12,33,54,75]
+```
+
+每个中心提取一个 `25` bin window。`S=1` 时退化为单个中心 window。
+
+## 4. Dataset 契约
+
+配置：
 
 ```json
-{
-    "datasets": {
-        "train": {
-            "spike_channels": 4,
-            "spike_flow": {
-                "representation": "encoding25",
-                "dt": 10,
-                "root": "auto",
-                "subframes": 4
-            }
-        },
-        "test": {
-            "spike_flow": {
-                "representation": "encoding25",
-                "dt": 10,
-                "root": "auto",
-                "subframes": 4
-            }
-        }
-    },
-    "netG": {
-        "optical_flow": {
-            "module": "scflow",
-            "checkpoint": "weights/optical_flow/dt10_e40.pth"
-        },
-        "fusion": {
-            "enabled": true,
-            "placement": "early",
-            "operator": "gated"
-        }
-    }
+"spike_flow": {
+  "representation": "encoding25",
+  "dt": 10,
+  "root": "auto",
+  "subframes": 4,
+  "collapse_policy": "mean_windows"
 }
 ```
 
-### spike_flow 配置项
+字段说明：
 
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `representation` | str | `""` | SCFlow 模式下必须为 `"encoding25"` |
-| `dt` | int | `10` | SCFlow 训练参数（10 或 20），进入目录名 |
-| `root` | str | `"auto"` | `"auto"` 跟随 `dataroot_spike`；也可指定绝对路径 |
-| `subframes` | int | `1` | 每帧子窗口数。设为 >1 时**必须等于 `spike_channels`** |
-
-### 关键约束
-
-**`spike_flow.subframes` 必须等于 `spike_channels`。** 两者不等时 dataset 初始化会报错：
-
-```
-ValueError: spike_flow.subframes (8) must equal spike_channels (4)
-             for early-fusion temporal axis alignment.
-```
-
-原因：early fusion 按 `spike_channels` 展开时间轴，flow 路径必须按同样的倍数提供子帧光流。
-
----
-
-## 数据准备
-
-### 生成 encoding25 子帧 artifact
-
-```bash
-python -m scripts.data_preparation.spike_flow.prepare_scflow_encoding25 \
-    --spike-root /path/to/GOPRO_Large_spike_seq/train \
-    --dt 10 \
-    --subframes 4 \
-    --spike-h 360 \
-    --spike-w 640 \
-    --num-workers 8
-```
-
-#### 参数说明
-
-| 参数 | 默认 | 说明 |
+| 字段 | 默认 | 说明 |
 |------|------|------|
-| `--spike-root` | (必需) | 包含 clip 子目录的 spike 数据根目录 |
-| `--dt` | `10` | SCFlow 训练间距 |
-| `--subframes` | `4` | 每帧生成的子窗口数 |
-| `--spike-h` / `--spike-w` | `360` / `640` | spike 相机分辨率 |
-| `--num-workers` | `1` | 并行 worker 数 |
-| `--dry-run` | - | 只统计不生成 |
-| `--overwrite` | - | 覆盖已有文件 |
+| `representation` | `""` | SCFlow 模式必须为 `encoding25` |
+| `dt` | `10` | artifact 目录名的一部分 |
+| `root` | `auto` | `auto` 表示跟随 `dataroot_spike` |
+| `subframes` | `1` | 每个 RGB frame 的 SCFlow 子窗口数 |
+| `collapse_policy` | `mean_windows` | collapsed fusion 下的子帧处理策略 |
 
-#### 输出目录结构
+Dataset 返回：
 
-```
-<spike_root>/
-  <clip>/
-    spike/
-      000001.dat          ← 原始 spike 流
-      000002.dat
-      ...
-    encoding25_dt10_s4/   ← 新生成的子帧 artifact
-      000001.npy          ← shape [4, 25, 360, 640]
-      000002.npy
-      ...
+```text
+sample["L_flow_spike"]: [T*S,25,H,W]
 ```
 
-S=1 时目录名为 `encoding25_dt10`（向后兼容），文件 shape 为 `[25, H, W]`。
+DataLoader 后：
 
-#### 验证
-
-```bash
-# dry-run 检查
-python -m scripts.data_preparation.spike_flow.prepare_scflow_encoding25 \
-    --spike-root /path/to/train --subframes 4 --dry-run
-
-# 检查单个文件
-python -c "
-import numpy as np
-arr = np.load('path/to/encoding25_dt10_s4/000001.npy')
-print(arr.shape, arr.dtype)  # 应输出 (4, 25, 360, 640) float32
-"
+```text
+L_flow_spike: [B,T*S,25,H,W]
 ```
 
----
+关键约束：
 
-## SCFlow 训练域
+```text
+spike_flow.subframes == spike_channels
+```
 
-SCFlow 原始训练使用 dt=10（或 dt=20）间距的帧对。子帧间距 `sub_dt` 应尽量接近训练域：
+当 `subframes > 1` 且二者不等时，Dataset 初始化会报错。
 
-| T_raw | S | sub_dt | 对应训练域 | 评价 |
-|-------|---|--------|-----------|------|
-| 56 | 4 | ~10.3 | dt=10 | ✓ 匹配 |
-| 88 | 4 | ~21 | dt=20 | ✓ 可接受 |
-| 56 | 8 | ~4.4 | — | ✗ 偏离，需 finetune |
-| 88 | 8 | ~9 | dt=10 | ✓ 接近 |
+## 5. VRT 光流路径
 
-**推荐第一版使用 S=4**。SCFlow 权重冻结（`torch.no_grad()`），不参与反向传播。
+SCFlow 由 `netG.optical_flow.module="scflow"` 启用：
 
----
+```json
+"netG": {
+  "optical_flow": {
+    "module": "scflow",
+    "checkpoint": "weights/optical_flow/dt10_e40.pth",
+    "params": {}
+  }
+}
+```
 
-## 代码结构
+`models/architectures/vrt/vrt.py` 中：
 
-### 核心模块
+1. `forward()` 接收 `flow_spike`。
+2. early fusion 产生 `backbone_view` 和 fusion metadata。
+3. `_align_flow_spike_to_fused_time_axis()` 或 `_compose_subframe_flow_sequence()` 对齐 SCFlow 时间轴。
+4. `get_flow_2frames()` 调用 SCFlow wrapper。
+5. `get_aligned_image_2frames()` 使用 frame-level flow 做 SGP/parallel warping。
 
-| 文件 | 职责 |
-|------|------|
-| `data/spike_recc/encoding25.py` | 子中心计算、窗口提取、shape 校验 |
-| `scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py` | 离线 artifact 生成 |
-| `data/dataset_video_train_rgbspike.py` | 加载 `[S,25,H,W]`、crop、augment、展平 |
-| `models/architectures/vrt/vrt.py` | `get_flow_2frames()` 消费 `[B, N×S, 25, H, W]` |
-| `models/optical_flow/scflow/wrapper.py` | SCFlow 前向，校验 `[B, 25, H, W]` 输入对 |
+SCFlow 输入校验：
 
-### 关键函数
+- `flow_spike.ndim == 5`
+- channel 维必须是 `25`
+- spatial size 必须等于当前 backbone `H,W`
+- temporal size 必须匹配当前 backbone 时间轴，或在 `compose_subframes` 下匹配 `T*S`
+
+## 6. Expanded Frame Contract
+
+Expanded early fusion 中，主干时间轴已经是子帧级：
+
+```text
+RGB:        [B,T,3,H,W]
+Spike:      [B,T,S,H,W]
+backbone:   [B,T*S,3,H,W]
+flow_spike: [B,T*S,25,H,W]
+```
+
+此时 SCFlow 直接在 `T*S` 时间轴上估计相邻子帧 flow。Restoration 输出再根据 reducer 回到 `[B,T,3,H,W]`，或在 interpolation 模式保留展开时间轴。
+
+## 7. Collapsed Frame Contract
+
+Collapsed early fusion 中，主干保持 RGB 帧级：
+
+```text
+RGB:        [B,T,3,H,W]
+Spike:      [B,T,S,H,W]
+backbone:   [B,T,3,H,W]
+flow_spike: [B,T*S,25,H,W]
+```
+
+这时 `spike_flow.collapse_policy` 决定如何把子帧 SCFlow 信息用于 RGB 帧级主干。
+
+### 7.1 `mean_windows`
+
+默认策略。VRT 将：
+
+```text
+[B,T*S,25,H,W] -> reshape [B,T,S,25,H,W] -> mean over S -> [B,T,25,H,W]
+```
+
+优点：
+
+- 向后兼容。
+- 计算量较低。
+- shape 与旧 SCFlow 路径一致。
+
+缺点：
+
+- 会丢掉子帧间的细粒度运动顺序。
+
+### 7.2 `compose_subframes`
+
+新策略。VRT 保留 `T*S` flow Spike 输入：
+
+1. 在相邻子帧 window 上运行 SCFlow，得到 `[B,T*S-1,2,H,W]`。
+2. 选每个 RGB frame 的 anchor 子帧，`anchor = S // 2`。
+3. 将 `t*S+anchor` 到 `(t+1)*S+anchor` 的相邻 flow 逐段 compose。
+4. 返回 RGB 帧级 flow `[B,T-1,2,H,W]`。
+
+组合公式遵循 VRT 现有 flow convention：
 
 ```python
-# data/spike_recc/encoding25.py
-
-compute_subframe_centers(t_raw=56, num_subframes=4)
-# → [12, 22, 33, 43]
-
-build_centered_window(spike_matrix, center=22)
-# → [25, H, W] float32
-
-validate_subframes_tensor(arr, num_subframes=4)
-# 校验 shape == [4, 25, H, W]
-
-build_output_dir_subframes(clip_dir, dt=10, num_subframes=4)
-# → <clip>/encoding25_dt10_s4
+composed = flow_a_to_b + flow_warp(flow_b_to_c, flow_a_to_b.permute(0, 2, 3, 1))
 ```
 
-```python
-# scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py
+优点：
 
-build_scflow_subframe_windows(spike_matrix, num_subframes=4)
-# → [4, 25, H, W] float32
-```
+- 保留子帧运动顺序。
+- 主干仍保持 collapsed 的 `[B,T,3,H,W]` 计算量。
 
----
+约束：
 
-## 测试
+- `spike_bins > 1`
+- `flow_spike.size(1) == T * spike_bins`
+- train/test 的 `collapse_policy` 必须一致
+
+## 8. 数据准备命令
+
+生成 S=4 SCFlow artifact：
 
 ```bash
-# 运行所有 SCFlow 相关测试
-python -m pytest tests/models/test_optical_flow_scflow_contract.py \
-                 tests/models/test_optical_flow_scflow_integration.py -v
+uv run python scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py \
+  --spike-root /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train \
+  --dt 10 \
+  --subframes 4 \
+  --spike-h 360 \
+  --spike-w 640 \
+  --num-workers 16
 ```
 
-### 子帧相关测试覆盖
+生成 raw-window21 对应的 S=21 SCFlow artifact：
 
-| 测试 | 验证内容 |
-|------|---------|
-| `test_compute_subframe_centers_t56_s4` | T=56, S=4 的子中心在 [12, 43] 内均匀分布 |
-| `test_compute_subframe_centers_t88_s4` | T=88, S=4 的子中心在 [12, 75] 内均匀分布 |
-| `test_compute_subframe_centers_s1_returns_midpoint` | S=1 退化为中点 |
-| `test_compute_subframe_centers_rejects_too_short` | T<25 报错 |
-| `test_validate_subframes_tensor_*` | shape 校验 |
-| `test_build_scflow_subframe_windows_shape_*` | 完整提取流程 |
-| `test_dataset_parses_spike_flow_subframes` | 配置解析 |
-| `test_dataset_load_subframe_flow_spike` | 文件加载和 shape |
+```bash
+uv run python scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py \
+  --spike-root /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train \
+  --dt 10 \
+  --subframes 21 \
+  --spike-h 360 \
+  --spike-w 640 \
+  --num-workers 16
+```
 
----
+先估算空间：
 
-## 常见问题
+```bash
+uv run python scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py \
+  --spike-root /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train \
+  --dt 10 \
+  --subframes 4 \
+  --space-only
+```
 
-### 1. `spike_flow.subframes` 和 `spike_channels` 必须相等吗？
+Dry run：
 
-是的。当 `subframes > 1` 时，dataset 初始化会校验两者相等。原因是 early fusion 按 `spike_channels` 倍展开时间轴，flow 路径也必须有同样的时间分辨率。
+```bash
+uv run python scripts/data_preparation/spike_flow/prepare_scflow_encoding25.py \
+  --spike-root /root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train \
+  --dt 10 \
+  --subframes 4 \
+  --dry-run
+```
 
-### 2. 不用 early fusion 时怎么配？
+## 9. 配置示例
 
-设 `subframes: 1`（默认值）即可，行为和之前完全一样。flow_spike 形状为 `[B, N, 25, H, W]`。
+Collapsed PASE residual + mean windows：
 
-### 3. 可以用 S=8 吗？
+```json
+{
+  "datasets": {
+    "train": {
+      "spike_channels": 4,
+      "spike_flow": {
+        "representation": "encoding25",
+        "dt": 10,
+        "root": "auto",
+        "subframes": 4,
+        "collapse_policy": "mean_windows"
+      }
+    }
+  },
+  "netG": {
+    "input": {
+      "strategy": "fusion",
+      "mode": "dual",
+      "raw_ingress_chans": 7
+    },
+    "fusion": {
+      "enable": true,
+      "placement": "early",
+      "operator": "pase_residual",
+      "out_chans": 3,
+      "early": {
+        "frame_contract": "collapsed"
+      }
+    },
+    "optical_flow": {
+      "module": "scflow",
+      "checkpoint": "weights/optical_flow/dt10_e40.pth"
+    }
+  }
+}
+```
 
-可以，但需要 `spike_channels` 也设为 8。注意 T_raw=56 时 sub_dt≈4.4，偏离 SCFlow 训练域（dt=10/20），可能需要 finetune。T_raw=88 时 sub_dt≈9，接近 dt=10 训练域。
+Collapsed Mamba + composed subframes：
 
-### 4. encoding25 的 25 是什么含义？
+```json
+{
+  "datasets": {
+    "train": {
+      "spike_channels": 9,
+      "spike_flow": {
+        "representation": "encoding25",
+        "dt": 10,
+        "root": "auto",
+        "subframes": 9,
+        "collapse_policy": "compose_subframes"
+      }
+    },
+    "test": {
+      "spike_channels": 9,
+      "spike_flow": {
+        "representation": "encoding25",
+        "dt": 10,
+        "root": "auto",
+        "subframes": 9,
+        "collapse_policy": "compose_subframes"
+      }
+    }
+  }
+}
+```
 
-SCFlow 的输入格式：每个"帧"是原始 spike 流中以某个时刻为中心的 25 个连续 time bin（±12）。这 25 个 bin 是 SCFlow 网络的第一层卷积硬编码的输入通道数。
+## 10. 测试
 
-### 5. 全局 `center_offset + k × dt` 公式还用吗？
+SCFlow contract 和 artifact 工具：
 
-不用了。每个 `.dat` 是独立文件，没有跨帧连续时间轴，全局索引公式不适用。子中心完全基于每个 `.dat` 自身的 `T_raw` 在局部时间轴上选取。`encoding25.py` 中的 `compute_center_index()` 和 `validate_center_bounds()` 保留但不再被调用。
+```bash
+uv run pytest tests/models/test_optical_flow_scflow_contract.py \
+              tests/models/test_optical_flow_scflow_integration.py -v
+```
 
-### 6. SCFlow 权重需要训练吗？
+VRT fusion + SCFlow collapse policy：
 
-第一版冻结权重。SCFlow 在 `wrapper.py` 中使用 `torch.no_grad()` 推理。后续可以考虑解冻做端到端 finetune。
+```bash
+uv run pytest tests/models/test_vrt_fusion_integration.py -v
+```
+
+相关测试覆盖：
+
+| 测试 | 覆盖点 |
+|------|--------|
+| `test_compute_subframe_centers_*` | 子中心选择 |
+| `test_validate_subframes_tensor_*` | `[S,25,H,W]` shape 校验 |
+| `test_dataset_parses_spike_flow_subframes` | Dataset 配置解析 |
+| `test_dataset_load_subframe_flow_spike` | 子帧 artifact 加载 |
+| `test_vrt_parses_scflow_collapse_policy_from_dataset_config` | VRT 解析 collapse policy |
+| `test_vrt_get_flow_2frames_compose_subframes_returns_frame_level_flows` | compose 后 frame-level flow shape |
+| `test_vrt_structured_early_mamba_mean_windows_collapses_subframe_flow_spike` | collapsed 默认均值路径 |
+| `test_vrt_structured_early_mamba_compose_subframes_keeps_expanded_flow_spike` | compose 保留展开 flow Spike |
+
+## 11. 常见问题
+
+### `subframes` 必须等于 `spike_channels` 吗？
+
+在 `subframes > 1` 时必须相等。Restoration Spike 和 SCFlow Spike 需要共享同一子帧倍率，否则 early fusion 时间轴无法可靠对齐。
+
+### 不启用 SCFlow 怎么办？
+
+使用 `netG.optical_flow.module="spynet"`，不配置 `spike_flow` 或让它不产生 `L_flow_spike`。SpyNet 只使用 RGB 通道。
+
+### 不启用 early fusion 怎么办？
+
+concat + SpyNet 路径不需要 `L_flow_spike`。若 concat + SCFlow，需要确保 `flow_spike` temporal length 与 VRT 当前 `T` 匹配。
+
+### S=21 是否合理？
+
+S=21 通常对应 raw-window21 restoration 表征。它可以用于 SCFlow 子帧 artifact，但计算量和磁盘占用会明显上升。确认空间后再生成。
+
+### SCFlow 权重会训练吗？
+
+当前 SCFlow wrapper 按推理路径使用，训练主线不依赖解冻 SCFlow。若未来需要端到端 finetune，应单独设计 optimizer、显存和稳定性策略。
+
+## 12. 排查顺序
+
+1. 确认 `L_flow_spike` 是否存在。
+2. 打印 `L_flow_spike.shape`，应为 `[B,T*S,25,H,W]`。
+3. 检查 artifact 目录名是否与 `dt`/`subframes` 一致。
+4. 检查 `spike_channels == spike_flow.subframes`。
+5. 检查 train/test 的 `collapse_policy` 是否一致。
+6. 检查 `fusion.early.frame_contract` 是 `expanded` 还是 `collapsed`。
+7. 若 spatial mismatch，检查 Dataset crop/resize 后的 `H,W` 是否与 backbone 输入一致。
