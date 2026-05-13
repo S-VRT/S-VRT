@@ -1,0 +1,180 @@
+{
+  "samples": [
+    {
+      "clip": "GOPR0396_11_00",
+      "frame": "000050",
+      "frame_index": 50,
+      "mask": {
+        "type": "box",
+        "xyxy": [
+          240,
+          120,
+          400,
+          240
+        ],
+        "label": "center_enabled"
+      },
+      "reason": "center frame from enabled test clip"
+    },
+    {
+      "clip": "GOPR0384_11_00",
+      "frame": "000050",
+      "frame_index": 50,
+      "mask": {
+        "type": "box",
+        "xyxy": [
+          240,
+          120,
+          400,
+          240
+        ],
+        "label": "center_discard"
+      },
+      "reason": "center frame from discard test clip"
+    },
+    {
+      "clip": "GOPR0384_11_05",
+      "frame": "000050",
+      "frame_index": 50,
+      "mask": {
+        "type": "box",
+        "xyxy": [
+          240,
+          120,
+          400,
+          240
+        ],
+        "label": "center_discard"
+      },
+      "reason": "center frame from discard test clip"
+    },
+    {
+      "clip": "GOPR0385_11_01",
+      "frame": "000050",
+      "frame_index": 50,
+      "mask": {
+        "type": "box",
+        "xyxy": [
+          240,
+          120,
+          400,
+          240
+        ],
+        "label": "center_discard"
+      },
+      "reason": "center frame from discard test clip"
+    },
+    {
+      "clip": "GOPR0410_11_00",
+      "frame": "000067",
+      "frame_index": 67,
+      "mask": {
+        "type": "box",
+        "xyxy": [
+          240,
+          120,
+          400,
+          240
+        ],
+        "label": "center_discard"
+      },
+      "reason": "center frame from discard test clip"
+    },
+    {
+      "clip": "GOPR0854_11_00",
+      "frame": "000050",
+      "frame_index": 50,
+      "mask": {
+        "type": "box",
+        "xyxy": [
+          240,
+          120,
+          400,
+          240
+        ],
+        "label": "center_discard"
+      },
+      "reason": "center frame from discard test clip"
+    },
+    {
+      "clip": "GOPR0862_11_00",
+      "frame": "000039",
+      "frame_index": 39,
+      "mask": {
+        "type": "box",
+        "xyxy": [
+          240,
+          120,
+          400,
+          240
+        ],
+        "label": "center_discard"
+      },
+      "reason": "center frame from discard test clip"
+    },
+    {
+      "clip": "GOPR0868_11_00",
+      "frame": "000050",
+      "frame_index": 50,
+      "mask": {
+        "type": "box",
+        "xyxy": [
+          240,
+          120,
+          400,
+          240
+        ],
+        "label": "center_discard"
+      },
+      "reason": "center frame from discard test clip"
+    },
+    {
+      "clip": "GOPR0869_11_00",
+      "frame": "000050",
+      "frame_index": 50,
+      "mask": {
+        "type": "box",
+        "xyxy": [
+          240,
+          120,
+          400,
+          240
+        ],
+        "label": "center_discard"
+      },
+      "reason": "center frame from discard test clip"
+    },
+    {
+      "clip": "GOPR0871_11_00",
+      "frame": "000050",
+      "frame_index": 50,
+      "mask": {
+        "type": "box",
+        "xyxy": [
+          240,
+          120,
+          400,
+          240
+        ],
+        "label": "center_discard"
+      },
+      "reason": "center frame from discard test clip"
+    },
+    {
+      "clip": "GOPR0881_11_01",
+      "frame": "000050",
+      "frame_index": 50,
+      "mask": {
+        "type": "box",
+        "xyxy": [
+          240,
+          120,
+          400,
+          240
+        ],
+        "label": "center_discard"
+      },
+      "reason": "center frame from discard test clip"
+    }
+  ]
+}

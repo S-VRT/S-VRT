@@ -1,0 +1,139 @@
+<mxfile host="app.diagrams.net" modified="2026-04-08T13:10:00.000Z" agent="Codex" version="24.7.17">
+  <diagram id="fusion-operators-detail" name="Fusion Operators Detailed">
+    <mxGraphModel dx="1800" dy="1100" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2600" pageHeight="1800" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="S-VRT Fusion Operators: 数据形状与数据流程（按当前代码实现）" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=22;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1200" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="contract" value="公共输入契约（5D主路径）&#xa;rgb_feat: [B, S, Cr, H, W]&#xa;spike_feat: [B, S, Cs, H, W]&#xa;输出统一: [B, S, Co, H, W]&#xa;其中 S=时序长度（early中通常为 N*T）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="80" width="560" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="concat_head" value="ConcatFusionOperator" style="swimlane;html=1;rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="240" width="600" height="360" as="geometry" />
+        </mxCell>
+        <mxCell id="concat_1" value="1) 展平时序&#xa;rgb_flat = reshape(rgb_feat) -&gt; [B*S, Cr, H, W]&#xa;spike_flat = reshape(spike_feat) -&gt; [B*S, Cs, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#d6b656;" vertex="1" parent="concat_head">
+          <mxGeometry x="20" y="50" width="550" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="concat_2" value="2) 通道拼接&#xa;fused = cat([rgb_flat, spike_flat], dim=1)&#xa;shape: [B*S, Cr+Cs, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#d6b656;" vertex="1" parent="concat_head">
+          <mxGeometry x="20" y="160" width="550" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="concat_3" value="3) 1x1投影&#xa;out = Conv2d(Cr+Cs -&gt; Co)(fused)&#xa;shape: [B*S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#d6b656;" vertex="1" parent="concat_head">
+          <mxGeometry x="20" y="255" width="550" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="e_c1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="concat_head" source="concat_1" target="concat_2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_c2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="concat_head" source="concat_2" target="concat_3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gated_head" value="GatedFusionOperator" style="swimlane;html=1;rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="680" y="240" width="760" height="500" as="geometry" />
+        </mxCell>
+        <mxCell id="gated_1" value="1) 展平时序并拼接&#xa;rgb_flat: [B*S, Cr, H, W]&#xa;spike_flat: [B*S, Cs, H, W]&#xa;fused_in = cat(...) -&gt; [B*S, Cr+Cs, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#82b366;" vertex="1" parent="gated_head">
+          <mxGeometry x="20" y="50" width="710" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="gated_2a" value="2a) 主融合分支&#xa;fuse = Conv3x3 -&gt; ReLU -&gt; Conv1x1&#xa;shape: [B*S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#82b366;" vertex="1" parent="gated_head">
+          <mxGeometry x="20" y="170" width="330" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="gated_2b" value="2b) 门控分支&#xa;gate = Conv3x3 -&gt; ReLU -&gt; Conv1x1 -&gt; Sigmoid&#xa;shape: [B*S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#82b366;" vertex="1" parent="gated_head">
+          <mxGeometry x="380" y="170" width="350" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="gated_2c" value="2c) RGB捷径&#xa;rgb_base = rgb_proj(rgb_flat)&#xa;shape: [B*S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#82b366;" vertex="1" parent="gated_head">
+          <mxGeometry x="20" y="280" width="710" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="gated_3" value="3) 输出融合&#xa;out = rgb_base + gate * fuse&#xa;shape: [B*S, Co, H, W]&#xa;reshape -&gt; [B, S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#82b366;" vertex="1" parent="gated_head">
+          <mxGeometry x="20" y="375" width="710" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="gated_head" source="gated_1" target="gated_2a">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="gated_head" source="gated_1" target="gated_2b">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="gated_head" source="gated_1" target="gated_2c">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="gated_head" source="gated_2a" target="gated_3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="gated_head" source="gated_2b" target="gated_3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_g6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="gated_head" source="gated_2c" target="gated_3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="pase_head" value="PaseFusionOperator" style="swimlane;html=1;rounded=1;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="650" width="600" height="350" as="geometry" />
+        </mxCell>
+        <mxCell id="pase_1" value="1) 展平时序&#xa;rgb_flat: [B*S, Cr, H, W]&#xa;spike_flat: [B*S, Cs, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#b85450;" vertex="1" parent="pase_head">
+          <mxGeometry x="20" y="50" width="550" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="pase_2a" value="2a) RGB分支&#xa;rgb_proj: Conv1x1(Cr -&gt; Co)&#xa;[B*S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#b85450;" vertex="1" parent="pase_head">
+          <mxGeometry x="20" y="150" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="pase_2b" value="2b) Spike分支&#xa;PixelAdaptiveSpikeEncoder(Cs -&gt; Co)&#xa;[B*S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#b85450;" vertex="1" parent="pase_head">
+          <mxGeometry x="310" y="150" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="pase_3" value="3) 相加与回形状&#xa;fused = rgb_proj + pase_out&#xa;[B*S, Co, H, W] -&gt; reshape [B, S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#b85450;" vertex="1" parent="pase_head">
+          <mxGeometry x="20" y="260" width="550" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="e_p1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="pase_head" source="pase_1" target="pase_2a">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_p2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="pase_head" source="pase_1" target="pase_2b">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_p3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="pase_head" source="pase_2a" target="pase_3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_p4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="pase_head" source="pase_2b" target="pase_3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="mamba_head" value="MambaFusionOperator" style="swimlane;html=1;rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="680" y="780" width="900" height="520" as="geometry" />
+        </mxCell>
+        <mxCell id="mamba_0" value="0) 依赖检查&#xa;if mamba_ssm 不可用 -&gt; RuntimeError" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#9673a6;" vertex="1" parent="mamba_head">
+          <mxGeometry x="20" y="50" width="850" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="mamba_1" value="1) 展平与线性投影&#xa;rgb_flat: [B*S, Cr, H, W] -&gt; rgb_proj -&gt; [B*S, Co, H, W]&#xa;spike_flat: [B*S, Cs, H, W] -&gt; spike_proj -&gt; [B*S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#9673a6;" vertex="1" parent="mamba_head">
+          <mxGeometry x="20" y="130" width="850" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="mamba_2" value="2) 空间位置展开为时序token&#xa;fused = rgb_proj + spike_proj -&gt; [B*S, Co, H, W]&#xa;reshape/permute -&gt; [B, S, Co, H, W] -&gt; seq [B*H*W, S, Co]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#9673a6;" vertex="1" parent="mamba_head">
+          <mxGeometry x="20" y="245" width="850" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="mamba_3" value="3) 时序建模&#xa;seq_out = Mamba(seq)&#xa;shape保持 [B*H*W, S, Co]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#9673a6;" vertex="1" parent="mamba_head">
+          <mxGeometry x="20" y="360" width="850" height="75" as="geometry" />
+        </mxCell>
+        <mxCell id="mamba_4" value="4) 回到视频特征布局&#xa;reshape/permute: [B*H*W, S, Co] -&gt; [B, S, Co, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff;strokeColor=#9673a6;" vertex="1" parent="mamba_head">
+          <mxGeometry x="20" y="450" width="850" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="e_m1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="mamba_head" source="mamba_0" target="mamba_1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_m2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="mamba_head" source="mamba_1" target="mamba_2">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_m3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="mamba_head" source="mamba_2" target="mamba_3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_m4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" edge="1" parent="mamba_head" source="mamba_3" target="mamba_4">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="note_4d" value="4D分支说明（middle等场景可能触发）&#xa;输入: [B, Cr, H, W] / [B, Cs, H, W]&#xa;concat/gated/pase: 直接2D融合后输出 [B, Co, H, W]&#xa;mamba: 先得到 [B, Co, H, W]，再按每个像素构造长度1序列 [B*H*W, 1, Co] 过Mamba，最后还原 [B, Co, H, W]" style="shape=note;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1630" y="860" width="430" height="210" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend" value="符号: B=batch, S=sequence length, Cr=rgb通道, Cs=spike通道, Co=out_chans" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1040" width="620" height="50" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

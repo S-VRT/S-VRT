@@ -1,0 +1,200 @@
+<mxfile host="app.diagrams.net" modified="2026-04-29T00:00:00.000Z" agent="Codex" version="24.7.17">
+  <diagram id="svrt-pase-residual-context" name="SVRTPaseResidualFusion">
+    <mxGraphModel dx="1800" dy="1200" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2200" pageHeight="1600" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="S-VRT Early Fusion with PASE-Residual Operator: Forward Data Flow &amp; Tensor Shapes" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=22;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="1500" height="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cfg" value="Active fusion path in current config&#xa;input.strategy = fusion&#xa;input.mode = dual&#xa;fusion.placement = early&#xa;fusion.operator = pase_residual&#xa;fusion.early.frame_contract = collapsed&#xa;fusion.out_chans = 3" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="80" width="360" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="guards" value="Operator / adapter contract&#xa;rgb_chans = 3&#xa;operator spike_chans = full per-frame bin count S&#xa;out_chans = 3&#xa;collapsed path keeps frame axis T&#xa;no expansion to [B, T*S, C, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="440" y="80" width="420" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="top_head" value="Top: S-VRT context" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=18;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="250" width="300" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="raw_in" value="1) Raw VRT ingress&#xa;x [B, T, 3+S, H, W]&#xa;RGB + spike bins packed on channel axis" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="300" width="270" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="split" value="2) Split dual input&#xa;rgb = x[:, :, :3, :, :] -&gt; [B, T, 3, H, W]&#xa;spike = x[:, :, 3:, :, :] -&gt; [B, T, S, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="360" y="300" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="adapter" value="3) EarlyFusionAdapter collapsed path&#xa;Receives structured tensors directly&#xa;Calls operator(rgb, spike) without time expansion&#xa;If spike H/W differs, optional SpikeUpsample aligns to RGB size first" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="760" y="285" width="380" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="operator_call" value="4) pase_residual output&#xa;fused_main = backbone_view = [B, T, 3, H, W]&#xa;aux_view = None" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1200" y="300" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="flow_align" value="5) VRT pre-backbone motion path&#xa;get_flows(x, flow_spike) on fused RGB stream&#xa;get_aligned_image_2frames(x, flows...)&#xa;x_backward / x_forward: [B, T, 12, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1560" y="285" width="340" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="backbone" value="6) Backbone input assembly&#xa;cat([x, x_backward, x_forward], dim=C)&#xa;[B, T, 27, H, W] when backbone_in_chans = 3&#xa;conv_first -&gt; stage1..stage8 -&gt; conv_last" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1560" y="455" width="340" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="residual_out" value="7) Restoration output&#xa;restored [B, T, 3, H, W]&#xa;final = restored + x_lq_rgb&#xa;output [B, T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1560" y="625" width="340" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="x_lq_rgb" value="Residual base for final add&#xa;x_lq_rgb = extract_rgb(raw input)&#xa;[B, T, 3, H, W]" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1170" y="630" width="300" height="95" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sep" value="" style="line;strokeWidth=2;strokeColor=#999999;" vertex="1" parent="1">
+          <mxGeometry x="40" y="770" width="1860" height="10" as="geometry" />
+        </mxCell>
+        <mxCell id="bottom_head" value="Bottom: pase_residual operator internals" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=18;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="800" width="430" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="op_contract" value="External operator contract&#xa;rgb_feat: [B, T, 3, H, W]&#xa;spike_feat: [B, T, S, H, W]&#xa;out: [B, T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="850" width="320" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="param_note" value="Key operator_params&#xa;feature_chans = F&#xa;hidden_chans controls PASE hidden width&#xa;kernel_size / normalize_kernel for PASE&#xa;alpha_init / gate_bias_init for conservative residual write-back" style="shape=note;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="380" y="845" width="340" height="130" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rgb_in" value="RGB input&#xa;rgb_feat [B, T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1030" width="240" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="spike_in" value="Spike input&#xa;spike_feat [B, T, S, H, W]&#xa;S = bins per RGB frame" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1160" width="240" height="90" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rgb_flat" value="1a) Flatten RGB frames&#xa;reshape -&gt; rgb_flat [B*T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="340" y="1025" width="280" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="spike_flat" value="1b) Flatten spike clips&#xa;reshape -&gt; spike_flat [B*T, S, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="340" y="1165" width="280" height="85" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rgb_ctx" value="2a) rgb_context_encoder&#xa;Conv3x3(3-&gt;F), ReLU&#xa;Conv3x3(F-&gt;F), ReLU&#xa;rgb_context [B*T, F, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="690" y="1010" width="300" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="pase" value="2b) PixelAdaptiveSpikeEncoder&#xa;PASE(in_chans=S, out_chans=F)&#xa;pase_feat [B*T, F, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="690" y="1150" width="300" height="115" as="geometry" />
+        </mxCell>
+
+        <mxCell id="sum" value="3) Feature fusion before body&#xa;rgb_context + pase_feat&#xa;[B*T, F, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1060" y="1085" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="body" value="4) fusion_body&#xa;Conv3x3(F-&gt;F), ReLU&#xa;Conv3x3(F-&gt;F), ReLU&#xa;fused [B*T, F, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1380" y="1070" width="280" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="delta" value="5a) delta head&#xa;Conv1x1(F-&gt;3)&#xa;delta_flat [B*T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1730" y="1000" width="240" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="gate" value="5b) gate head&#xa;Conv1x1(F-&gt;3)&#xa;gate_logits_flat [B*T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1730" y="1135" width="240" height="95" as="geometry" />
+        </mxCell>
+
+        <mxCell id="restore" value="6) Restore sequence layout&#xa;delta -&gt; [B, T, 3, H, W]&#xa;gate_logits -&gt; [B, T, 3, H, W]&#xa;gate = sigmoid(gate_logits)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1730" y="1280" width="240" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="alpha" value="Learned scale&#xa;alpha [1, 3, 1, 1]&#xa;broadcast over B,T,H,W" style="shape=note;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="1420" y="1285" width="240" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="update" value="7) Conservative residual write-back&#xa;effective_update = alpha * gate * delta&#xa;[B, T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="1100" y="1300" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="out" value="8) Final operator output&#xa;out = rgb_feat + effective_update&#xa;out [B, T, 3, H, W]" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="770" y="1310" width="250" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="raw_in" target="split">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="split" target="adapter">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="adapter" target="operator_call">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="operator_call" target="flow_align">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="flow_align" target="backbone">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="backbone" target="residual_out">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" value="extract_rgb" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;dashed=1;" edge="1" parent="1" source="raw_in" target="x_lq_rgb">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="180" y="690" />
+              <mxPoint x="1180" y="690" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e8" value="final residual add" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;dashed=1;" edge="1" parent="1" source="x_lq_rgb" target="residual_out">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="rgb_in" target="rgb_flat">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="spike_in" target="spike_flat">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="rgb_flat" target="rgb_ctx">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="spike_flat" target="pase">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="rgb_ctx" target="sum">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="pase" target="sum">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="sum" target="body">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e16" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="body" target="delta">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e17" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="body" target="gate">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e18" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="delta" target="restore">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e19" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="gate" target="restore">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e20" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="restore" target="update">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e21" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;dashed=1;" edge="1" parent="1" source="alpha" target="update">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e22" value="rgb passthrough base" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;dashed=1;" edge="1" parent="1" source="rgb_in" target="out">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="160" y="1350" />
+              <mxPoint x="760" y="1350" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e23" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;strokeWidth=2;" edge="1" parent="1" source="update" target="out">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e24" value="same operator as top band" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=open;endFill=0;strokeWidth=1;dashed=1;" edge="1" parent="1" source="operator_call" target="op_contract">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1350" y="520" />
+              <mxPoint x="1350" y="900" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

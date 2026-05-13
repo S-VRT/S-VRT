@@ -1,0 +1,5 @@
+cd henry/S-VRT/
+conda activate vrtspike
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+use_reentrant=False
+source launch_train.sh --prepare-data --generate-lmdb

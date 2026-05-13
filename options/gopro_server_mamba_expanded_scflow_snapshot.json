@@ -1,0 +1,872 @@
+{
+  // ========================================
+  // 基础配置
+  // ========================================
+  // 任务名称：用于标识当前训练任务，通常用于日志和模型保存路径
+  "task": "gopro_tfp4_scflow_mamba_expanded_dcn4"
+  // 模型类型：指定使用的模型架构，这里使用 VRT (Video Restoration Transformer)
+  ,
+  "model": "vrt"
+  // ========================================
+  // 分布式训练配置
+  // ========================================
+  // "dist": 分布式训练开关
+  //         - 从 WORLD_SIZE 环境变量自动检测
+  //         - 使用 torchrun 或平台 DDP 时会自动设置
+  //         - 手动设置会被自动检测覆盖
+  //         - 保留为 'true' 仅用于文档说明
+  //
+  // "gpu_ids": GPU 设备 ID 列表
+  //         - 单进程模式：指定使用的 GPU（例如 [0,1,2]）
+  //         - 分布式模式（DDP）：被忽略，设备由 torchrun/平台分配
+  //         - 单 GPU 训练使用 [0]
+  //         - CUDA_VISIBLE_DEVICES 的设置会自动处理
+  //
+  // 平台 DDP：平台会注入 RANK/LOCAL_RANK/WORLD_SIZE，运行方式：
+  //   python -u main_train_vrt.py --opt THIS_CONFIG.json
+  //
+  // 本地多 GPU：使用 torchrun，它会设置环境变量：
+  //   torchrun --nproc_per_node=N main_train_vrt.py --opt THIS_CONFIG.json
+  //
+  // 或使用提供的启动脚本：
+  //   ./launch_train.sh N THIS_CONFIG.json
+  // ========================================
+  // GPU 设备 ID 列表：指定使用的 GPU（分布式模式下会被忽略）
+  ,
+  "gpu_ids": [
+    0,
+    1,
+    2
+  ]
+  // 是否启用分布式训练：true 表示启用，会自动检测环境变量
+  ,
+  "dist": true
+  // 是否查找未使用的参数：false 表示不查找，可以提高训练速度
+  ,
+  "find_unused_parameters": true
+  // 是否使用静态图：true 表示使用静态图优化，可以提高训练效率
+  ,
+  "use_static_graph": false
+  // 图像缩放因子：1 表示不进行缩放（保持原始分辨率）
+  ,
+  "scale": 1
+  // 输出图像通道数：3 表示输出 RGB 三通道图像（GT 图像的通道数）
+  // 注意：netG.input.raw_ingress_chans / netG.in_chans 表示原始入口宽度
+  // 在 fusion 策略下，实际 backbone 通道数会先由 fusion.out_chans 收缩，再进入后续主干
+  ,
+  "n_channels": 3
+  // ========================================
+  // 路径配置
+  // ========================================
+  ,
+  "path": {
+    // 实验根目录：所有输出文件（模型、日志、图像等）的保存路径
+    "root": "experiments"
+    // 预训练的生成器（Generator）模型路径，支持三种模式：
+    //   - null：从头开始训练，不自动查找检查点
+    //   - "auto"：自动查找 models 目录中的最新检查点（用于恢复训练）
+    //   - "path/to/model.pth"：使用指定的预训练模型路径
+    ,
+    "pretrained_netG": "weights/vrt/006_VRT_videodeblurring_GoPro.pth"
+    // 预训练的编码器（Encoder）模型路径，支持三种模式：
+    //   - null：不使用预训练编码器，不自动查找检查点
+    //   - "auto"：自动查找 models 目录中的最新检查点（用于恢复训练）
+    //   - "path/to/model.pth"：使用指定的预训练模型路径
+    // 注意：E 模型是 EMA（指数移动平均）模型，测试时会优先使用 E 模型
+    ,
+    "pretrained_netE": null
+  }
+  // ========================================
+  // 数据集配置
+  // ========================================
+  ,
+  "datasets": {
+    // 训练数据集配置
+    "train": {
+      // 数据集名称：用于标识数据集
+      "name": "train_dataset"
+      // 数据集类型：TrainDatasetRGBSpike 表示支持 RGB 和 Spike 数据的视频循环训练数据集
+      ,
+      "dataset_type": "TrainDatasetRGBSpike"
+      // 真实标签（Ground Truth）数据路径：清晰视频帧的存储路径
+      ,
+      "dataroot_gt": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/train_GT"
+      // 低质量（Low Quality）数据路径：模糊视频帧的存储路径
+      ,
+      "dataroot_lq": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/train_GT_blurred"
+      // Spike 数据路径：Spike 序列数据的存储路径
+      ,
+      "dataroot_spike": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/train"
+      // Spike 数据高度：Spike 图像的高度（像素）
+      ,
+      "spike_h": 360
+      // Spike 数据宽度：Spike 图像的宽度（像素）
+      ,
+      "spike_w": 640
+      // Spike 配置文件：记录 Spike 相机配置与标注信息
+      ,
+      "spike_config": {
+        "path": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/config.yaml",
+        "spike_h": 360,
+        "spike_w": 640,
+        "is_labeled": false,
+        "labeled_data_type": [
+          0
+        ]
+      }
+      // Spike 重建 bin 数：legacy 字段名仍叫 spike_channels，但语义上仅表示 Spike 表征宽度
+      ,
+      "spike_channels": 4
+      ,
+      "input_pack_mode": "dual"
+      ,
+      "compat": {
+        "keep_legacy_L": true
+      }
+      ,
+      "keep_legacy_l": true
+      ,
+      "spike": {
+        "reconstruction": {
+          "type": "spikecv_tfp",
+          "num_bins": 4
+        },
+        "precomputed": {
+          "enable": true,
+          "root": "auto",
+          "format": "npy"
+        }
+      }
+      // Spike 重建配置：使用字典级配置项
+      ,
+      "spike_reconstruction": {
+        "type": "spikecv_tfp"
+      }
+      ,
+      "spike_flow": {
+        "representation": "encoding25",
+        "dt": 10,
+        "root": "auto",
+        "subframes": 4
+      }
+      // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
+      ,
+      "spike_flipud": true
+      ,
+      "tfp_device": "cpu"
+      ,
+      "tfp_devices": ["cuda:0","cuda:1","cuda:2","cuda:3"]
+      // 归一化设置：RGB 使用 ImageNet 均值方差，Spike 通道目前保持恒等缩放
+      ,
+      "rgb_normalize": null
+      ,
+      "spike_normalize": {
+        "mean": [0.0, 0.0, 0.0, 0.0],
+        "std": [1.0, 1.0, 1.0, 1.0]
+      }
+      // 元信息文件路径：包含数据集元信息的文本文件路径
+      ,
+      "meta_info_file": "data/meta_info/meta_info_GoPro_train_GT.txt"
+      // 文件名模板：用于匹配文件名的格式，"06d" 表示 6 位数字（如 000001.png）
+      ,
+      "filename_tmpl": "06d"
+      // 文件扩展名：图像文件的扩展名
+      ,
+      "filename_ext": "png"
+      // 是否为测试模式：false 表示训练模式
+      ,
+      "test_mode": false
+      // IO 后端配置：指定数据读取方式，"disk" 表示从磁盘读取
+      ,
+      "io_backend": {
+        "type": "lmdb"
+      }
+      // 缩放因子：1 表示不进行缩放
+      ,
+      "scale": 1
+      // 输入帧数：每个训练样本使用的视频帧数量
+      ,
+      "num_frame": 6
+      // 真实标签图像尺寸：支持单值或 [phase1, phase2]
+      ,
+      "gt_size": [192, 88]
+      // 帧间隔列表：采样视频帧时的间隔，[1] 表示连续帧
+      ,
+      "interval_list": [
+        1
+      ]
+      // 是否随机反转视频序列：false 表示不反转
+      ,
+      "random_reverse": false
+      // 是否使用水平翻转数据增强：true 表示使用
+      ,
+      "use_hflip": true
+      // 是否使用旋转数据增强：true 表示使用
+      ,
+      "use_rot": true
+      // 数据加载器配置
+      // 是否打乱数据顺序：true 表示每个 epoch 随机打乱数据
+      ,
+      "dataloader_shuffle": true
+      // 数据加载器工作进程数：用于并行加载数据的进程数
+      // 注意：在DDP模式下，每个GPU会创建 dataloader_num_workers // num_gpu 个worker
+      // 建议值：每个GPU 4-8个worker，3卡DDP建议设置为12-24
+      ,
+      "dataloader_num_workers": 32
+      // 批次大小：支持单值或 [phase1, phase2]
+      ,
+      "dataloader_batch_size": [32, 8]
+      // 预取因子：每个工作进程预取的批次数量
+      ,
+      "dataloader_prefetch_factor": 2
+      // 是否保持工作进程持久化：true 表示工作进程在 epoch 之间保持活跃，提高效率
+      ,
+      "dataloader_persistent_workers": true
+    }
+    // 测试数据集配置
+    ,
+    "test": {
+      // 数据集名称：用于标识测试数据集
+      "name": "test_dataset"
+      // 数据集类型：TestDataset 表示视频循环测试数据集
+      ,
+      "dataset_type": "TrainDatasetRGBSpike"
+      // 真实标签数据路径：测试集的清晰视频帧路径
+      ,
+      "dataroot_gt": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/test_GT"
+      // 低质量数据路径：测试集的模糊视频帧路径
+      ,
+      "dataroot_lq": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large/test_GT_blurred"
+      // Spike 数据路径：测试集的 Spike 序列数据路径
+      ,
+      "dataroot_spike": "/root/autodl-tmp/datasets/gopro_spike/GOPRO_Large_spike_seq/test"
+      // Spike 数据高度：Spike 图像的高度（像素）
+      // 测试集元信息文件：用于构建 clip/frame 索引
+      ,
+      "meta_info_file": "data/meta_info/meta_info_GoPro_test_GT.txt"
+      ,
+      "spike_h": 360
+      // Spike 数据宽度：Spike 图像的宽度（像素）
+      ,
+      "spike_w": 640
+      // Spike 重建 bin 数：legacy 字段名仍叫 spike_channels，但语义上仅表示 Spike 表征宽度
+      ,
+      "spike_channels": 4
+      ,
+      "input_pack_mode": "dual"
+      ,
+      "compat": {
+        "keep_legacy_L": true
+      }
+      ,
+      "keep_legacy_l": true
+      ,
+      "spike": {
+        "reconstruction": {
+          "type": "spikecv_tfp",
+          "num_bins": 4
+        },
+        "precomputed": {
+          "enable": true,
+          "root": "auto",
+          "format": "npy"
+        }
+      }
+      // Spike 重建配置：使用字典级配置项
+      ,
+      "spike_reconstruction": {
+        "type": "spikecv_tfp"
+      }
+      ,
+      "spike_flow": {
+        "representation": "encoding25",
+        "dt": 10,
+        "root": "auto",
+        "subframes": 4
+      }
+      // 是否对 Spike 数据进行上下翻转：true 表示进行翻转
+      ,
+      "spike_flipud": true
+      // 归一化设置（与训练保持一致）
+      ,
+      "rgb_normalize": null
+      ,
+      "spike_normalize": {
+        "mean": [0.0, 0.0, 0.0, 0.0],
+        "std": [1.0, 1.0, 1.0, 1.0]
+      }
+      // Spike TFP 重建窗口的半宽度：越大越平滑但越耗时
+      ,
+      "tfp_half_win_length": 20
+      // Spike TFP 重建设备：可以是 "cpu"、"cuda:0"、"auto"（自动匹配当前进程 GPU）
+      // 当同时配置 tfp_devices 时，这个字段将被忽略
+      ,
+      "tfp_device": "cpu"
+      // Spike TFP 多 GPU 设备列表：可选，配置后 DataLoader worker 会按 worker_id/LOCAL_RANK 轮询使用
+      // 例如 ["cuda:0","cuda:1","cuda:2"]；为空数组表示禁用多 GPU TFP
+      ,
+      "tfp_devices": ["cuda:0","cuda:1","cuda:2","cuda:3"]
+      // Spike 数据文件夹名称
+      ,
+      "spike_folder_name": "spike"
+      // Spike 数据文件扩展名
+      ,
+      "spike_filename_ext": "dat"
+      // 是否缓存数据：false 表示不缓存，每次从磁盘读取
+      ,
+      "cache_data": false
+      // IO 后端配置：指定数据读取方式
+      ,
+      "io_backend": {
+        "type": "lmdb"
+      }
+      // 输入帧数：-1 表示使用所有可用帧
+      ,
+      "num_frame": -1
+      // 数据加载器是否打乱：测试/验证通常不打乱
+      ,
+      "dataloader_shuffle": false
+      // 数据加载器工作进程数：可根据本地机器调整
+      // 注意：在DDP模式下，每个GPU会创建 dataloader_num_workers // num_gpu 个worker
+      // 建议值：每个GPU 4-8个worker，3卡DDP建议设置为12-24
+      ,
+      "dataloader_num_workers": 12
+      // 测试/验证批次大小：可根据显存调整
+      ,
+      "dataloader_batch_size": 2
+    }
+  }
+  // ========================================
+  // 生成器网络（Generator）配置
+  // ========================================
+  ,
+  "netG": {
+    // 网络类型：指定为 "vrt" (Video Restoration Transformer)
+    "net_type": "vrt"
+    ,
+    "input": {
+      "strategy": "fusion",
+      "mode": "dual",
+      "raw_ingress_chans": 7
+    }
+    ,
+    // concat 与 fusion 是并列输入策略；当前配置选择 fusion，因此 concat 留空
+    "concat": {}
+    ,
+    "fusion": {
+      "enable": true,
+      "placement": "early",
+      "operator": "mamba",
+      "mode": "replace",
+      "out_chans": 3,
+      "early": {
+        "frame_contract": "expanded"
+      },
+      "operator_params": {
+        "token_dim": 48,
+        "token_stride": 4,
+        "d_state": 32,
+        "d_conv": 4,
+        "expand": 2,
+        "num_layers": 3,
+        "mamba_amp_policy": "fp32",
+        "alpha_init": 0.05,
+        "gate_bias_init": -2.0,
+        "enable_diagnostics": false
+      },
+      "debug": {
+        "enable": false,
+        "save_images": true,
+        "trigger": "phase1_last",
+        "source": "train_batch",
+        "subdir": "fusion_phase1_last_train",
+        "max_batches": 1,
+        "max_frames": 24
+      }
+    }
+    ,
+    "input_mode": "dual"
+    ,
+    "output_mode": "restoration"
+    ,
+    "restoration_reducer": {
+      "type": "index",
+      "index": 4
+    }
+    ,
+    "spike_encoder": {
+      "enable": false,
+      "type": "pase",
+      "checkpoint": null,
+      "params": {}
+    }
+    // 原始入口宽度：RGB 3 + Spike 重建 bins 8 = 11
+    // 在 fusion 策略下，对齐前使用的是 raw ingress 宽度；进入 backbone 后会由 fusion.out_chans 决定主干宽度
+    ,
+    "in_chans": 7
+    // 上采样倍数：1 表示不进行上采样（保持原始分辨率）
+    ,
+    "upscale": 1
+    // 图像尺寸：[时间, 高度, 宽度]，[4,160,160] 表示 4 帧，每帧 160x160
+    ,
+    "img_size": [
+      6,
+      96,
+      96
+    ]
+    // 窗口大小：[时间, 高度, 宽度]，[4,8,8] 表示 4 帧时间窗口，8x8 空间窗口
+    ,
+    "window_size": [
+      6,
+      8,
+      8
+    ]
+    // 各层深度：每个 Transformer 块的层数，共 11 个块
+    // 前 7 个元素对应 stage1-7（每个深度为 8），后 4 个元素对应 stage8 中的 4 个 RTMSA 块（每个深度为 4）
+    // 注意：stage8 还有一个初始的 Linear 层（不计入 depths）
+    ,
+    "depths": [
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      8,
+      4,
+      4,
+      4,
+      4
+    ]
+    // 独立重建层索引：指定 depths 数组中哪些索引对应的层进行独立重建（不依赖其他帧）
+    // [9,10] 对应 depths[9] 和 depths[10]，即 stage8 中的第 3、4 个 RTMSA 块
+    // 这些层使用窗口大小 [1, window_size[1], window_size[2]] 而不是 [window_size[0], window_size[1], window_size[2]]
+    ,
+    "indep_reconsts": [
+      9,
+      10
+    ]
+    // 嵌入维度：每个 Transformer 块的嵌入维度
+    // 前 7 个元素对应 stage1-7（每个为 96），后 4 个元素对应 stage8 中的 4 个 RTMSA 块（每个为 120）
+    // 注意：stage8 的初始 Linear 层从 embed_dims[6] (96) 映射到 embed_dims[7] (120)
+    ,
+    "embed_dims": [
+      96,
+      96,
+      96,
+      96,
+      96,
+      96,
+      96,
+      120,
+      120,
+      120,
+      120
+    ]
+    // 注意力头数：每个 Transformer 块的注意力头数
+    ,
+    "num_heads": [
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6,
+      6
+    ]
+    // 光流模块配置：可选值 'spynet'、'sea_raft' 或 'scflow'。
+    ,
+    "optical_flow": {
+      "module": "scflow",
+      "checkpoint": "weights/optical_flow/dt10_e40.pth",
+      "params": {}
+    }
+    // 并行对齐帧数：用于对齐的并行帧数量（支持 2、4、6）
+    // 当 pa_frames=2 时，使用 get_flow_2frames 计算相邻帧之间的光流
+    // 注意：光流计算时只使用 RGB 通道（前 3 个通道），即使输入包含 Spike 通道
+    ,
+    "pa_frames": 2
+    // 可变形卷积组数：可变形对齐模块的组数
+    ,
+    // 可变形卷积类型：选择使用的可变形卷积实现（DCNv2 或 DCNv4）
+    //   - "DCNv2": 使用传统的 DCNv2 实现（默认）
+    //   - "DCNv4": 使用新的 DCNv4 实现（速度更快，性能更好）
+    "dcn_type": "DCNv4"
+    ,
+    // 当使用DCNv4时，启用DCNv4 + Softmax（更接近DCNv2行为）
+    "dcn_apply_softmax": false
+    ,
+    "deformable_groups": 16
+    // 是否为非盲去噪：false 表示盲去模糊（不知道模糊核）
+    ,
+    // PA fuse AMP policy: fp32 keeps current behavior; autocast follows the outer AMP context for A/B.
+    "pa_fuse_amp_policy": "fp32"
+    ,
+    "nonblind_denoising": false
+    // 梯度检查点配置（用于节省显存）
+    // 是否对注意力层使用梯度检查点：true 表示使用，可以节省显存但增加计算时间
+    // 使用 torch.checkpoint 来减少显存占用，但会增加约 20% 的计算时间
+    ,
+    "use_checkpoint_attn": true
+    // 是否对前馈网络使用梯度检查点：true 表示使用
+    ,
+    "use_checkpoint_ffn": true
+    // 不使用梯度检查点的注意力块索引：这些 depths 索引对应的块不使用梯度检查点
+    // [2,3,4] 对应 stage3、stage4、stage5 的注意力层
+    ,
+    "no_checkpoint_attn_blocks": [
+      2,
+      3,
+      4
+    ]
+    // 不使用梯度检查点的前馈网络块索引：这些 depths 索引对应的块不使用梯度检查点
+    // [1,2,3,4,5,9] 对应 stage2-6 和 stage8 中第 3 个 RTMSA 块的前馈网络
+    ,
+    "no_checkpoint_ffn_blocks": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      9
+    ],
+    // SGP (Scalable Granularity Perception) 配置：TriDet 风格的可选注意力替代
+    // 当 use_sgp=true 时，纯 self-attention 分支将使用 SGP 而不是标准注意力
+    "use_sgp": false
+    // SGP 窗口分支的主卷积核大小：默认 3
+    ,
+    "sgp_w": 3
+    // SGP 窗口分支的大卷积核倍数因子：实际核大小 = w * k，默认 3*3=9
+    ,
+    "sgp_k": 3
+    // SGP 瞬时分支的通道缩减比例：默认 4
+    ,
+    "sgp_reduction": 4
+    // SGP 是否使用窗口化后的数据：true 表示 SGP 接收窗口化后的 3D 数据 [B*nW, Wd*Wh*Ww, C]，false 表示使用 5D 数据 [B, D, H, W, C]
+    ,
+    "sgp_use_partitioned": true
+
+    // 初始化类型：网络参数的初始化方式，"default" 表示使用默认初始化
+    ,
+    "init_type": "default"
+    ,
+    "init_bn_type": "uniform"
+    ,
+    "init_gain": 0.2
+  }
+  // ========================================
+  // 训练配置
+  // ========================================
+  ,
+  "train": {
+    // 损失函数配置
+    // 生成器损失函数类型："charbonnier" 表示使用 Charbonnier 损失（L1 损失的平滑版本）
+    "G_lossfn_type": "charbonnier"
+    ,
+    "freeze_backbone": true
+    ,
+    "partial_load": true
+    ,
+    "phase2_lora_mode": true
+    ,
+    "use_lora": true
+    ,
+    "lora_rank": 8
+    ,
+    "lora_alpha": 16
+    ,
+    "lora_target_modules": [
+      "qkv",
+      "proj"
+    ]
+    // 生成器损失函数权重：损失函数的权重系数
+    ,
+    "G_lossfn_weight": 1.0
+    ,
+    "phase1_fusion_aux_loss_weight": 1.0
+    ,
+    "phase2_fusion_aux_loss_weight": 0.2
+    ,
+    "fusion_passthrough_loss_weight": 0.2
+    ,
+    "fusion_warmup": {
+      "head_only_iters": 800,
+      "passthrough_weight_start": 0.2,
+      "passthrough_weight_end": 0.0,
+      "update_penalty_weight": 0.01
+    }
+    // Charbonnier 损失的 epsilon 参数：用于平滑 L1 损失的小常数
+    ,
+    "G_charbonnier_eps": 1e-6
+    ,
+    "amp": {
+      "enable": true,
+      "dtype": "bfloat16"
+    }
+    // 随机种子：用于保证实验的可重复性
+    ,
+    "manual_seed": 19931005
+    // EMA（指数移动平均）配置
+    // EMA 衰减率：用于更新指数移动平均模型的衰减系数（0.999 表示保留 99.9% 的旧值）
+    ,
+    "E_decay": 0.999
+    // 优化器配置
+    // 生成器优化器类型："adam" 表示使用 Adam 优化器
+    ,
+    "G_optimizer_type": "adam"
+    // 生成器学习率：初始学习率
+    ,
+    "G_optimizer_lr": 2e-4
+    // Adam 优化器的 beta 参数：[beta1, beta2]，用于计算梯度的一阶和二阶矩估计
+    ,
+    "G_optimizer_betas": [
+      0.9,
+      0.99
+    ]
+    // 权重衰减（L2 正则化）系数：0 表示不使用权重衰减
+    ,
+    "G_optimizer_wd": 0
+    // 梯度裁剪阈值：null 表示不进行梯度裁剪
+    ,
+    "G_optimizer_clipgrad": null
+    // 是否重用优化器状态：true 表示在恢复训练时重用优化器状态
+    ,
+    "G_optimizer_reuse": true
+    // 固定参数配置（用于分阶段训练）
+    // 固定参数的迭代次数：在前 fix_iter 次迭代中，fix_keys 指定的参数保持固定
+    ,
+    "fix_iter": 4000
+    // 固定参数的学习率倍数：固定参数使用原始学习率乘以该倍数
+    ,
+    "fix_lr_mul": 0.1
+    // 需要固定的参数键：["spynet", "pa_deform"] 表示固定光流网络（SCFlow）和可变形对齐模块（DCNv4）
+    // 在前 fix_iter 次迭代中，这些模块的参数不会被更新，学习率会被乘以 fix_lr_mul
+    ,
+    "fix_keys": [
+      "spynet",
+      "pa_deform"
+    ]
+    // 学习率调度器配置
+    // 总迭代次数：训练的总迭代步数
+    ,
+    "total_iter": 10000
+    // 生成器学习率调度器类型："CosineAnnealingWarmRestarts" 表示带重启的余弦退火调度器
+    ,
+    "G_scheduler_type": "CosineAnnealingWarmRestarts"
+    // 调度器周期：余弦退火的周期长度（迭代次数）
+    ,
+    "G_scheduler_periods": 10000
+    // 最小学习率：学习率的下限
+    ,
+    "G_scheduler_eta_min": 1e-7
+    // 正则化配置
+    // 正交正则化步数：null 表示不使用正交正则化
+    ,
+    "G_regularizer_orthstep": null
+    // 裁剪正则化步数：null 表示不使用裁剪正则化
+    ,
+    "G_regularizer_clipstep": null
+    // 参数严格匹配配置
+    // 生成器参数严格匹配：true 表示加载预训练模型时严格匹配参数名称
+    ,
+    "G_param_strict": true
+    // 编码器参数严格匹配：true 表示加载预训练模型时严格匹配参数名称
+    ,
+    "E_param_strict": true
+    // 检查点配置
+    // 测试检查点间隔：每训练多少迭代进行一次测试评估
+    ,
+    "checkpoint_test": [4000, 6000, 8000, 10000]
+    // 模型保存检查点间隔：每训练多少迭代保存一次模型
+    ,
+    "checkpoint_save": 2000
+    // 打印检查点间隔：每训练多少迭代打印一次训练信息
+    ,
+    "checkpoint_print": 100
+    ,
+    "timing": {
+      "enable": false,
+      "sync_cuda": false
+    }
+    ,
+    "profiler": {
+      "enable": false,
+      "record_ranges": false,
+      "start_iter": 100,
+      "wait": 1,
+      "warmup": 1,
+      "active": 2,
+      "repeat": 1,
+      "ranks": [0],
+      "record_shapes": true,
+      "with_stack": false,
+      "profile_memory": true
+    }
+    // 混合精度训练开关：enable=true 时使用 autocast；float16 时启用 GradScaler
+    ,
+    "amp": {
+      "enable": true,
+      "dtype": "bfloat16"
+    }
+    ,
+    "compile": {
+      "enable": false,
+      "scope": "fusion_only",
+      "mode": "reduce-overhead",
+      "fullgraph": false,
+      "dynamic": true,
+      "backend": "inductor",
+      "fallback_on_error": true,
+      "checkpoint_compat": {
+        "enable": true,
+        "disable_ffn_blocks": [
+          0
+        ],
+        "disable_attn_blocks": []
+      }
+    }
+  }
+  // ========================================
+  // 运行时 CPU/Inductor 配置
+  // ========================================
+  ,
+  "runtime": {
+    "cpu": {
+      "torch_num_threads": 8,
+      "torch_num_interop_threads": 4,
+      "inductor_compile_threads": 16,
+      "omp_num_threads": 8,
+      "mkl_num_threads": 8,
+      "tmpdir": "/root/autodl-tmp/svrt_compile_tmp",
+      "inductor_cache_dir": "/root/autodl-tmp/svrt_inductor_cache"
+    }
+  }
+  // ========================================
+  // 验证（测试）配置
+  // ========================================
+  ,
+  "val": {
+    // 是否保存测试图像：false 表示不保存测试结果图像
+    "save_img": true
+    // 是否对序列进行填充：false 表示不填充
+    ,
+    "pad_seq": false
+    // 是否对序列进行翻转测试：false 表示不进行翻转测试（TTA - Test Time Augmentation）
+    ,
+    "flip_seq": false
+    // 是否只评估中心帧：false 表示评估所有帧
+    ,
+    "center_frame_only": false
+    // 测试时使用的帧数：18 表示测试时处理 18 帧视频
+    ,
+    "num_frame_testing": 12
+    // 测试时的重叠帧数：2 表示相邻测试窗口之间有 2 帧重叠（用于滑动窗口测试）
+    ,
+    "num_frame_overlapping": 2
+    // 测试时的补丁大小：160 表示将大图像分割成 160x160 的补丁进行测试
+    ,
+    "size_patch_testing": 96
+    // 测试时的补丁重叠大小：20 表示相邻测试补丁之间有 20 像素重叠（用于滑动窗口测试）
+    ,
+    "size_patch_overlapping": 24
+    // 测试时将多个空间补丁合并为一个 batch 推理；不改变补丁划分、重叠或指标计算
+    ,
+    "patch_batch_size": 2
+    // DDP 验证时把同一个样本的空间补丁分配到各 rank 推理，再 all-reduce 合并；rank0 负责保存和计分
+    ,
+    "distributed_patch_testing": true
+    // lazy flow 缓存模式：none=按需CPU裁剪后搬GPU，cpu_patch=CPU预缓存patch，gpu_clip=整段flow clip搬GPU后裁剪
+    ,
+    "lazy_flow_cache_mode": "gpu_clip"
+    // 兼容旧开关：未设置 lazy_flow_cache_mode 时才用它推导 none/cpu_patch
+    ,
+    "cache_flow_patches_cpu": false
+    // 验证阶段临时关闭 VRT checkpoint；训练阶段仍按 netG 配置使用 checkpoint
+    ,
+    "disable_checkpoint_during_validation": true
+    // 打印每个验证 clip 的 load/build/forward/accumulate/reduce 耗时
+    ,
+    "profile_patch_timing": true
+    // 混合精度验证开关：独立于训练，可单独控制推理显存/吞吐
+    ,
+    "amp": {
+      "enable": true,
+      "dtype": "float16"
+    }
+  }
+  // ========================================
+  // 日志记录配置
+  // ========================================
+  ,
+  "logging": {
+    // 是否使用 TensorBoard：true 表示启用 TensorBoard 日志记录
+    "use_tensorboard": true
+    // 是否使用 Weights & Biases (W&B)：true 表示启用 W&B 日志记录
+    ,
+    "use_wandb": true
+    // W&B API 密钥：用于身份验证的 API 密钥（注意：实际使用时建议使用环境变量）
+    ,
+    "wandb_api_key": "ae83599fc8904d8986df7ba9e6f3328e042dcfb2"
+    // W&B 项目名称：实验所属的 W&B 项目名称
+    ,
+    "wandb_project": "Deblur"
+    // W&B 实体（用户名或团队名）：null 表示使用默认实体
+    ,
+    "wandb_entity": null
+    // W&B 运行名称：用于标识当前训练运行的名称
+    ,
+    "wandb_name": "gopro_tfp4_scflow_mamba_tokenized_dcn4"
+    // W&B 模式：'online' 表示在线记录，'offline' 表示离线记录，null 表示根据 API key 自动判断
+    ,
+    "wandb_mode": "online"
+    // 是否使用 SwanLab：true 表示启用 SwanLab 日志记录（默认关闭）
+    ,
+    "use_swanlab": true
+    // SwanLab API 密钥：可填入字符串实现非交互式登录，也可留空使用环境变量
+    ,
+    "swanlab_api_key": "3kZbeukQu2WMZqtP4WWbr"
+    // SwanLab 项目名称：默认与任务名或 W&B 项目一致
+    ,
+    "swanlab_project": "S-VRT"
+    // SwanLab 工作空间：例如你的 SwanLab 用户名/团队名，默认自动推断
+    ,
+    "swanlab_workspace": null
+    // SwanLab 运行名称：用于区分不同实验
+    ,
+    "swanlab_name": "gopro_tfp4_scflow_mamba_tokenized_dcn4"
+    // SwanLab 实验描述：可选文本信息
+    ,
+    "swanlab_description": "early fusion mamba_tokenized + scflow"
+    // SwanLab 运行模式：可设置 cloud/offline/local；留空自动根据 API key 决定
+    ,
+    "swanlab_mode": null
+    // 是否启用 Logfire：true 表示启用 Logfire 日志上报
+    ,
+    "use_logfire": true
+    // Logfire Token：请替换为你的真实 token
+    ,
+    "logfire_token": "pylf_v1_us_tKLqw6SSVrXQtH7Ts1xDyG2vz2n0pCPRBScS1fbXTwMx"
+    // Logfire 项目名称：可用于区分项目
+    ,
+    "logfire_project_name": "Deblur"
+    // Logfire 服务名称：默认 s-vrt
+    ,
+    "logfire_service_name": "s-vrt"
+    // Logfire 环境名称：可用于区分 local/server
+    ,
+    "logfire_environment": "server"
+    // 是否将文本日志发送到 Logfire
+    ,
+    "logfire_log_text": true
+    // 是否将训练/验证标量指标发送到 Logfire
+    ,
+    "logfire_log_metrics": true
+    // 是否将计时指标发送到 Logfire
+    ,
+    "logfire_log_timings": true
+  }
+}
