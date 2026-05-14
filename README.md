@@ -43,6 +43,28 @@ If you do not use `uv`, install the project dependencies in your Python environm
 
 Optional CUDA extensions such as DCNv4 must be built only when the selected config requires them.
 
+## Model Weights
+
+Download the project checkpoint from Hugging Face:
+
+- Spk-VRT LoRA checkpoint: <https://huggingface.co/vlmbgnr/Spk-VRT_LoRA_10000_iter/tree/main>
+
+Place the downloaded Spk-VRT checkpoint files under:
+
+```text
+weights/SpkVRT/
+```
+
+The VRT GoPro video deblurring pretrained weight is hosted in the upstream VRT releases:
+
+- VRT releases: <https://github.com/JingyunLiang/VRT/releases>
+
+Download `006_VRT_videodeblurring_GoPro.pth` and place it under:
+
+```text
+weights/vrt/
+```
+
 ## Data Layout
 
 The expected GoPro + Spike layout is:
@@ -194,26 +216,3 @@ S-VRT/
 ├── tests/
 └── docs/
 ```
-
-## Citation
-
-If you use this repository, cite the original VRT work and any Spike/SCFlow components relevant to your experiment:
-
-```bibtex
-@article{liang2022vrt,
-  title={VRT: A Video Restoration Transformer},
-  author={Liang, Jingyun and Cao, Jiezhang and Fan, Yuchen and Zhang, Kai and Ranjan, Rakesh and Li, Yawei and Timofte, Radu and Van Gool, Luc},
-  journal={arXiv preprint arXiv:2201.12288},
-  year={2022}
-}
-```
-
-## Acknowledgements
-
-- [VRT](https://github.com/JingyunLiang/VRT)
-- [KAIR](https://github.com/cszn/KAIR)
-- SpikeCV and optical-flow components vendored or referenced in this repository
-
-## License
-
-This repository builds on KAIR/VRT components. Check the repository license and upstream component licenses before redistribution or commercial use.
