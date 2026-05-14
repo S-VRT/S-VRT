@@ -67,6 +67,10 @@ weights/vrt/
 
 ## Data Layout
 
+Download the GoPro Deblur Spike dataset from Hugging Face:
+
+- GoPro Deblur Spike dataset: <https://huggingface.co/datasets/vlmbgnr/GoPro_Deblur_Spk/tree/main>
+
 The expected GoPro + Spike layout is:
 
 ```text
