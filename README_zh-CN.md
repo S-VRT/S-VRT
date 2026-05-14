@@ -43,6 +43,28 @@ uv pip list >/dev/null
 
 DCNv4 等可选 CUDA 扩展只在所选配置需要时构建。
 
+## 模型权重
+
+项目 checkpoint 从 Hugging Face 下载：
+
+- Spk-VRT LoRA checkpoint：<https://huggingface.co/vlmbgnr/Spk-VRT_LoRA_10000_iter/tree/main>
+
+下载后将 Spk-VRT checkpoint 文件放到：
+
+```text
+weights/SpkVRT/
+```
+
+VRT GoPro 视频去模糊预训练权重位于上游 VRT releases：
+
+- VRT releases：<https://github.com/JingyunLiang/VRT/releases>
+
+请选择并下载 `006_VRT_videodeblurring_GoPro.pth`，然后放到：
+
+```text
+weights/vrt/
+```
+
 ## 数据目录
 
 GoPro + Spike 推荐结构：
@@ -194,26 +216,3 @@ S-VRT/
 ├── tests/
 └── docs/
 ```
-
-## 引用
-
-如果使用本仓库，请引用原始 VRT 工作，以及实验中使用到的 Spike/SCFlow 相关组件：
-
-```bibtex
-@article{liang2022vrt,
-  title={VRT: A Video Restoration Transformer},
-  author={Liang, Jingyun and Cao, Jiezhang and Fan, Yuchen and Zhang, Kai and Ranjan, Rakesh and Li, Yawei and Timofte, Radu and Van Gool, Luc},
-  journal={arXiv preprint arXiv:2201.12288},
-  year={2022}
-}
-```
-
-## 致谢
-
-- [VRT](https://github.com/JingyunLiang/VRT)
-- [KAIR](https://github.com/cszn/KAIR)
-- 本仓库 vendored 或引用的 SpikeCV 与 optical-flow 组件
-
-## 许可证
-
-本仓库基于 KAIR/VRT 组件构建。重新分发或商业使用前，请检查仓库许可证和上游组件许可证。
